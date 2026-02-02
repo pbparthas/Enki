@@ -157,6 +157,18 @@ CREATE TABLE IF NOT EXISTS tier_escalations (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Self-analysis: Enki's self-correction tracking
+CREATE TABLE IF NOT EXISTS enki_self_analysis (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    analysis_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    pattern_type TEXT,
+    description TEXT,
+    frequency INT,
+    impact TEXT,
+    correction TEXT,
+    effective INTEGER
+);
+
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_beads_project ON beads(project);
 CREATE INDEX IF NOT EXISTS idx_beads_type ON beads(type);

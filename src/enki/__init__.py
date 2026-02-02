@@ -35,6 +35,23 @@ from .persona import (
     generate_session_summary,
     extract_session_learnings,
 )
+from .evolution import (
+    SelfCorrection,
+    GateAdjustment,
+    init_evolution_log,
+    load_evolution_state,
+    save_evolution_state,
+    analyze_violation_patterns,
+    analyze_escalation_patterns,
+    check_correction_triggers,
+    create_self_correction,
+    add_gate_adjustment,
+    run_weekly_self_review,
+    is_review_due,
+    explain_block,
+    get_evolution_summary,
+    get_self_awareness_response,
+)
 
 __all__ = [
     # Database
@@ -104,4 +121,20 @@ __all__ = [
     "get_enki_greeting",
     "generate_session_summary",
     "extract_session_learnings",
+    # Evolution
+    "SelfCorrection",
+    "GateAdjustment",
+    "init_evolution_log",
+    "load_evolution_state",
+    "save_evolution_state",
+    "analyze_violation_patterns",
+    "analyze_escalation_patterns",
+    "check_correction_triggers",
+    "create_self_correction",
+    "add_gate_adjustment",
+    "run_weekly_self_review",
+    "is_review_due",
+    "explain_block",
+    "get_evolution_summary",
+    "get_self_awareness_response",
 ]

@@ -36,6 +36,18 @@ from .persona import (
     generate_session_summary,
     get_enki_greeting,
 )
+from .evolution import (
+    init_evolution_log,
+    analyze_violation_patterns,
+    analyze_escalation_patterns,
+    check_correction_triggers,
+    run_weekly_self_review,
+    get_evolution_summary,
+    explain_block,
+    get_self_awareness_response,
+    is_review_due,
+    get_last_review_date,
+)
 
 
 def cmd_init(args):
@@ -796,6 +808,119 @@ def cmd_decision_context(args):
     print(context)
 
 
+# === Evolution Commands ===
+
+def cmd_evolution_summary(args):
+    """Show evolution summary."""
+    project_path = Path(args.project) if args.project else None
+
+    summary = get_evolution_summary(project_path)
+    print(summary)
+
+
+def cmd_evolution_patterns(args):
+    """Show violation patterns."""
+    project_path = Path(args.project) if args.project else None
+
+    patterns = analyze_violation_patterns(days=args.days, project_path=project_path)
+
+    if not patterns:
+        print("No violation patterns found.")
+        return
+
+    print(f"Violation Patterns (last {args.days} days)")
+    print("=" * 40)
+    for p in patterns:
+        print(f"\nGate: {p['gate']} ({p['total']} violations)")
+        for reason in p.get('reasons', [])[:3]:
+            print(f"  - {reason['reason'][:50]}: {reason['count']}x")
+
+
+def cmd_evolution_triggers(args):
+    """Check for self-correction triggers."""
+    project_path = Path(args.project) if args.project else None
+
+    triggers = check_correction_triggers(project_path)
+
+    if not triggers:
+        print("No correction triggers detected.")
+        return
+
+    print("Self-Correction Triggers")
+    print("=" * 40)
+    for t in triggers:
+        print(f"\n{t['trigger'].upper()}")
+        print(f"  {t['suggestion']}")
+
+
+def cmd_evolution_review(args):
+    """Run weekly self-review."""
+    init_db()
+    project_path = Path(args.project) if args.project else None
+
+    print("Running Enki self-review...")
+    print()
+
+    report = run_weekly_self_review(project_path)
+
+    print(f"Review Date: {report['date']}")
+    print()
+
+    if report['violation_patterns']:
+        print(f"Violation Patterns: {len(report['violation_patterns'])}")
+        for p in report['violation_patterns'][:3]:
+            print(f"  - {p['gate']}: {p['total']} violations")
+
+    if report['escalation_patterns']:
+        print(f"\nEscalation Patterns: {len(report['escalation_patterns'])}")
+        for p in report['escalation_patterns'][:3]:
+            print(f"  - '{p['goal_pattern'][:30]}': {p['count']} escalations")
+
+    if report['corrections_made']:
+        print(f"\nCorrections Made: {len(report['corrections_made'])}")
+        for c in report['corrections_made']:
+            print(f"  - {c['correction']}")
+
+    if report['recommendations']:
+        print(f"\nRecommendations: {len(report['recommendations'])}")
+        for r in report['recommendations']:
+            print(f"  - {r['description']}")
+
+    if not any([report['violation_patterns'], report['escalation_patterns'],
+                report['corrections_made'], report['recommendations']]):
+        print("No significant patterns detected. Keep up the good work!")
+
+
+def cmd_evolution_explain(args):
+    """Explain a blocking decision."""
+    project_path = Path(args.project) if args.project else None
+
+    explanation = explain_block(args.gate, args.reason or "", project_path)
+    print(explanation)
+
+
+def cmd_evolution_ask(args):
+    """Ask Enki about her behavior."""
+    project_path = Path(args.project) if args.project else None
+
+    response = get_self_awareness_response(args.question, project_path)
+    print(response)
+
+
+def cmd_evolution_status(args):
+    """Check if review is due."""
+    project_path = Path(args.project) if args.project else None
+
+    last_review = get_last_review_date(project_path)
+    due = is_review_due(project_path)
+
+    print(f"Last Review: {last_review or 'Never'}")
+    print(f"Review Due: {'Yes' if due else 'No'}")
+
+    if due:
+        print("\nRun 'enki evolution review' to perform self-review.")
+
+
 def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(
@@ -1078,6 +1203,49 @@ def main():
     decision_context_parser.add_argument("topic", help="Decision topic")
     decision_context_parser.add_argument("-p", "--project", help="Project path")
     decision_context_parser.set_defaults(func=cmd_decision_context)
+
+    # === Evolution Commands ===
+    evolution_parser = subparsers.add_parser("evolution", help="Self-evolution management")
+    evolution_subparsers = evolution_parser.add_subparsers(dest="evolution_command")
+
+    # evolution summary
+    evolution_summary_parser = evolution_subparsers.add_parser("summary", help="Show evolution summary")
+    evolution_summary_parser.add_argument("-p", "--project", help="Project path")
+    evolution_summary_parser.set_defaults(func=cmd_evolution_summary)
+
+    # evolution patterns
+    evolution_patterns_parser = evolution_subparsers.add_parser("patterns", help="Show violation patterns")
+    evolution_patterns_parser.add_argument("-d", "--days", type=int, default=7, help="Days to look back")
+    evolution_patterns_parser.add_argument("-p", "--project", help="Project path")
+    evolution_patterns_parser.set_defaults(func=cmd_evolution_patterns)
+
+    # evolution triggers
+    evolution_triggers_parser = evolution_subparsers.add_parser("triggers", help="Check correction triggers")
+    evolution_triggers_parser.add_argument("-p", "--project", help="Project path")
+    evolution_triggers_parser.set_defaults(func=cmd_evolution_triggers)
+
+    # evolution review
+    evolution_review_parser = evolution_subparsers.add_parser("review", help="Run weekly self-review")
+    evolution_review_parser.add_argument("-p", "--project", help="Project path")
+    evolution_review_parser.set_defaults(func=cmd_evolution_review)
+
+    # evolution explain
+    evolution_explain_parser = evolution_subparsers.add_parser("explain", help="Explain a blocking decision")
+    evolution_explain_parser.add_argument("gate", help="Gate that blocked")
+    evolution_explain_parser.add_argument("-r", "--reason", help="Block reason")
+    evolution_explain_parser.add_argument("-p", "--project", help="Project path")
+    evolution_explain_parser.set_defaults(func=cmd_evolution_explain)
+
+    # evolution ask
+    evolution_ask_parser = evolution_subparsers.add_parser("ask", help="Ask about Enki's behavior")
+    evolution_ask_parser.add_argument("question", help="Your question")
+    evolution_ask_parser.add_argument("-p", "--project", help="Project path")
+    evolution_ask_parser.set_defaults(func=cmd_evolution_ask)
+
+    # evolution status
+    evolution_status_parser = evolution_subparsers.add_parser("status", help="Check if review is due")
+    evolution_status_parser.add_argument("-p", "--project", help="Project path")
+    evolution_status_parser.set_defaults(func=cmd_evolution_status)
 
     args = parser.parse_args()
 
