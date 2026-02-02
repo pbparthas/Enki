@@ -4,10 +4,18 @@ import argparse
 import sys
 import json
 
+from pathlib import Path
+
 from .db import init_db, get_db, DB_PATH, ENKI_DIR
 from .beads import create_bead, get_bead, star_bead, get_recent_beads
 from .search import search
 from .retention import maintain_wisdom
+from .session import (
+    start_session, get_session, get_phase, set_phase, get_tier, set_tier,
+    get_goal, set_goal, add_session_edit, get_session_edits,
+)
+from .enforcement import check_all_gates, detect_tier
+from .violations import get_violation_stats
 
 
 def cmd_init(args):
@@ -176,6 +184,149 @@ def cmd_maintain(args):
     print(f"  Superseded purged: {results['purged']}")
 
 
+# === Session Commands ===
+
+def cmd_session_start(args):
+    """Start a new session."""
+    init_db()
+    project_path = Path(args.project) if args.project else None
+
+    session = start_session(project_path, args.goal)
+
+    if args.json:
+        print(json.dumps({
+            "session_id": session.session_id,
+            "phase": session.phase,
+            "tier": session.tier,
+            "goal": session.goal,
+        }))
+    else:
+        print(f"Session started: {session.session_id}")
+        print(f"Phase: {session.phase}")
+        print(f"Tier: {session.tier}")
+        if session.goal:
+            print(f"Goal: {session.goal}")
+
+
+def cmd_session_status(args):
+    """Show session status."""
+    project_path = Path(args.project) if args.project else None
+
+    session = get_session(project_path)
+    if not session:
+        print("No active session")
+        sys.exit(1)
+
+    if args.json:
+        print(json.dumps({
+            "session_id": session.session_id,
+            "phase": session.phase,
+            "tier": session.tier,
+            "goal": session.goal,
+            "edits": session.edits,
+        }))
+    else:
+        print(f"Session: {session.session_id}")
+        print(f"Phase: {session.phase}")
+        print(f"Tier: {session.tier}")
+        print(f"Goal: {session.goal or '(none)'}")
+        print(f"Files edited: {len(session.edits)}")
+        if session.edits:
+            print("Recent edits:")
+            for f in session.edits[-5:]:
+                print(f"  - {f}")
+
+
+def cmd_session_set_phase(args):
+    """Set session phase."""
+    project_path = Path(args.project) if args.project else None
+
+    try:
+        set_phase(args.phase, project_path)
+        print(f"Phase set to: {args.phase}")
+    except ValueError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+
+def cmd_session_set_goal(args):
+    """Set session goal."""
+    project_path = Path(args.project) if args.project else None
+
+    set_goal(args.goal, project_path)
+    print(f"Goal set: {args.goal}")
+
+
+def cmd_session_track_edit(args):
+    """Track a file edit."""
+    project_path = Path(args.project) if args.project else None
+
+    edits = add_session_edit(args.file, project_path)
+
+    # Recalculate tier
+    old_tier = get_tier(project_path)
+    new_tier = detect_tier(project_path=project_path)
+
+    if new_tier != old_tier:
+        from .session import tier_escalated
+        from .violations import log_escalation, log_escalation_to_file
+
+        if tier_escalated(old_tier, new_tier):
+            log_escalation(old_tier, new_tier, project_path)
+            log_escalation_to_file(old_tier, new_tier, project_path)
+            print(f"ESCALATION: {old_tier} -> {new_tier}")
+
+        set_tier(new_tier, project_path)
+
+
+# === Gate Commands ===
+
+def cmd_gate_check(args):
+    """Check if a tool use is allowed."""
+    init_db()
+    project_path = Path(args.project) if args.project else None
+
+    result = check_all_gates(
+        tool=args.tool,
+        file_path=args.file if args.file else None,
+        agent_type=args.agent if args.agent else None,
+        project_path=project_path,
+    )
+
+    if args.json:
+        if result.allowed:
+            print(json.dumps({"decision": "allow"}))
+        else:
+            print(json.dumps({
+                "decision": "block",
+                "reason": result.reason,
+            }))
+    else:
+        if result.allowed:
+            print("ALLOWED")
+        else:
+            print(f"BLOCKED by gate: {result.gate}")
+            print(result.reason)
+            sys.exit(1)
+
+
+def cmd_gate_stats(args):
+    """Show gate violation statistics."""
+    init_db()
+
+    stats = get_violation_stats(days=args.days)
+
+    print(f"Violation Statistics (last {args.days} days)")
+    print("=" * 40)
+    print(f"Total violations: {stats['total_violations']}")
+    print(f"Override rate: {stats['override_rate']:.1%}")
+    print(f"Tier escalations: {stats['escalations']}")
+    print()
+    print("By gate:")
+    for gate, count in stats['by_gate'].items():
+        print(f"  {gate}: {count}")
+
+
 def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(
@@ -241,6 +392,59 @@ def main():
     # maintain
     maintain_parser = subparsers.add_parser("maintain", help="Run maintenance tasks")
     maintain_parser.set_defaults(func=cmd_maintain)
+
+    # === Session Commands ===
+    session_parser = subparsers.add_parser("session", help="Session management")
+    session_subparsers = session_parser.add_subparsers(dest="session_command")
+
+    # session start
+    session_start_parser = session_subparsers.add_parser("start", help="Start a new session")
+    session_start_parser.add_argument("-g", "--goal", help="Session goal")
+    session_start_parser.add_argument("-p", "--project", help="Project path")
+    session_start_parser.add_argument("--json", action="store_true", help="JSON output")
+    session_start_parser.set_defaults(func=cmd_session_start)
+
+    # session status
+    session_status_parser = session_subparsers.add_parser("status", help="Show session status")
+    session_status_parser.add_argument("-p", "--project", help="Project path")
+    session_status_parser.add_argument("--json", action="store_true", help="JSON output")
+    session_status_parser.set_defaults(func=cmd_session_status)
+
+    # session set-phase
+    session_phase_parser = session_subparsers.add_parser("set-phase", help="Set session phase")
+    session_phase_parser.add_argument("phase", choices=["intake", "debate", "plan", "implement", "review", "test", "ship"])
+    session_phase_parser.add_argument("-p", "--project", help="Project path")
+    session_phase_parser.set_defaults(func=cmd_session_set_phase)
+
+    # session set-goal
+    session_goal_parser = session_subparsers.add_parser("set-goal", help="Set session goal")
+    session_goal_parser.add_argument("goal", help="Session goal")
+    session_goal_parser.add_argument("-p", "--project", help="Project path")
+    session_goal_parser.set_defaults(func=cmd_session_set_goal)
+
+    # session track-edit
+    session_edit_parser = session_subparsers.add_parser("track-edit", help="Track a file edit")
+    session_edit_parser.add_argument("--file", required=True, help="File path")
+    session_edit_parser.add_argument("-p", "--project", help="Project path")
+    session_edit_parser.set_defaults(func=cmd_session_track_edit)
+
+    # === Gate Commands ===
+    gate_parser = subparsers.add_parser("gate", help="Gate enforcement")
+    gate_subparsers = gate_parser.add_subparsers(dest="gate_command")
+
+    # gate check
+    gate_check_parser = gate_subparsers.add_parser("check", help="Check if tool use is allowed")
+    gate_check_parser.add_argument("--tool", required=True, help="Tool name")
+    gate_check_parser.add_argument("--file", help="File path")
+    gate_check_parser.add_argument("--agent", help="Agent type")
+    gate_check_parser.add_argument("-p", "--project", help="Project path")
+    gate_check_parser.add_argument("--json", action="store_true", help="JSON output")
+    gate_check_parser.set_defaults(func=cmd_gate_check)
+
+    # gate stats
+    gate_stats_parser = gate_subparsers.add_parser("stats", help="Show violation statistics")
+    gate_stats_parser.add_argument("-d", "--days", type=int, default=7, help="Days to look back")
+    gate_stats_parser.set_defaults(func=cmd_gate_stats)
 
     args = parser.parse_args()
 

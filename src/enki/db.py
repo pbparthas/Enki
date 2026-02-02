@@ -131,6 +131,32 @@ CREATE TRIGGER IF NOT EXISTS beads_au AFTER UPDATE ON beads BEGIN
     VALUES (new.rowid, new.content, new.summary, new.tags);
 END;
 
+-- Violations: gate enforcement logs
+CREATE TABLE IF NOT EXISTS violations (
+    id TEXT PRIMARY KEY,
+    session_id TEXT,
+    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+    gate TEXT NOT NULL,
+    tool TEXT NOT NULL,
+    file_path TEXT,
+    phase TEXT,
+    tier TEXT,
+    reason TEXT,
+    was_overridden INTEGER DEFAULT 0
+);
+
+-- Tier escalations: when Claude's work grows beyond initial tier
+CREATE TABLE IF NOT EXISTS tier_escalations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT,
+    initial_tier TEXT NOT NULL,
+    final_tier TEXT NOT NULL,
+    files_at_escalation INT,
+    lines_at_escalation INT,
+    goal TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_beads_project ON beads(project);
 CREATE INDEX IF NOT EXISTS idx_beads_type ON beads(type);
@@ -139,6 +165,9 @@ CREATE INDEX IF NOT EXISTS idx_beads_weight ON beads(weight);
 CREATE INDEX IF NOT EXISTS idx_access_log_bead ON access_log(bead_id);
 CREATE INDEX IF NOT EXISTS idx_interceptions_session ON interceptions(session_id);
 CREATE INDEX IF NOT EXISTS idx_interceptions_result ON interceptions(result);
+CREATE INDEX IF NOT EXISTS idx_violations_session ON violations(session_id);
+CREATE INDEX IF NOT EXISTS idx_violations_gate ON violations(gate);
+CREATE INDEX IF NOT EXISTS idx_escalations_session ON tier_escalations(session_id);
 """
 
 
