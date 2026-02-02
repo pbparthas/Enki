@@ -13,6 +13,11 @@ from .enforcement import (
     check_all_gates, detect_tier, is_impl_file, GateResult,
 )
 from .violations import log_violation, log_escalation, log_escalation_to_file
+from .persona import (
+    build_session_start_injection,
+    get_enki_greeting,
+    generate_session_summary,
+)
 
 
 @dataclass
@@ -153,6 +158,14 @@ def handle_session_start(
         "edits": session.edits,
     }
 
+    # Build Enki's context injection
+    try:
+        context["enki_greeting"] = get_enki_greeting(project_path)
+        context["enki_context"] = build_session_start_injection(project_path)
+    except Exception:
+        context["enki_greeting"] = "What shall we work on?"
+        context["enki_context"] = ""
+
     # Search for relevant beads if goal provided
     if goal:
         try:
@@ -170,6 +183,50 @@ def handle_session_start(
             pass
 
     return context
+
+
+def handle_session_end(project_path: Optional[Path] = None) -> dict:
+    """Handle session end hook.
+
+    Generates session summary and extracts learnings.
+
+    Args:
+        project_path: Project path
+
+    Returns:
+        Dict with summary and learnings
+    """
+    from .persona import generate_session_summary, extract_session_learnings
+    from .beads import create_bead
+    from .session import get_session
+
+    session = get_session(project_path)
+    if not session:
+        return {"summary": "No active session."}
+
+    summary = generate_session_summary(project_path)
+    learnings = extract_session_learnings(project_path)
+
+    # Optionally store learnings as beads
+    stored_learnings = []
+    for learning in learnings:
+        try:
+            bead = create_bead(
+                content=learning["content"],
+                bead_type=learning["type"],
+                project=project_path.name if project_path else None,
+                context=f"Session {session.session_id}",
+                tags=[learning.get("category", "session")],
+            )
+            stored_learnings.append(bead.id)
+        except Exception:
+            pass
+
+    return {
+        "summary": summary,
+        "learnings_extracted": len(learnings),
+        "learnings_stored": stored_learnings,
+    }
 
 
 def parse_hook_input(stdin_data: str) -> dict:

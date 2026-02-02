@@ -25,6 +25,16 @@ from .orchestrator import (
     escalate_to_hitl, resolve_hitl, check_hitl_required,
     get_full_orchestration_status, get_next_action,
 )
+from .persona import (
+    PersonaContext,
+    get_persona_context,
+    build_session_start_injection,
+    build_error_context_injection,
+    build_decision_context,
+    get_enki_greeting,
+    generate_session_summary,
+    extract_session_learnings,
+)
 
 __all__ = [
     # Database
@@ -85,4 +95,13 @@ __all__ = [
     "check_hitl_required",
     "get_full_orchestration_status",
     "get_next_action",
+    # Persona
+    "PersonaContext",
+    "get_persona_context",
+    "build_session_start_injection",
+    "build_error_context_injection",
+    "build_decision_context",
+    "get_enki_greeting",
+    "generate_session_summary",
+    "extract_session_learnings",
 ]

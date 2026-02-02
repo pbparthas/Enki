@@ -29,6 +29,13 @@ from .orchestrator import (
     get_full_orchestration_status, get_next_action,
     AGENTS,
 )
+from .persona import (
+    build_session_start_injection,
+    build_error_context_injection,
+    build_decision_context,
+    generate_session_summary,
+    get_enki_greeting,
+)
 
 
 def cmd_init(args):
@@ -747,6 +754,48 @@ def cmd_agents(args):
         print()
 
 
+# === Persona Commands ===
+
+def cmd_context(args):
+    """Show Enki's context injection."""
+    project_path = Path(args.project) if args.project else None
+
+    context = build_session_start_injection(project_path)
+    print(context)
+
+
+def cmd_greeting(args):
+    """Show Enki's greeting."""
+    project_path = Path(args.project) if args.project else None
+
+    greeting = get_enki_greeting(project_path)
+    print(greeting)
+
+
+def cmd_summary(args):
+    """Show session summary."""
+    project_path = Path(args.project) if args.project else None
+
+    summary = generate_session_summary(project_path)
+    print(summary)
+
+
+def cmd_error_context(args):
+    """Show context for an error."""
+    project_path = Path(args.project) if args.project else None
+
+    context = build_error_context_injection(args.error, project_path)
+    print(context)
+
+
+def cmd_decision_context(args):
+    """Show context for a decision."""
+    project_path = Path(args.project) if args.project else None
+
+    context = build_decision_context(args.topic, project_path)
+    print(context)
+
+
 def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(
@@ -1000,6 +1049,35 @@ def main():
     # agents
     agents_parser = subparsers.add_parser("agents", help="List available agents")
     agents_parser.set_defaults(func=cmd_agents)
+
+    # === Persona Commands ===
+
+    # context
+    context_parser = subparsers.add_parser("context", help="Show Enki's context injection")
+    context_parser.add_argument("-p", "--project", help="Project path")
+    context_parser.set_defaults(func=cmd_context)
+
+    # greeting
+    greeting_parser = subparsers.add_parser("greeting", help="Show Enki's greeting")
+    greeting_parser.add_argument("-p", "--project", help="Project path")
+    greeting_parser.set_defaults(func=cmd_greeting)
+
+    # summary
+    summary_parser = subparsers.add_parser("summary", help="Show session summary")
+    summary_parser.add_argument("-p", "--project", help="Project path")
+    summary_parser.set_defaults(func=cmd_summary)
+
+    # error-context
+    error_context_parser = subparsers.add_parser("error-context", help="Show context for an error")
+    error_context_parser.add_argument("error", help="Error text")
+    error_context_parser.add_argument("-p", "--project", help="Project path")
+    error_context_parser.set_defaults(func=cmd_error_context)
+
+    # decision-context
+    decision_context_parser = subparsers.add_parser("decision-context", help="Show context for a decision")
+    decision_context_parser.add_argument("topic", help="Decision topic")
+    decision_context_parser.add_argument("-p", "--project", help="Project path")
+    decision_context_parser.set_defaults(func=cmd_decision_context)
 
     args = parser.parse_args()
 
