@@ -68,6 +68,16 @@ from .ereshkigal import (
     get_interception_stats,
     get_recent_interceptions,
     generate_weekly_report,
+    # Phase 8: External Pattern Evolution
+    get_last_review_date,
+    save_review_date,
+    is_review_overdue,
+    get_review_reminder,
+    find_evasions_with_bugs,
+    generate_fresh_claude_prompt,
+    generate_review_checklist,
+    complete_review,
+    get_report_summary,
 )
 
 __all__ = [
@@ -170,4 +180,14 @@ __all__ = [
     "get_interception_stats",
     "get_recent_interceptions",
     "generate_weekly_report",
+    # Phase 8: External Pattern Evolution
+    "get_last_review_date",
+    "save_review_date",
+    "is_review_overdue",
+    "get_review_reminder",
+    "find_evasions_with_bugs",
+    "generate_fresh_claude_prompt",
+    "generate_review_checklist",
+    "complete_review",
+    "get_report_summary",
 ]

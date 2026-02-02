@@ -658,3 +658,348 @@ def generate_weekly_report(days: int = 7) -> str:
     lines.append("*made by a fresh Claude session with no project context.*")
 
     return "\n".join(lines)
+
+
+# === Phase 8: External Pattern Evolution ===
+
+def get_last_review_date() -> Optional[datetime]:
+    """Get the date of the last Ereshkigal review.
+
+    Returns:
+        Datetime of last review, or None if never reviewed
+    """
+    review_file = Path.home() / ".enki" / "last_ereshkigal_review"
+
+    if not review_file.exists():
+        return None
+
+    try:
+        date_str = review_file.read_text().strip()
+        return datetime.fromisoformat(date_str)
+    except (ValueError, OSError):
+        return None
+
+
+def save_review_date() -> None:
+    """Save the current date as the last review date."""
+    review_file = Path.home() / ".enki" / "last_ereshkigal_review"
+    review_file.parent.mkdir(parents=True, exist_ok=True)
+    review_file.write_text(datetime.now().isoformat())
+
+
+def is_review_overdue(days: int = 7) -> bool:
+    """Check if Ereshkigal review is overdue.
+
+    Args:
+        days: Number of days between reviews
+
+    Returns:
+        True if review is overdue
+    """
+    last_review = get_last_review_date()
+
+    if last_review is None:
+        return True
+
+    days_since = (datetime.now() - last_review).days
+    return days_since >= days
+
+
+def get_review_reminder() -> Optional[str]:
+    """Get a reminder message if review is overdue.
+
+    Returns:
+        Reminder message or None if not overdue
+    """
+    if not is_review_overdue():
+        return None
+
+    last_review = get_last_review_date()
+    stats = get_interception_stats(days=7)
+
+    if last_review:
+        days_ago = (datetime.now() - last_review).days
+        last_str = f"{days_ago} days ago"
+    else:
+        last_str = "Never"
+
+    return (
+        f"Ereshkigal Weekly Review Due\n"
+        f"\n"
+        f"Last review: {last_str}\n"
+        f"Blocked: {stats['blocked']} | "
+        f"Allowed: {stats['allowed']} | "
+        f"FPs: {stats['false_positives']}\n"
+        f"\n"
+        f"Run: enki report weekly"
+    )
+
+
+def find_evasions_with_bugs(days: int = 30) -> list[dict]:
+    """Find allowed interceptions that correlate with later bugs.
+
+    This identifies patterns that should have blocked but didn't.
+    Links interceptions to bugs from the same session.
+
+    Args:
+        days: Number of days to look back
+
+    Returns:
+        List of evasion records with bug information
+    """
+    db = get_db()
+    evasions = []
+
+    try:
+        # Find allowed interceptions in sessions that later had bugs
+        # This requires the orchestrator's bugs to be in the same session
+        results = db.execute("""
+            SELECT DISTINCT
+                i.id as interception_id,
+                i.reasoning,
+                i.tool,
+                i.session_id,
+                i.timestamp
+            FROM interceptions i
+            WHERE i.result = 'allowed'
+            AND i.timestamp > datetime('now', ?)
+            AND EXISTS (
+                SELECT 1 FROM violations v
+                WHERE v.session_id = i.session_id
+                AND v.timestamp > i.timestamp
+            )
+            ORDER BY i.timestamp DESC
+            LIMIT 20
+        """, (f"-{days} days",)).fetchall()
+
+        for row in results:
+            evasions.append({
+                "interception_id": row["interception_id"],
+                "reasoning": row["reasoning"],
+                "tool": row["tool"],
+                "session_id": row["session_id"],
+                "timestamp": row["timestamp"],
+                "correlation": "Violations occurred after this was allowed",
+            })
+
+    except Exception:
+        pass
+
+    return evasions
+
+
+def generate_fresh_claude_prompt(days: int = 7) -> str:
+    """Generate a prompt for a fresh Claude session to analyze patterns.
+
+    This prompt should be copied to a NEW Claude session (no project context)
+    to get unbiased pattern recommendations.
+
+    Args:
+        days: Number of days of data to include
+
+    Returns:
+        Prompt text for fresh Claude
+    """
+    stats = get_interception_stats(days)
+    blocked = get_recent_interceptions(result="blocked", limit=10)
+    evasions = find_evasions_with_bugs(days)
+
+    prompt = [
+        "# Ereshkigal Pattern Analysis Request",
+        "",
+        "I need you to analyze violation data from my project and propose",
+        "pattern updates for my regex-based code review interceptor.",
+        "",
+        "## Current Statistics",
+        f"- Total attempts: {stats['total']}",
+        f"- Blocked: {stats['blocked']}",
+        f"- Allowed: {stats['allowed']}",
+        f"- False positives: {stats['false_positives']}",
+        "",
+    ]
+
+    # Add blocked attempts that might show patterns
+    if blocked:
+        prompt.append("## Recent Blocked Attempts (correctly blocked)")
+        prompt.append("")
+        for b in blocked:
+            reasoning = b.get("reasoning", "")[:100]
+            pattern = b.get("pattern", "unknown")
+            prompt.append(f"- Reasoning: \"{reasoning}\"")
+            prompt.append(f"  Matched: `{pattern}`")
+            prompt.append("")
+
+    # Add evasions that should have been blocked
+    if evasions:
+        prompt.append("## Evasions That Caused Issues (should have blocked)")
+        prompt.append("")
+        for e in evasions:
+            reasoning = e.get("reasoning", "")[:100]
+            prompt.append(f"- Reasoning: \"{reasoning}\"")
+            prompt.append(f"  Note: {e.get('correlation', 'Issues followed')}")
+            prompt.append("")
+
+    # Add allowed attempts for review
+    allowed = get_recent_interceptions(result="allowed", limit=5)
+    if allowed:
+        prompt.append("## Recent Allowed Attempts (for review)")
+        prompt.append("")
+        for a in allowed:
+            reasoning = a.get("reasoning", "")[:100]
+            prompt.append(f"- \"{reasoning}\"")
+        prompt.append("")
+
+    prompt.extend([
+        "## Current Pattern Categories",
+        "",
+        "1. **skip_patterns**: Catches attempts to skip process",
+        "2. **minimize_patterns**: Catches downplaying language",
+        "3. **urgency_patterns**: Catches urgency manipulation",
+        "4. **certainty_patterns**: Catches overconfidence",
+        "",
+        "## Your Task",
+        "",
+        "1. Analyze the evasions - what language patterns did they use?",
+        "2. Propose new regex patterns to catch these evasions",
+        "3. Identify any false positives that suggest patterns are too broad",
+        "4. Suggest refinements to existing patterns",
+        "",
+        "Format your response as:",
+        "```",
+        "## Proposed New Patterns",
+        "- Category: pattern | Reason",
+        "",
+        "## Pattern Refinements",
+        "- Old: pattern | New: refined_pattern | Reason",
+        "",
+        "## Patterns to Remove (if any)",
+        "- pattern | Reason for removal",
+        "```",
+        "",
+        "Be specific with regex syntax. Patterns are case-insensitive.",
+    ])
+
+    return "\n".join(prompt)
+
+
+def generate_review_checklist(output_path: Optional[Path] = None) -> str:
+    """Generate a human review checklist.
+
+    Args:
+        output_path: Optional path to write checklist
+
+    Returns:
+        Checklist content
+    """
+    last_review = get_last_review_date()
+    last_str = last_review.strftime("%Y-%m-%d") if last_review else "Never"
+
+    checklist = f"""# Ereshkigal Weekly Pattern Review
+
+**Date**: {datetime.now().strftime("%Y-%m-%d")}
+**Last Review**: {last_str}
+
+## Checklist
+
+### 1. Generate Report
+```bash
+enki report weekly
+```
+- [ ] Review blocked attempts - were they correct?
+- [ ] Check false positive rate
+- [ ] Note any patterns with low accuracy
+
+### 2. Identify Evasions
+```bash
+enki report evasions
+```
+- [ ] Review allowed attempts that later caused issues
+- [ ] Note the language patterns used in evasions
+
+### 3. Get Pattern Recommendations
+```bash
+enki report prompt > /tmp/pattern-prompt.md
+```
+- [ ] Open a NEW Claude session (no project context)
+- [ ] Paste the prompt
+- [ ] Review proposed patterns critically
+- [ ] Check for overly broad patterns that could cause false positives
+
+### 4. Update Patterns
+```bash
+# Add new patterns
+enki ereshkigal add "pattern" -c category_name
+
+# Remove problematic patterns
+enki ereshkigal remove "pattern" -c category_name
+
+# Verify changes
+enki ereshkigal patterns
+```
+- [ ] Add approved new patterns
+- [ ] Remove or refine problematic patterns
+- [ ] Test with sample reasoning
+
+### 5. Mark Interceptions
+```bash
+# View recent interceptions
+enki ereshkigal recent -r blocked
+
+# Mark false positives
+enki ereshkigal mark-fp <interception_id> -n "reason"
+
+# Confirm legitimate blocks
+enki ereshkigal mark-legit <interception_id>
+```
+- [ ] Mark false positives for tracking
+- [ ] Confirm legitimate blocks
+
+### 6. Complete Review
+```bash
+enki report complete
+```
+- [ ] Save review date
+- [ ] Patterns updated and tested
+
+## Notes
+
+(Add any observations or decisions made during this review)
+
+---
+
+*Remember: Pattern proposals come from a FRESH Claude session.*
+*Project Claude must never influence pattern evolution.*
+"""
+
+    if output_path:
+        output_path.write_text(checklist)
+
+    return checklist
+
+
+def complete_review() -> None:
+    """Mark the review as complete and save the date."""
+    save_review_date()
+
+
+def get_report_summary() -> str:
+    """Get a one-line summary of the current state.
+
+    Returns:
+        Summary string
+    """
+    stats = get_interception_stats(days=7)
+    last_review = get_last_review_date()
+
+    if last_review:
+        days_ago = (datetime.now() - last_review).days
+        review_str = f"reviewed {days_ago}d ago"
+    else:
+        review_str = "never reviewed"
+
+    return (
+        f"Ereshkigal: {stats['blocked']} blocked, "
+        f"{stats['allowed']} allowed, "
+        f"{stats['false_positives']} FPs, "
+        f"{review_str}"
+    )

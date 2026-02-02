@@ -23,6 +23,16 @@ from enki.ereshkigal import (
     generate_weekly_report,
     DEFAULT_PATTERNS,
     InterceptionResult,
+    # Phase 8
+    get_last_review_date,
+    save_review_date,
+    is_review_overdue,
+    get_review_reminder,
+    find_evasions_with_bugs,
+    generate_fresh_claude_prompt,
+    generate_review_checklist,
+    complete_review,
+    get_report_summary,
 )
 
 
@@ -509,3 +519,192 @@ class TestDefaultPatterns:
         for phrase in good_phrases:
             result = would_block(phrase, temp_patterns)
             assert result is None, f"Should not catch: {phrase}"
+
+
+# === Phase 8: External Pattern Evolution Tests ===
+
+class TestReviewTracking:
+    """Tests for review date tracking."""
+
+    def test_is_review_overdue_when_never_reviewed(self, tmp_path, monkeypatch):
+        """Test review is overdue when never reviewed."""
+        # Point to temp directory
+        monkeypatch.setattr("enki.ereshkigal.Path.home", lambda: tmp_path)
+
+        assert is_review_overdue() is True
+
+    def test_save_and_get_review_date(self, tmp_path, monkeypatch):
+        """Test saving and getting review date."""
+        monkeypatch.setattr("enki.ereshkigal.Path.home", lambda: tmp_path)
+
+        # Save review date
+        save_review_date()
+
+        # Get it back
+        date = get_last_review_date()
+        assert date is not None
+
+    def test_is_review_not_overdue_after_save(self, tmp_path, monkeypatch):
+        """Test review is not overdue right after saving."""
+        monkeypatch.setattr("enki.ereshkigal.Path.home", lambda: tmp_path)
+
+        save_review_date()
+        assert is_review_overdue() is False
+
+    def test_get_review_reminder_when_overdue(self, tmp_path, monkeypatch, temp_project):
+        """Test getting reminder when review is overdue."""
+        monkeypatch.setattr("enki.ereshkigal.Path.home", lambda: tmp_path)
+
+        reminder = get_review_reminder()
+        assert reminder is not None
+        assert "Weekly Review Due" in reminder
+
+    def test_get_review_reminder_when_not_overdue(self, tmp_path, monkeypatch, temp_project):
+        """Test no reminder when review is not overdue."""
+        monkeypatch.setattr("enki.ereshkigal.Path.home", lambda: tmp_path)
+
+        save_review_date()
+        reminder = get_review_reminder()
+        assert reminder is None
+
+    def test_complete_review(self, tmp_path, monkeypatch):
+        """Test completing a review."""
+        monkeypatch.setattr("enki.ereshkigal.Path.home", lambda: tmp_path)
+
+        complete_review()
+        assert is_review_overdue() is False
+
+
+class TestEvasionDetection:
+    """Tests for evasion detection."""
+
+    def test_find_evasions_empty(self, temp_project):
+        """Test finding evasions when none exist."""
+        evasions = find_evasions_with_bugs(days=30)
+        assert evasions == []
+
+    def test_find_evasions_structure(self, temp_project, temp_patterns):
+        """Test evasion structure when found."""
+        init_patterns(temp_patterns)
+
+        # Create some interceptions (even if no bugs correlate)
+        intercept(
+            tool="Edit",
+            reasoning="Proper work here",
+            session_id="test",
+            patterns_file=temp_patterns,
+        )
+
+        # The result should be a list (possibly empty)
+        evasions = find_evasions_with_bugs(days=30)
+        assert isinstance(evasions, list)
+
+
+class TestFreshClaudePrompt:
+    """Tests for fresh Claude prompt generation."""
+
+    def test_generate_prompt(self, temp_project, temp_patterns):
+        """Test generating analysis prompt."""
+        init_patterns(temp_patterns)
+
+        # Create some data
+        intercept(
+            tool="Edit",
+            reasoning="Quick fix",
+            session_id="test",
+            patterns_file=temp_patterns,
+        )
+
+        prompt = generate_fresh_claude_prompt(days=7)
+
+        assert isinstance(prompt, str)
+        assert "Pattern Analysis Request" in prompt
+        assert "Current Statistics" in prompt
+        assert "Your Task" in prompt
+
+    def test_prompt_includes_statistics(self, temp_project, temp_patterns):
+        """Test prompt includes statistics."""
+        init_patterns(temp_patterns)
+
+        prompt = generate_fresh_claude_prompt(days=7)
+
+        assert "Total attempts:" in prompt
+        assert "Blocked:" in prompt
+        assert "Allowed:" in prompt
+
+    def test_prompt_includes_pattern_categories(self, temp_project, temp_patterns):
+        """Test prompt explains pattern categories."""
+        init_patterns(temp_patterns)
+
+        prompt = generate_fresh_claude_prompt(days=7)
+
+        assert "skip_patterns" in prompt
+        assert "minimize_patterns" in prompt
+        assert "urgency_patterns" in prompt
+        assert "certainty_patterns" in prompt
+
+
+class TestReviewChecklist:
+    """Tests for review checklist generation."""
+
+    def test_generate_checklist(self, temp_project, tmp_path, monkeypatch):
+        """Test generating review checklist."""
+        monkeypatch.setattr("enki.ereshkigal.Path.home", lambda: tmp_path)
+
+        checklist = generate_review_checklist()
+
+        assert isinstance(checklist, str)
+        assert "Weekly Pattern Review" in checklist
+        assert "Checklist" in checklist
+
+    def test_checklist_has_steps(self, temp_project, tmp_path, monkeypatch):
+        """Test checklist includes all review steps."""
+        monkeypatch.setattr("enki.ereshkigal.Path.home", lambda: tmp_path)
+
+        checklist = generate_review_checklist()
+
+        assert "Generate Report" in checklist
+        assert "Identify Evasions" in checklist
+        assert "Get Pattern Recommendations" in checklist
+        assert "Update Patterns" in checklist
+        assert "Mark Interceptions" in checklist
+        assert "Complete Review" in checklist
+
+    def test_checklist_written_to_file(self, temp_project, tmp_path, monkeypatch):
+        """Test checklist can be written to file."""
+        monkeypatch.setattr("enki.ereshkigal.Path.home", lambda: tmp_path)
+
+        output_path = tmp_path / "checklist.md"
+        generate_review_checklist(output_path)
+
+        assert output_path.exists()
+        content = output_path.read_text()
+        assert "Weekly Pattern Review" in content
+
+
+class TestReportSummary:
+    """Tests for report summary."""
+
+    def test_get_summary(self, temp_project, tmp_path, monkeypatch):
+        """Test getting report summary."""
+        monkeypatch.setattr("enki.ereshkigal.Path.home", lambda: tmp_path)
+
+        summary = get_report_summary()
+
+        assert isinstance(summary, str)
+        assert "Ereshkigal:" in summary
+        assert "blocked" in summary
+        assert "allowed" in summary
+
+    def test_summary_shows_review_status(self, temp_project, tmp_path, monkeypatch):
+        """Test summary shows review status."""
+        monkeypatch.setattr("enki.ereshkigal.Path.home", lambda: tmp_path)
+
+        # Before review
+        summary = get_report_summary()
+        assert "never reviewed" in summary
+
+        # After review
+        save_review_date()
+        summary = get_report_summary()
+        assert "0d ago" in summary

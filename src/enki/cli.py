@@ -61,6 +61,13 @@ from .ereshkigal import (
     get_interception_stats,
     get_recent_interceptions,
     generate_weekly_report,
+    is_review_overdue,
+    get_review_reminder,
+    find_evasions_with_bugs,
+    generate_fresh_claude_prompt,
+    generate_review_checklist,
+    complete_review,
+    get_report_summary,
 )
 
 
@@ -1123,6 +1130,93 @@ def cmd_ereshkigal_init(args):
     print(f"Patterns initialized at: {path}")
 
 
+# === Report Commands (Phase 8) ===
+
+def cmd_report_weekly(args):
+    """Generate weekly Ereshkigal report."""
+    init_db()
+
+    report = generate_weekly_report(days=args.days)
+
+    if args.output:
+        output_path = Path(args.output)
+        output_path.write_text(report)
+        print(f"Report written to: {output_path}")
+    elif args.summary:
+        print(get_report_summary())
+    else:
+        print(report)
+
+
+def cmd_report_evasions(args):
+    """Show evasions that should have been blocked."""
+    init_db()
+
+    evasions = find_evasions_with_bugs(days=args.days)
+
+    if not evasions:
+        print("No evasions found (no allowed attempts correlated with later issues).")
+        return
+
+    print(f"Evasions (last {args.days} days)")
+    print("=" * 50)
+    print()
+
+    for e in evasions:
+        reasoning = e.get("reasoning", "")[:80]
+        print(f"ID: {e['interception_id'][:8]}")
+        print(f"Tool: {e.get('tool', 'unknown')}")
+        print(f"Reasoning: \"{reasoning}...\"")
+        print(f"Note: {e.get('correlation', 'Issues followed')}")
+        print()
+
+
+def cmd_report_prompt(args):
+    """Generate prompt for fresh Claude analysis."""
+    init_db()
+
+    prompt = generate_fresh_claude_prompt(days=args.days)
+
+    if args.output:
+        output_path = Path(args.output)
+        output_path.write_text(prompt)
+        print(f"Prompt written to: {output_path}")
+    else:
+        print(prompt)
+
+
+def cmd_report_checklist(args):
+    """Generate human review checklist."""
+    init_db()
+
+    output_path = Path(args.output) if args.output else None
+    checklist = generate_review_checklist(output_path)
+
+    if output_path:
+        print(f"Checklist written to: {output_path}")
+    else:
+        print(checklist)
+
+
+def cmd_report_complete(args):
+    """Mark review as complete."""
+    complete_review()
+    print("Review marked as complete.")
+    print(f"Next review due in 7 days.")
+
+
+def cmd_report_status(args):
+    """Check if review is due."""
+    init_db()
+
+    reminder = get_review_reminder()
+
+    if reminder:
+        print(reminder)
+    else:
+        print("No review due. Pattern enforcement is up to date.")
+
+
 def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(
@@ -1519,6 +1613,41 @@ def main():
     ereshkigal_recent_parser.add_argument("-r", "--result", choices=["allowed", "blocked"], help="Filter by result")
     ereshkigal_recent_parser.add_argument("-l", "--limit", type=int, default=10, help="Max results")
     ereshkigal_recent_parser.set_defaults(func=cmd_ereshkigal_recent)
+
+    # === Report Commands (Phase 8) ===
+    report_parser = subparsers.add_parser("report", help="Pattern evolution reports")
+    report_subparsers = report_parser.add_subparsers(dest="report_command")
+
+    # report weekly
+    report_weekly_parser = report_subparsers.add_parser("weekly", help="Generate weekly report")
+    report_weekly_parser.add_argument("-d", "--days", type=int, default=7, help="Days to include")
+    report_weekly_parser.add_argument("-o", "--output", help="Output file path")
+    report_weekly_parser.add_argument("--summary", action="store_true", help="One-line summary only")
+    report_weekly_parser.set_defaults(func=cmd_report_weekly)
+
+    # report evasions
+    report_evasions_parser = report_subparsers.add_parser("evasions", help="Show evasions that caused issues")
+    report_evasions_parser.add_argument("-d", "--days", type=int, default=30, help="Days to look back")
+    report_evasions_parser.set_defaults(func=cmd_report_evasions)
+
+    # report prompt
+    report_prompt_parser = report_subparsers.add_parser("prompt", help="Generate fresh Claude analysis prompt")
+    report_prompt_parser.add_argument("-d", "--days", type=int, default=7, help="Days of data to include")
+    report_prompt_parser.add_argument("-o", "--output", help="Output file path")
+    report_prompt_parser.set_defaults(func=cmd_report_prompt)
+
+    # report checklist
+    report_checklist_parser = report_subparsers.add_parser("checklist", help="Generate review checklist")
+    report_checklist_parser.add_argument("-o", "--output", help="Output file path")
+    report_checklist_parser.set_defaults(func=cmd_report_checklist)
+
+    # report complete
+    report_complete_parser = report_subparsers.add_parser("complete", help="Mark review as complete")
+    report_complete_parser.set_defaults(func=cmd_report_complete)
+
+    # report status
+    report_status_parser = report_subparsers.add_parser("status", help="Check if review is due")
+    report_status_parser.set_defaults(func=cmd_report_status)
 
     args = parser.parse_args()
 
