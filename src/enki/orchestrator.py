@@ -16,6 +16,7 @@ from .pm import (
     TaskGraph, Task, load_task_graph, save_task_graph,
     is_spec_approved, get_orchestration_status,
 )
+from .skills import get_skill_for_agent, enhance_agent_prompt_with_skill
 
 
 # Agent definitions with their roles and allowed tools
@@ -911,3 +912,269 @@ def get_next_action(project_path: Path = None) -> dict:
         "action": "blocked",
         "message": "No tasks ready - check dependencies",
     }
+
+
+# === Agent Spawning ===
+
+def generate_agent_prompt(
+    task: Task,
+    orch: Orchestration,
+    project_path: Path = None,
+) -> str:
+    """Generate the prompt for an agent to execute a task.
+
+    Args:
+        task: Task to execute
+        orch: Current orchestration
+        project_path: Project directory path
+
+    Returns:
+        Prompt string for the agent
+    """
+    project_path = project_path or Path.cwd()
+    agent_info = AGENTS.get(task.agent, {})
+
+    # Build context from spec and blackboard
+    spec_content = ""
+    if orch.spec_path:
+        spec_path = project_path / orch.spec_path
+        if spec_path.exists():
+            spec_content = spec_path.read_text()
+
+    # Get outputs from dependent tasks
+    dependency_outputs = []
+    for dep_id in task.dependencies:
+        if dep_id in orch.task_graph.tasks:
+            dep_task = orch.task_graph.tasks[dep_id]
+            if dep_task.output:
+                dependency_outputs.append(f"## Output from {dep_id} ({dep_task.agent}):\n{dep_task.output}")
+
+    # Build prompt based on agent type
+    prompt_parts = [
+        f"# Task: {task.description}",
+        f"Agent: {task.agent}",
+        f"Role: {agent_info.get('role', 'Execute the task')}",
+        "",
+    ]
+
+    if task.files_in_scope:
+        prompt_parts.append(f"## Files in Scope")
+        prompt_parts.append("You may ONLY modify these files:")
+        for f in task.files_in_scope:
+            prompt_parts.append(f"- {f}")
+        prompt_parts.append("")
+
+    if spec_content:
+        prompt_parts.append("## Spec Reference")
+        prompt_parts.append(spec_content[:2000])  # Truncate if very long
+        prompt_parts.append("")
+
+    if dependency_outputs:
+        prompt_parts.append("## Previous Task Outputs")
+        prompt_parts.extend(dependency_outputs)
+        prompt_parts.append("")
+
+    # Agent-specific instructions
+    if task.agent == "QA":
+        prompt_parts.extend([
+            "## QA Instructions",
+            "1. Write tests FIRST (TDD)",
+            "2. Tests must cover all acceptance criteria from spec",
+            "3. Include edge cases and error handling tests",
+            "4. Do NOT implement the feature - only write tests",
+            "",
+        ])
+    elif task.agent == "Dev":
+        prompt_parts.extend([
+            "## Dev Instructions",
+            "1. Implement code to pass the tests written by QA",
+            "2. Follow SOLID principles",
+            "3. Keep implementation minimal - only what's needed to pass tests",
+            "4. Do NOT modify test files",
+            "",
+        ])
+    elif task.agent == "Validator-Tests":
+        prompt_parts.extend([
+            "## Validator-Tests Instructions",
+            "1. Review the tests written by QA",
+            "2. Verify tests match the spec requirements",
+            "3. Check for missing edge cases",
+            "4. Report any gaps or issues found",
+            "",
+        ])
+    elif task.agent == "Validator-Code":
+        prompt_parts.extend([
+            "## Validator-Code Instructions",
+            "1. Run the tests to verify implementation",
+            "2. Review code for correctness and adherence to spec",
+            "3. Check for potential bugs or issues",
+            "4. Report any problems found",
+            "",
+        ])
+    elif task.agent == "Reviewer":
+        prompt_parts.extend([
+            "## Reviewer Instructions",
+            "1. Use /review skill to perform code review",
+            "2. Check for code quality issues",
+            "3. Verify adherence to project standards",
+            "",
+        ])
+    elif task.agent == "Security":
+        prompt_parts.extend([
+            "## Security Instructions",
+            "1. Use /security-review skill to audit the code",
+            "2. Check for OWASP Top 10 vulnerabilities",
+            "3. Report any security concerns",
+            "",
+        ])
+    elif task.agent == "Architect":
+        prompt_parts.extend([
+            "## Architect Instructions",
+            "1. Design the solution architecture",
+            "2. Create interface definitions",
+            "3. Document in docs/ or specs/",
+            "4. Do NOT write implementation code",
+            "",
+        ])
+    elif task.agent == "Docs":
+        prompt_parts.extend([
+            "## Docs Instructions",
+            "1. Update relevant documentation",
+            "2. Ensure README reflects changes",
+            "3. Add inline comments where needed",
+            "",
+        ])
+
+    prompt_parts.extend([
+        "## Completion",
+        "When done, report your output clearly so it can be passed to subsequent tasks.",
+        f"Task ID for completion: {task.id}",
+    ])
+
+    base_prompt = "\n".join(prompt_parts)
+
+    # Enhance with skill invocation for skill-based agents
+    skill = get_skill_for_agent(task.agent)
+    if skill:
+        base_prompt = enhance_agent_prompt_with_skill(
+            base_prompt,
+            task.agent,
+            task.files_in_scope,
+        )
+
+    return base_prompt
+
+
+def get_spawn_task_call(
+    task_id: str,
+    project_path: Path = None,
+) -> dict:
+    """Get the Task tool call parameters for spawning an agent.
+
+    This returns the parameters that should be passed to the Task tool
+    to spawn the appropriate agent for this task.
+
+    Args:
+        task_id: Task ID to spawn agent for
+        project_path: Project directory path
+
+    Returns:
+        Dict with Task tool parameters:
+        - description: Short description
+        - prompt: Full agent prompt
+        - subagent_type: Agent type to use
+    """
+    project_path = project_path or Path.cwd()
+
+    orch = load_orchestration(project_path)
+    if not orch:
+        raise ValueError("No active orchestration")
+
+    if task_id not in orch.task_graph.tasks:
+        raise ValueError(f"Task not found: {task_id}")
+
+    task = orch.task_graph.tasks[task_id]
+    agent_info = AGENTS.get(task.agent, {})
+
+    prompt = generate_agent_prompt(task, orch, project_path)
+
+    # Map agent to subagent_type
+    # For now, most agents use general-purpose
+    # Skill-based agents need special handling
+    if "skill" in agent_info:
+        # For skill-based agents, the prompt tells them to use the skill
+        subagent_type = "general-purpose"
+    else:
+        subagent_type = "general-purpose"
+
+    return {
+        "description": f"{task.agent}: {task.description[:30]}",
+        "prompt": prompt,
+        "subagent_type": subagent_type,
+    }
+
+
+def spawn_agent_for_task(
+    task_id: str,
+    project_path: Path = None,
+) -> dict:
+    """Start a task and return the spawn parameters.
+
+    This is a convenience function that:
+    1. Marks the task as active
+    2. Returns the Task tool call parameters
+
+    Args:
+        task_id: Task ID to spawn
+        project_path: Project directory path
+
+    Returns:
+        Dict with Task tool parameters
+    """
+    project_path = project_path or Path.cwd()
+
+    # Mark task as active
+    task = start_task(task_id, project_path)
+
+    # Get spawn parameters
+    return get_spawn_task_call(task_id, project_path)
+
+
+def get_parallel_spawn_calls(
+    project_path: Path = None,
+) -> list:
+    """Get Task tool calls for all ready tasks (for parallel execution).
+
+    Use this when you want to spawn multiple agents in parallel.
+
+    Args:
+        project_path: Project directory path
+
+    Returns:
+        List of dicts with Task tool parameters for each ready task
+    """
+    project_path = project_path or Path.cwd()
+
+    orch = load_orchestration(project_path)
+    if not orch:
+        return []
+
+    ready_tasks = orch.task_graph.get_ready_tasks() if orch.task_graph else []
+
+    spawn_calls = []
+    for task in ready_tasks:
+        try:
+            # Mark as active
+            task.status = "active"
+            spawn_calls.append({
+                "task_id": task.id,
+                "params": get_spawn_task_call(task.id, project_path),
+            })
+        except Exception:
+            continue
+
+    # Save state with tasks marked active
+    if spawn_calls:
+        save_orchestration(orch, project_path)
+
+    return spawn_calls

@@ -27,6 +27,7 @@ from .orchestrator import (
     file_bug, assign_bug, start_bug_verification, close_bug, reopen_bug, get_open_bugs,
     escalate_to_hitl, resolve_hitl, check_hitl_required,
     get_full_orchestration_status, get_next_action,
+    spawn_agent_for_task, get_parallel_spawn_calls,
     AGENTS,
 )
 from .persona import (
@@ -81,6 +82,26 @@ from .override import (
     mark_override_legitimate,
     get_override_stats,
     get_recent_overrides,
+)
+from .style_learning import (
+    analyze_session_patterns,
+    save_style_patterns,
+    get_style_summary,
+)
+from .onboarding import (
+    onboard_project,
+    get_onboarding_preview,
+    get_onboarding_status,
+)
+from .skills import (
+    SKILLS,
+    list_available_skills,
+    get_skill_prompt,
+)
+from .summarization import (
+    run_session_summarization,
+    get_summarization_preview,
+    get_summarization_stats,
 )
 
 
@@ -785,6 +806,84 @@ def cmd_next(args):
             print(f"Bug: {action['bug_id']}")
 
 
+def cmd_spawn(args):
+    """Spawn an agent for a task."""
+    project_path = Path(args.project) if args.project else None
+
+    try:
+        spawn_params = spawn_agent_for_task(args.task_id, project_path)
+
+        if args.json:
+            print(json.dumps(spawn_params, indent=2))
+        else:
+            print(f"Task tool call for: {args.task_id}")
+            print()
+            print("=== Task Tool Parameters ===")
+            print(f"description: \"{spawn_params['description']}\"")
+            print(f"subagent_type: \"{spawn_params['subagent_type']}\"")
+            print()
+            print("prompt:")
+            print("-" * 40)
+            print(spawn_params['prompt'])
+
+    except ValueError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+
+def cmd_spawn_parallel(args):
+    """Get spawn calls for all ready tasks."""
+    project_path = Path(args.project) if args.project else None
+
+    spawn_calls = get_parallel_spawn_calls(project_path)
+
+    if not spawn_calls:
+        print("No tasks ready for parallel execution.")
+        return
+
+    if args.json:
+        print(json.dumps(spawn_calls, indent=2))
+    else:
+        print(f"Found {len(spawn_calls)} tasks ready for parallel execution:")
+        print()
+        for call in spawn_calls:
+            print(f"=== Task: {call['task_id']} ===")
+            print(f"description: \"{call['params']['description']}\"")
+            print(f"subagent_type: \"{call['params']['subagent_type']}\"")
+            print()
+
+
+def cmd_spawn_next(args):
+    """Spawn the next recommended task."""
+    project_path = Path(args.project) if args.project else None
+
+    action = get_next_action(project_path)
+
+    if action['action'] != 'run_task':
+        print(f"No task to spawn. Next action: {action['action']}")
+        print(f"Message: {action['message']}")
+        return
+
+    task_id = action['task_id']
+    spawn_params = spawn_agent_for_task(task_id, project_path)
+
+    if args.json:
+        print(json.dumps({
+            "task_id": task_id,
+            "params": spawn_params,
+        }, indent=2))
+    else:
+        print(f"Spawning next task: {task_id} ({action['agent']})")
+        print()
+        print("=== Task Tool Parameters ===")
+        print(f"description: \"{spawn_params['description']}\"")
+        print(f"subagent_type: \"{spawn_params['subagent_type']}\"")
+        print()
+        print("prompt:")
+        print("-" * 40)
+        print(spawn_params['prompt'])
+
+
 def cmd_agents(args):
     """List available agents."""
     print("Available Agents:")
@@ -1475,6 +1574,218 @@ def cmd_override_recent(args):
         print(f"      Files: {o['files_edited']}/{o['max_files']} | {o['started_at']}")
 
 
+# === Style Learning Commands ===
+
+def cmd_style_analyze(args):
+    """Analyze working style patterns."""
+    init_db()
+
+    patterns = analyze_session_patterns(
+        days=args.days,
+        project=args.project,
+    )
+
+    if not patterns:
+        print("Not enough data to detect working style patterns yet.")
+        print(f"Try again after more sessions (analyzed last {args.days} days).")
+        return
+
+    print(f"Working Style Patterns (last {args.days} days)")
+    print("=" * 50)
+
+    for p in sorted(patterns, key=lambda x: -x.confidence):
+        print(f"\n[{p.category}] {p.pattern}")
+        print(f"  Confidence: {p.confidence:.0%}")
+        print(f"  Evidence: {p.evidence_count} occurrences")
+        if p.examples:
+            print(f"  Examples: {', '.join(p.examples[:3])}")
+
+
+def cmd_style_save(args):
+    """Save detected patterns as beads."""
+    init_db()
+
+    patterns = analyze_session_patterns(
+        days=args.days,
+        project=args.project,
+    )
+
+    if not patterns:
+        print("No patterns to save.")
+        return
+
+    bead_ids = save_style_patterns(patterns, project=args.project)
+
+    print(f"Saved {len(bead_ids)} pattern(s) as beads:")
+    for bid in bead_ids:
+        print(f"  - {bid}")
+
+
+def cmd_style_summary(args):
+    """Show working style summary."""
+    init_db()
+
+    summary = get_style_summary(
+        project=args.project,
+        days=args.days,
+    )
+
+    print(summary)
+
+
+# === Onboarding Commands ===
+
+def cmd_onboard_preview(args):
+    """Preview what onboarding would extract."""
+    project_path = Path(args.project) if args.project else Path.cwd()
+
+    preview = get_onboarding_preview(project_path)
+    print(preview)
+
+
+def cmd_onboard_run(args):
+    """Run project onboarding."""
+    project_path = Path(args.project) if args.project else Path.cwd()
+
+    print(f"Onboarding project: {project_path.name}")
+    print()
+
+    extracted = onboard_project(project_path, dry_run=False)
+
+    if not extracted:
+        print("No knowledge found to extract from this project's documentation.")
+        return
+
+    # Group by type for summary
+    by_type = {}
+    for item in extracted:
+        if item.bead_type not in by_type:
+            by_type[item.bead_type] = []
+        by_type[item.bead_type].append(item)
+
+    saved_count = sum(1 for item in extracted if item.confidence >= 0.5)
+
+    print(f"Extracted {len(extracted)} pieces of knowledge:")
+    for bead_type, items in by_type.items():
+        print(f"  {bead_type}: {len(items)}")
+
+    print()
+    print(f"Created {saved_count} beads (confidence >= 50%)")
+    print()
+    print("Run 'enki recall onboarded' to see extracted knowledge.")
+
+
+def cmd_onboard_status(args):
+    """Check onboarding status."""
+    project_path = Path(args.project) if args.project else Path.cwd()
+
+    status = get_onboarding_status(project_path)
+
+    print(f"Project: {project_path.name}")
+    print(f"Onboarded: {'Yes' if status['onboarded'] else 'No'}")
+
+    if status['onboarded']:
+        print(f"Beads created: {status['bead_count']}")
+
+    print(f"Has .enki directory: {'Yes' if status['has_enki_dir'] else 'No'}")
+
+    if status['available_docs']:
+        print(f"Available docs: {', '.join(status['available_docs'])}")
+    else:
+        print("Available docs: None found")
+
+
+# === Skills Commands ===
+
+def cmd_skills_list(args):
+    """List available skills."""
+    skills = list_available_skills()
+
+    if args.json:
+        print(json.dumps(skills, indent=2))
+    else:
+        print("Available Skills:")
+        print("=" * 50)
+        for skill in skills:
+            print(f"\n/{skill['name']}")
+            print(f"  Agent: {skill['agent']}")
+            print(f"  Description: {skill['description']}")
+            if skill['options']:
+                print(f"  Options: {', '.join(skill['options'])}")
+
+
+def cmd_skills_prompt(args):
+    """Show skill invocation prompt."""
+    skill_name = args.skill
+
+    if skill_name not in SKILLS:
+        print(f"Unknown skill: {skill_name}")
+        print(f"Available skills: {', '.join(SKILLS.keys())}")
+        sys.exit(1)
+
+    files = args.files.split(",") if args.files else None
+
+    prompt = get_skill_prompt(
+        skill_name=skill_name,
+        target_files=files,
+        context=args.context,
+    )
+
+    print(prompt)
+
+
+# === Summarization Commands ===
+
+def cmd_summarize_preview(args):
+    """Preview what would be summarized."""
+    preview = get_summarization_preview(project=args.project)
+    print(preview)
+
+
+def cmd_summarize_run(args):
+    """Run summarization."""
+    print("Running session summarization...")
+    print()
+
+    results = run_session_summarization(
+        project=args.project,
+        dry_run=False,
+        max_beads=args.max,
+    )
+
+    if args.json:
+        print(json.dumps(results, indent=2))
+    else:
+        print(f"Candidates found: {results['candidates_found']}")
+        print(f"Beads summarized: {results['summarized']}")
+        print(f"Space saved: {results['space_saved_chars']:,} characters")
+
+        if results['beads_processed']:
+            print()
+            print("Processed beads:")
+            for p in results['beads_processed']:
+                if 'error' in p:
+                    print(f"  - {p['old_id']}: ERROR - {p['error']}")
+                else:
+                    print(f"  - {p['old_id']} -> {p['new_id']} (saved {p['saved']} chars)")
+
+
+def cmd_summarize_stats(args):
+    """Show summarization statistics."""
+    init_db()
+
+    stats = get_summarization_stats()
+
+    if args.json:
+        print(json.dumps(stats, indent=2))
+    else:
+        print("Summarization Statistics")
+        print("=" * 40)
+        print(f"Already summarized: {stats['summarized_count']} beads")
+        print(f"Candidates for summarization: {stats['candidates_count']} beads")
+        print(f"Potential space savings: {stats['potential_savings_chars']:,} characters")
+
+
 def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(
@@ -1729,6 +2040,19 @@ def main():
     agents_parser = subparsers.add_parser("agents", help="List available agents")
     agents_parser.set_defaults(func=cmd_agents)
 
+    # === Spawn Commands ===
+    spawn_parser = subparsers.add_parser("spawn", help="Spawn agent for a task")
+    spawn_parser.add_argument("task_id", nargs="?", help="Task ID to spawn")
+    spawn_parser.add_argument("-p", "--project", help="Project path")
+    spawn_parser.add_argument("--json", action="store_true", help="JSON output")
+    spawn_parser.add_argument("--parallel", action="store_true", help="Get all ready tasks for parallel spawn")
+    spawn_parser.add_argument("--next", action="store_true", help="Spawn the next recommended task")
+    spawn_parser.set_defaults(func=lambda args:
+        cmd_spawn_parallel(args) if args.parallel else
+        cmd_spawn_next(args) if args.next else
+        cmd_spawn(args) if args.task_id else
+        print("Usage: enki spawn <task_id> or enki spawn --next or enki spawn --parallel"))
+
     # === Persona Commands ===
 
     # context
@@ -1970,6 +2294,69 @@ def main():
     override_recent_parser = override_subparsers.add_parser("recent", help="Show recent overrides")
     override_recent_parser.add_argument("-l", "--limit", type=int, default=10, help="Max results")
     override_recent_parser.set_defaults(func=cmd_override_recent)
+
+    # === Style Learning Commands ===
+    style_parser = subparsers.add_parser("style", help="Working style learning")
+    style_subparsers = style_parser.add_subparsers(dest="style_command")
+
+    # style analyze
+    style_analyze_parser = style_subparsers.add_parser("analyze", help="Analyze working style patterns")
+    style_analyze_parser.add_argument("-d", "--days", type=int, default=30, help="Days to analyze")
+    style_analyze_parser.add_argument("-p", "--project", help="Project filter")
+    style_analyze_parser.set_defaults(func=cmd_style_analyze)
+
+    # style save
+    style_save_parser = style_subparsers.add_parser("save", help="Save detected patterns as beads")
+    style_save_parser.add_argument("-d", "--days", type=int, default=30, help="Days to analyze")
+    style_save_parser.add_argument("-p", "--project", help="Project filter")
+    style_save_parser.set_defaults(func=cmd_style_save)
+
+    # style summary
+    style_summary_parser = style_subparsers.add_parser("summary", help="Show working style summary")
+    style_summary_parser.add_argument("-d", "--days", type=int, default=30, help="Days to analyze")
+    style_summary_parser.add_argument("-p", "--project", help="Project filter")
+    style_summary_parser.set_defaults(func=cmd_style_summary)
+
+    # === Onboarding Commands ===
+    onboard_parser = subparsers.add_parser("onboard", help="Project onboarding")
+    onboard_parser.add_argument("-p", "--project", help="Project path (default: current directory)")
+    onboard_parser.add_argument("--confirm", action="store_true", help="Run onboarding (creates beads)")
+    onboard_parser.add_argument("--status", action="store_true", help="Check onboarding status")
+    onboard_parser.set_defaults(func=lambda args:
+        cmd_onboard_status(args) if args.status else
+        cmd_onboard_run(args) if args.confirm else
+        cmd_onboard_preview(args))
+
+    # === Skills Commands ===
+    skills_parser = subparsers.add_parser("skills", help="Prism skills integration")
+    skills_parser.add_argument("--json", action="store_true", help="JSON output")
+    skills_subparsers = skills_parser.add_subparsers(dest="skills_command")
+
+    # skills list (default)
+    skills_list_parser = skills_subparsers.add_parser("list", help="List available skills")
+    skills_list_parser.add_argument("--json", action="store_true", help="JSON output")
+    skills_list_parser.set_defaults(func=cmd_skills_list)
+
+    # skills prompt
+    skills_prompt_parser = skills_subparsers.add_parser("prompt", help="Show skill invocation prompt")
+    skills_prompt_parser.add_argument("skill", help="Skill name (e.g., review, security-review)")
+    skills_prompt_parser.add_argument("-f", "--files", help="Comma-separated file paths")
+    skills_prompt_parser.add_argument("-c", "--context", help="Additional context")
+    skills_prompt_parser.set_defaults(func=cmd_skills_prompt)
+
+    skills_parser.set_defaults(func=cmd_skills_list)
+
+    # === Summarization Commands ===
+    summarize_parser = subparsers.add_parser("summarize", help="Summarize verbose beads")
+    summarize_parser.add_argument("-p", "--project", help="Project filter")
+    summarize_parser.add_argument("--confirm", action="store_true", help="Actually run summarization")
+    summarize_parser.add_argument("--stats", action="store_true", help="Show summarization stats")
+    summarize_parser.add_argument("--max", type=int, default=10, help="Max beads to summarize")
+    summarize_parser.add_argument("--json", action="store_true", help="JSON output")
+    summarize_parser.set_defaults(func=lambda args:
+        cmd_summarize_stats(args) if args.stats else
+        cmd_summarize_run(args) if args.confirm else
+        cmd_summarize_preview(args))
 
     args = parser.parse_args()
 

@@ -24,6 +24,9 @@ from .orchestrator import (
     file_bug, assign_bug, close_bug, reopen_bug, get_open_bugs,
     escalate_to_hitl, resolve_hitl, check_hitl_required,
     get_full_orchestration_status, get_next_action,
+    # Agent spawning
+    generate_agent_prompt, get_spawn_task_call,
+    spawn_agent_for_task, get_parallel_spawn_calls,
 )
 from .persona import (
     PersonaContext,
@@ -96,6 +99,38 @@ from .override import (
     get_override_stats,
     get_recent_overrides,
 )
+from .style_learning import (
+    StylePattern,
+    analyze_session_patterns,
+    learn_from_session,
+    save_style_patterns,
+    get_style_summary,
+)
+from .onboarding import (
+    ExtractedKnowledge,
+    onboard_project,
+    get_onboarding_preview,
+    get_onboarding_status,
+)
+from .skills import (
+    SKILLS,
+    SkillInvocation,
+    get_skill_for_agent,
+    get_skill_invocation,
+    get_skill_prompt,
+    list_available_skills,
+    get_agent_skill_prompt,
+    enhance_agent_prompt_with_skill,
+)
+from .summarization import (
+    SummarizationCandidate,
+    find_summarization_candidates,
+    generate_summary,
+    summarize_bead,
+    run_session_summarization,
+    get_summarization_preview,
+    get_summarization_stats,
+)
 
 __all__ = [
     # Database
@@ -156,6 +191,11 @@ __all__ = [
     "check_hitl_required",
     "get_full_orchestration_status",
     "get_next_action",
+    # Agent spawning
+    "generate_agent_prompt",
+    "get_spawn_task_call",
+    "spawn_agent_for_task",
+    "get_parallel_spawn_calls",
     # Persona
     "PersonaContext",
     "get_persona_context",
@@ -222,4 +262,32 @@ __all__ = [
     "mark_override_legitimate",
     "get_override_stats",
     "get_recent_overrides",
+    # Working style learning
+    "StylePattern",
+    "analyze_session_patterns",
+    "learn_from_session",
+    "save_style_patterns",
+    "get_style_summary",
+    # Project onboarding
+    "ExtractedKnowledge",
+    "onboard_project",
+    "get_onboarding_preview",
+    "get_onboarding_status",
+    # Skills integration
+    "SKILLS",
+    "SkillInvocation",
+    "get_skill_for_agent",
+    "get_skill_invocation",
+    "get_skill_prompt",
+    "list_available_skills",
+    "get_agent_skill_prompt",
+    "enhance_agent_prompt_with_skill",
+    # Session summarization
+    "SummarizationCandidate",
+    "find_summarization_candidates",
+    "generate_summary",
+    "summarize_bead",
+    "run_session_summarization",
+    "get_summarization_preview",
+    "get_summarization_stats",
 ]
