@@ -16,6 +16,11 @@ from .session import (
 )
 from .enforcement import check_all_gates, detect_tier
 from .violations import get_violation_stats
+from .pm import (
+    generate_perspectives, check_perspectives_complete,
+    create_spec, get_spec, list_specs, is_spec_approved, approve_spec,
+    decompose_spec, save_task_graph, load_task_graph, get_orchestration_status,
+)
 
 
 def cmd_init(args):
@@ -327,6 +332,188 @@ def cmd_gate_stats(args):
         print(f"  {gate}: {count}")
 
 
+# === PM Commands ===
+
+def cmd_debate(args):
+    """Start debate phase - generate perspectives."""
+    init_db()
+    project_path = Path(args.project) if args.project else None
+
+    # Set phase to debate
+    set_phase("debate", project_path)
+
+    perspectives_path = generate_perspectives(
+        goal=args.goal,
+        context=args.context,
+        project_path=project_path,
+    )
+
+    print(f"Debate started for: {args.goal}")
+    print(f"Perspectives template created: {perspectives_path}")
+    print()
+    print("Fill in ALL perspectives before running 'enki plan':")
+    print("  - PM Perspective")
+    print("  - CTO Perspective")
+    print("  - Architect Perspective")
+    print("  - DBA Perspective")
+    print("  - Security Perspective")
+    print("  - Devil's Advocate")
+    print()
+    print("Check status with: enki debate --check")
+
+
+def cmd_debate_check(args):
+    """Check if debate perspectives are complete."""
+    project_path = Path(args.project) if args.project else None
+
+    is_complete, missing = check_perspectives_complete(project_path)
+
+    if is_complete:
+        print("All perspectives complete. Ready for 'enki plan'.")
+    else:
+        print("Perspectives incomplete. Missing:")
+        for m in missing:
+            print(f"  - {m}")
+        sys.exit(1)
+
+
+def cmd_plan(args):
+    """Create a spec from debate."""
+    init_db()
+    project_path = Path(args.project) if args.project else None
+
+    try:
+        spec_path = create_spec(
+            name=args.name,
+            problem=args.problem,
+            solution=args.solution,
+            project_path=project_path,
+        )
+
+        print(f"Spec created: {spec_path}")
+        print()
+        print("Edit the spec to fill in details, then run:")
+        print(f"  enki approve {args.name}")
+
+    except ValueError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+
+def cmd_approve(args):
+    """Approve a spec."""
+    init_db()
+    project_path = Path(args.project) if args.project else None
+
+    try:
+        approve_spec(args.name, project_path)
+        print(f"Spec approved: {args.name}")
+        print("Phase transitioned to: implement")
+        print()
+        print("Gate 2 (Spec Approval) is now satisfied.")
+        print("You can now spawn implementation agents.")
+
+    except ValueError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+
+def cmd_specs(args):
+    """List all specs."""
+    project_path = Path(args.project) if args.project else None
+
+    specs = list_specs(project_path)
+
+    if not specs:
+        print("No specs found.")
+        return
+
+    print("Specs:")
+    for spec in specs:
+        status = "[APPROVED]" if spec["approved"] else "[pending]"
+        print(f"  {status} {spec['name']}")
+        if args.verbose:
+            print(f"         {spec['path']}")
+
+
+def cmd_spec_show(args):
+    """Show a spec."""
+    project_path = Path(args.project) if args.project else None
+
+    content = get_spec(args.name, project_path)
+    if content:
+        print(content)
+    else:
+        print(f"Spec not found: {args.name}")
+        sys.exit(1)
+
+
+def cmd_decompose(args):
+    """Decompose spec into task graph."""
+    init_db()
+    project_path = Path(args.project) if args.project else None
+
+    try:
+        # Check if spec is approved
+        if not is_spec_approved(args.name, project_path):
+            print(f"Spec not approved: {args.name}")
+            print("Run 'enki approve {name}' first.")
+            sys.exit(1)
+
+        graph = decompose_spec(args.name, project_path)
+        save_task_graph(graph, project_path)
+
+        print(f"Task graph created for: {args.name}")
+        print()
+
+        waves = graph.get_waves()
+        for i, wave in enumerate(waves, 1):
+            print(f"Wave {i}:")
+            for task in wave:
+                deps = ", ".join(task.dependencies) if task.dependencies else "none"
+                print(f"  - {task.id}: {task.description} ({task.agent})")
+                print(f"    Dependencies: {deps}")
+                if task.files_in_scope:
+                    print(f"    Files: {', '.join(task.files_in_scope)}")
+            print()
+
+    except ValueError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+
+def cmd_orchestration_status(args):
+    """Show orchestration status."""
+    project_path = Path(args.project) if args.project else None
+
+    status = get_orchestration_status(project_path)
+
+    if not status["active"]:
+        print("No active orchestration.")
+        print("Run 'enki decompose <spec-name>' to start one.")
+        return
+
+    if args.json:
+        print(json.dumps(status, indent=2))
+    else:
+        print(f"Orchestration: {status['spec']}")
+        print(f"Progress: {status['completed']}/{status['total']} tasks ({status['progress']:.0%})")
+        print()
+        print("Tasks:")
+        for task in sorted(status["tasks"], key=lambda t: (t["wave"], t["id"])):
+            marker = {
+                "pending": "[ ]",
+                "active": "[>]",
+                "complete": "[x]",
+                "failed": "[!]",
+            }.get(task["status"], "[ ]")
+            print(f"  Wave {task['wave']}: {marker} {task['id']} - {task['description']} ({task['agent']})")
+
+        if status["ready_tasks"]:
+            print()
+            print(f"Ready to execute: {', '.join(status['ready_tasks'])}")
+
+
 def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(
@@ -445,6 +632,54 @@ def main():
     gate_stats_parser = gate_subparsers.add_parser("stats", help="Show violation statistics")
     gate_stats_parser.add_argument("-d", "--days", type=int, default=7, help="Days to look back")
     gate_stats_parser.set_defaults(func=cmd_gate_stats)
+
+    # === PM Commands ===
+
+    # debate
+    debate_parser = subparsers.add_parser("debate", help="Start debate phase")
+    debate_parser.add_argument("goal", nargs="?", help="Feature/change to debate")
+    debate_parser.add_argument("-c", "--context", help="Additional context")
+    debate_parser.add_argument("-p", "--project", help="Project path")
+    debate_parser.add_argument("--check", action="store_true", help="Check if perspectives complete")
+    debate_parser.set_defaults(func=lambda args: cmd_debate_check(args) if args.check else cmd_debate(args))
+
+    # plan
+    plan_parser = subparsers.add_parser("plan", help="Create spec from debate")
+    plan_parser.add_argument("name", help="Spec name")
+    plan_parser.add_argument("--problem", help="Problem statement")
+    plan_parser.add_argument("--solution", help="Proposed solution")
+    plan_parser.add_argument("-p", "--project", help="Project path")
+    plan_parser.set_defaults(func=cmd_plan)
+
+    # approve
+    approve_parser = subparsers.add_parser("approve", help="Approve a spec")
+    approve_parser.add_argument("name", help="Spec name to approve")
+    approve_parser.add_argument("-p", "--project", help="Project path")
+    approve_parser.set_defaults(func=cmd_approve)
+
+    # specs
+    specs_parser = subparsers.add_parser("specs", help="List specs")
+    specs_parser.add_argument("-p", "--project", help="Project path")
+    specs_parser.add_argument("-v", "--verbose", action="store_true", help="Show paths")
+    specs_parser.set_defaults(func=cmd_specs)
+
+    # spec (show)
+    spec_parser = subparsers.add_parser("spec", help="Show a spec")
+    spec_parser.add_argument("name", help="Spec name")
+    spec_parser.add_argument("-p", "--project", help="Project path")
+    spec_parser.set_defaults(func=cmd_spec_show)
+
+    # decompose
+    decompose_parser = subparsers.add_parser("decompose", help="Decompose spec into tasks")
+    decompose_parser.add_argument("name", help="Spec name")
+    decompose_parser.add_argument("-p", "--project", help="Project path")
+    decompose_parser.set_defaults(func=cmd_decompose)
+
+    # orchestration
+    orch_parser = subparsers.add_parser("orchestration", help="Show orchestration status")
+    orch_parser.add_argument("-p", "--project", help="Project path")
+    orch_parser.add_argument("--json", action="store_true", help="JSON output")
+    orch_parser.set_defaults(func=cmd_orchestration_status)
 
     args = parser.parse_args()
 
