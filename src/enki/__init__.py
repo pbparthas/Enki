@@ -17,6 +17,14 @@ from .pm import (
     decompose_spec, Task, TaskGraph,
     save_task_graph, load_task_graph, get_orchestration_status,
 )
+from .orchestrator import (
+    Bug, Orchestration, AGENTS,
+    start_orchestration, load_orchestration, save_orchestration,
+    start_task, complete_task, fail_task,
+    file_bug, assign_bug, close_bug, reopen_bug, get_open_bugs,
+    escalate_to_hitl, resolve_hitl, check_hitl_required,
+    get_full_orchestration_status, get_next_action,
+)
 
 __all__ = [
     # Database
@@ -57,4 +65,24 @@ __all__ = [
     "save_task_graph",
     "load_task_graph",
     "get_orchestration_status",
+    # Orchestrator
+    "Bug",
+    "Orchestration",
+    "AGENTS",
+    "start_orchestration",
+    "load_orchestration",
+    "save_orchestration",
+    "start_task",
+    "complete_task",
+    "fail_task",
+    "file_bug",
+    "assign_bug",
+    "close_bug",
+    "reopen_bug",
+    "get_open_bugs",
+    "escalate_to_hitl",
+    "resolve_hitl",
+    "check_hitl_required",
+    "get_full_orchestration_status",
+    "get_next_action",
 ]

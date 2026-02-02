@@ -21,6 +21,14 @@ from .pm import (
     create_spec, get_spec, list_specs, is_spec_approved, approve_spec,
     decompose_spec, save_task_graph, load_task_graph, get_orchestration_status,
 )
+from .orchestrator import (
+    start_orchestration, load_orchestration, save_orchestration,
+    start_task, complete_task, fail_task,
+    file_bug, assign_bug, start_bug_verification, close_bug, reopen_bug, get_open_bugs,
+    escalate_to_hitl, resolve_hitl, check_hitl_required,
+    get_full_orchestration_status, get_next_action,
+    AGENTS,
+)
 
 
 def cmd_init(args):
@@ -486,32 +494,257 @@ def cmd_orchestration_status(args):
     """Show orchestration status."""
     project_path = Path(args.project) if args.project else None
 
-    status = get_orchestration_status(project_path)
+    status = get_full_orchestration_status(project_path)
 
     if not status["active"]:
         print("No active orchestration.")
-        print("Run 'enki decompose <spec-name>' to start one.")
+        print("Run 'enki orchestrate <spec-name>' to start one.")
         return
 
     if args.json:
         print(json.dumps(status, indent=2))
     else:
-        print(f"Orchestration: {status['spec']}")
-        print(f"Progress: {status['completed']}/{status['total']} tasks ({status['progress']:.0%})")
+        print(f"Orchestration: {status['spec']} ({status['orchestration_id']})")
+        print(f"Status: {status['status']}")
+        print(f"Wave: {status['current_wave']}")
+        print(f"Progress: {status['tasks']['completed']}/{status['tasks']['total']} tasks ({status['tasks']['progress']:.0%})")
         print()
-        print("Tasks:")
-        for task in sorted(status["tasks"], key=lambda t: (t["wave"], t["id"])):
-            marker = {
-                "pending": "[ ]",
-                "active": "[>]",
-                "complete": "[x]",
-                "failed": "[!]",
-            }.get(task["status"], "[ ]")
-            print(f"  Wave {task['wave']}: {marker} {task['id']} - {task['description']} ({task['agent']})")
 
-        if status["ready_tasks"]:
+        if status['hitl']['required']:
+            print("⚠️  HUMAN INTERVENTION REQUIRED")
+            print(f"   Reason: {status['hitl']['reason']}")
             print()
-            print(f"Ready to execute: {', '.join(status['ready_tasks'])}")
+
+        if status['bugs']['open'] > 0:
+            print(f"Bugs: {status['bugs']['open']} open ({status['bugs']['critical']} critical)")
+            print()
+
+        if status['tasks']['ready']:
+            print(f"Ready tasks: {', '.join(status['tasks']['ready'])}")
+
+        next_action = get_next_action(project_path)
+        print()
+        print(f"Next: {next_action['message']}")
+
+
+def cmd_orchestrate_start(args):
+    """Start orchestration from an approved spec."""
+    init_db()
+    project_path = Path(args.project) if args.project else None
+
+    try:
+        # Get task graph from spec
+        graph = decompose_spec(args.name, project_path)
+
+        # Start orchestration
+        orch = start_orchestration(args.name, graph, project_path)
+
+        print(f"Orchestration started: {orch.id}")
+        print(f"Spec: {args.name}")
+        print(f"Tasks: {len(graph.tasks)}")
+        print()
+
+        next_action = get_next_action(project_path)
+        print(f"Next: {next_action['message']}")
+
+    except ValueError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+
+def cmd_task_start(args):
+    """Start a task."""
+    project_path = Path(args.project) if args.project else None
+
+    try:
+        task = start_task(args.task_id, project_path)
+
+        print(f"Task started: {task.id}")
+        print(f"Agent: {task.agent}")
+        print(f"Description: {task.description}")
+
+        if task.agent in AGENTS:
+            agent_info = AGENTS[task.agent]
+            print(f"Role: {agent_info['role']}")
+            print(f"Tools: {', '.join(agent_info['tools'])}")
+
+        if task.files_in_scope:
+            print(f"Files: {', '.join(task.files_in_scope)}")
+
+    except ValueError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+
+def cmd_task_complete(args):
+    """Complete a task."""
+    project_path = Path(args.project) if args.project else None
+
+    try:
+        task = complete_task(args.task_id, args.output, project_path)
+
+        print(f"Task completed: {task.id}")
+
+        next_action = get_next_action(project_path)
+        print(f"Next: {next_action['message']}")
+
+    except ValueError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+
+def cmd_task_fail(args):
+    """Mark a task as failed."""
+    project_path = Path(args.project) if args.project else None
+
+    try:
+        task = fail_task(args.task_id, args.reason, project_path)
+
+        if task.status == "failed":
+            print(f"Task failed (max attempts reached): {task.id}")
+            print("HITL escalation triggered.")
+        else:
+            print(f"Task will retry: {task.id} (attempt {task.attempts}/{task.max_attempts})")
+
+    except ValueError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+
+def cmd_bug_file(args):
+    """File a new bug."""
+    project_path = Path(args.project) if args.project else None
+
+    try:
+        bug = file_bug(
+            title=args.title,
+            description=args.description or args.title,
+            found_by=args.found_by,
+            severity=args.severity,
+            related_task=args.task,
+            project_path=project_path,
+        )
+
+        print(f"Bug filed: {bug.id}")
+        print(f"Title: {bug.title}")
+        print(f"Severity: {bug.severity}")
+        print(f"Assigned to: {bug.assigned_to}")
+
+    except ValueError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+
+def cmd_bug_list(args):
+    """List bugs."""
+    project_path = Path(args.project) if args.project else None
+
+    bugs = get_open_bugs(project_path)
+
+    if not bugs:
+        print("No open bugs.")
+        return
+
+    print("Open Bugs:")
+    for bug in bugs:
+        severity_marker = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🟢"}.get(bug.severity, "⚪")
+        print(f"  {severity_marker} {bug.id}: {bug.title}")
+        print(f"     Status: {bug.status} | Assigned: {bug.assigned_to} | Cycle: {bug.cycle}/{bug.max_cycles}")
+
+
+def cmd_bug_close(args):
+    """Close a bug."""
+    project_path = Path(args.project) if args.project else None
+
+    try:
+        bug = close_bug(args.bug_id, args.resolution, project_path)
+        print(f"Bug closed: {bug.id} ({bug.resolution})")
+    except ValueError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+
+def cmd_bug_reopen(args):
+    """Reopen a bug (verification failed)."""
+    project_path = Path(args.project) if args.project else None
+
+    try:
+        bug = reopen_bug(args.bug_id, project_path)
+
+        if bug.status == "hitl":
+            print(f"Bug escalated to HITL: {bug.id}")
+            print(f"Max cycles ({bug.max_cycles}) exceeded.")
+        else:
+            print(f"Bug reopened: {bug.id} (cycle {bug.cycle}/{bug.max_cycles})")
+
+    except ValueError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+
+def cmd_hitl_status(args):
+    """Check HITL status."""
+    project_path = Path(args.project) if args.project else None
+
+    required, reason = check_hitl_required(project_path)
+
+    if required:
+        print("⚠️  HUMAN INTERVENTION REQUIRED")
+        print(f"Reason: {reason}")
+        print()
+        print("Resolve with: enki hitl resolve --reason 'resolution details'")
+    else:
+        print("No HITL required.")
+
+
+def cmd_hitl_resolve(args):
+    """Resolve HITL escalation."""
+    project_path = Path(args.project) if args.project else None
+
+    try:
+        resolve_hitl(args.reason, project_path)
+        print(f"HITL resolved: {args.reason}")
+
+        next_action = get_next_action(project_path)
+        print(f"Next: {next_action['message']}")
+
+    except ValueError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+
+def cmd_next(args):
+    """Show the next recommended action."""
+    project_path = Path(args.project) if args.project else None
+
+    action = get_next_action(project_path)
+
+    if args.json:
+        print(json.dumps(action, indent=2))
+    else:
+        print(f"Action: {action['action']}")
+        print(f"Message: {action['message']}")
+
+        if action['action'] == 'run_task':
+            print(f"Task: {action['task_id']}")
+            print(f"Agent: {action['agent']}")
+        elif action['action'] == 'fix_bug':
+            print(f"Bug: {action['bug_id']}")
+
+
+def cmd_agents(args):
+    """List available agents."""
+    print("Available Agents:")
+    print()
+    for name, info in AGENTS.items():
+        tier_marker = {"CRITICAL": "★", "STANDARD": "◆", "CONDITIONAL": "○"}.get(info['tier'], " ")
+        print(f"  {tier_marker} {name}")
+        print(f"    Role: {info['role']}")
+        print(f"    Tier: {info['tier']}")
+        print(f"    Tools: {', '.join(info['tools'])}")
+        if 'skill' in info:
+            print(f"    Skill: {info['skill']}")
+        print()
 
 
 def main():
@@ -675,11 +908,98 @@ def main():
     decompose_parser.add_argument("-p", "--project", help="Project path")
     decompose_parser.set_defaults(func=cmd_decompose)
 
-    # orchestration
+    # orchestration status
     orch_parser = subparsers.add_parser("orchestration", help="Show orchestration status")
     orch_parser.add_argument("-p", "--project", help="Project path")
     orch_parser.add_argument("--json", action="store_true", help="JSON output")
     orch_parser.set_defaults(func=cmd_orchestration_status)
+
+    # orchestrate (start)
+    orchestrate_parser = subparsers.add_parser("orchestrate", help="Start orchestration")
+    orchestrate_parser.add_argument("name", help="Spec name to orchestrate")
+    orchestrate_parser.add_argument("-p", "--project", help="Project path")
+    orchestrate_parser.set_defaults(func=cmd_orchestrate_start)
+
+    # === Task Commands ===
+    task_parser = subparsers.add_parser("task", help="Task management")
+    task_subparsers = task_parser.add_subparsers(dest="task_command")
+
+    # task start
+    task_start_parser = task_subparsers.add_parser("start", help="Start a task")
+    task_start_parser.add_argument("task_id", help="Task ID")
+    task_start_parser.add_argument("-p", "--project", help="Project path")
+    task_start_parser.set_defaults(func=cmd_task_start)
+
+    # task complete
+    task_complete_parser = task_subparsers.add_parser("complete", help="Complete a task")
+    task_complete_parser.add_argument("task_id", help="Task ID")
+    task_complete_parser.add_argument("-o", "--output", help="Task output")
+    task_complete_parser.add_argument("-p", "--project", help="Project path")
+    task_complete_parser.set_defaults(func=cmd_task_complete)
+
+    # task fail
+    task_fail_parser = task_subparsers.add_parser("fail", help="Mark task as failed")
+    task_fail_parser.add_argument("task_id", help="Task ID")
+    task_fail_parser.add_argument("-r", "--reason", help="Failure reason")
+    task_fail_parser.add_argument("-p", "--project", help="Project path")
+    task_fail_parser.set_defaults(func=cmd_task_fail)
+
+    # === Bug Commands ===
+    bug_parser = subparsers.add_parser("bug", help="Bug management")
+    bug_subparsers = bug_parser.add_subparsers(dest="bug_command")
+
+    # bug file
+    bug_file_parser = bug_subparsers.add_parser("file", help="File a new bug")
+    bug_file_parser.add_argument("title", help="Bug title")
+    bug_file_parser.add_argument("-d", "--description", help="Bug description")
+    bug_file_parser.add_argument("-f", "--found-by", default="QA", help="Agent that found it")
+    bug_file_parser.add_argument("-s", "--severity", choices=["critical", "high", "medium", "low"], default="medium")
+    bug_file_parser.add_argument("-t", "--task", help="Related task ID")
+    bug_file_parser.add_argument("-p", "--project", help="Project path")
+    bug_file_parser.set_defaults(func=cmd_bug_file)
+
+    # bug list
+    bug_list_parser = bug_subparsers.add_parser("list", help="List bugs")
+    bug_list_parser.add_argument("-p", "--project", help="Project path")
+    bug_list_parser.set_defaults(func=cmd_bug_list)
+
+    # bug close
+    bug_close_parser = bug_subparsers.add_parser("close", help="Close a bug")
+    bug_close_parser.add_argument("bug_id", help="Bug ID")
+    bug_close_parser.add_argument("-r", "--resolution", choices=["fixed", "wontfix"], default="fixed")
+    bug_close_parser.add_argument("-p", "--project", help="Project path")
+    bug_close_parser.set_defaults(func=cmd_bug_close)
+
+    # bug reopen
+    bug_reopen_parser = bug_subparsers.add_parser("reopen", help="Reopen a bug")
+    bug_reopen_parser.add_argument("bug_id", help="Bug ID")
+    bug_reopen_parser.add_argument("-p", "--project", help="Project path")
+    bug_reopen_parser.set_defaults(func=cmd_bug_reopen)
+
+    # === HITL Commands ===
+    hitl_parser = subparsers.add_parser("hitl", help="HITL management")
+    hitl_subparsers = hitl_parser.add_subparsers(dest="hitl_command")
+
+    # hitl status
+    hitl_status_parser = hitl_subparsers.add_parser("status", help="Check HITL status")
+    hitl_status_parser.add_argument("-p", "--project", help="Project path")
+    hitl_status_parser.set_defaults(func=cmd_hitl_status)
+
+    # hitl resolve
+    hitl_resolve_parser = hitl_subparsers.add_parser("resolve", help="Resolve HITL")
+    hitl_resolve_parser.add_argument("-r", "--reason", required=True, help="Resolution reason")
+    hitl_resolve_parser.add_argument("-p", "--project", help="Project path")
+    hitl_resolve_parser.set_defaults(func=cmd_hitl_resolve)
+
+    # next
+    next_parser = subparsers.add_parser("next", help="Show next recommended action")
+    next_parser.add_argument("-p", "--project", help="Project path")
+    next_parser.add_argument("--json", action="store_true", help="JSON output")
+    next_parser.set_defaults(func=cmd_next)
+
+    # agents
+    agents_parser = subparsers.add_parser("agents", help="List available agents")
+    agents_parser.set_defaults(func=cmd_agents)
 
     args = parser.parse_args()
 
