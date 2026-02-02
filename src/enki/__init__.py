@@ -88,17 +88,6 @@ from .migration import (
     validate_migration,
     rollback_migration,
 )
-from .override import (
-    Override,
-    start_override,
-    get_active_override,
-    check_override_allows,
-    track_override_edit,
-    end_override,
-    mark_override_legitimate,
-    get_override_stats,
-    get_recent_overrides,
-)
 from .style_learning import (
     StylePattern,
     analyze_session_patterns,
@@ -252,16 +241,6 @@ __all__ = [
     "migrate_to_enki",
     "validate_migration",
     "rollback_migration",
-    # Override mechanism
-    "Override",
-    "start_override",
-    "get_active_override",
-    "check_override_allows",
-    "track_override_edit",
-    "end_override",
-    "mark_override_legitimate",
-    "get_override_stats",
-    "get_recent_overrides",
     # Working style learning
     "StylePattern",
     "analyze_session_patterns",

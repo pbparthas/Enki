@@ -75,14 +75,6 @@ from .migration import (
     validate_migration,
     rollback_migration,
 )
-from .override import (
-    start_override,
-    get_active_override,
-    end_override,
-    mark_override_legitimate,
-    get_override_stats,
-    get_recent_overrides,
-)
 from .style_learning import (
     analyze_session_patterns,
     save_style_patterns,
@@ -406,7 +398,6 @@ def cmd_gate_stats(args):
     print(f"Violation Statistics (last {args.days} days)")
     print("=" * 40)
     print(f"Total violations: {stats['total_violations']}")
-    print(f"Override rate: {stats['override_rate']:.1%}")
     print(f"Tier escalations: {stats['escalations']}")
     print()
     print("By gate:")
@@ -1463,117 +1454,6 @@ def cmd_migrate_rollback(args):
     print("Note: Migrated beads have been preserved in Enki database.")
 
 
-# === Override Commands ===
-
-def cmd_override_start(args):
-    """Start an emergency override."""
-    project_path = Path(args.project) if args.project else None
-
-    override = start_override(
-        reason=args.reason,
-        tier=args.tier,
-        max_files=args.max_files,
-        duration_minutes=args.duration,
-        project_path=project_path,
-    )
-
-    from datetime import datetime
-    remaining = (override.expires_at - datetime.now()).total_seconds() / 60
-
-    print("Emergency override acknowledged.")
-    print()
-    print(f"ID: {override.id}")
-    print(f"Reason: {override.reason}")
-    print(f"Tier: {override.tier}")
-    print(f"File limit: {override.max_files}")
-    print(f"Time remaining: {remaining:.0f} minutes")
-    print()
-    print("You have limited time and scope for this override.")
-    print("After completion, mark as legitimate with:")
-    print(f"  enki override mark {override.id} --legitimate")
-
-
-def cmd_override_status(args):
-    """Check current override status."""
-    project_path = Path(args.project) if args.project else None
-
-    override = get_active_override(project_path)
-
-    if not override:
-        print("No active override.")
-        return
-
-    from datetime import datetime
-    remaining = (override.expires_at - datetime.now()).total_seconds() / 60
-
-    print("Active Override:")
-    print(f"  ID: {override.id}")
-    print(f"  Reason: {override.reason}")
-    print(f"  Files edited: {override.files_edited}/{override.max_files}")
-    print(f"  Time remaining: {remaining:.0f} minutes")
-
-
-def cmd_override_end(args):
-    """End current override."""
-    project_path = Path(args.project) if args.project else None
-
-    override = get_active_override(project_path)
-    if override:
-        end_override(override.id, project_path)
-        print(f"Override ended: {override.id}")
-        print(f"Files edited: {override.files_edited}")
-        print()
-        print("Remember to mark this override as legitimate or not:")
-        print(f"  enki override mark {override.id} --legitimate")
-        print(f"  enki override mark {override.id} --not-legitimate")
-    else:
-        print("No active override to end.")
-
-
-def cmd_override_mark(args):
-    """Mark an override as legitimate or not."""
-    was_legitimate = args.legitimate
-
-    if mark_override_legitimate(args.override_id, was_legitimate):
-        status = "legitimate" if was_legitimate else "NOT legitimate"
-        print(f"Override {args.override_id} marked as {status}")
-    else:
-        print(f"Override not found: {args.override_id}")
-        sys.exit(1)
-
-
-def cmd_override_stats(args):
-    """Show override statistics."""
-    init_db()
-
-    stats = get_override_stats(days=args.days)
-
-    print(f"Override Statistics (last {args.days} days)")
-    print("=" * 40)
-    print(f"Total overrides: {stats['total']}")
-    print(f"Legitimate: {stats['legitimate']}")
-    print(f"Not legitimate: {stats['illegitimate']}")
-    print(f"Unreviewed: {stats['unreviewed']}")
-    print(f"Average files edited: {stats['average_files_edited']}")
-
-
-def cmd_override_recent(args):
-    """Show recent overrides."""
-    init_db()
-
-    overrides = get_recent_overrides(limit=args.limit)
-
-    if not overrides:
-        print("No overrides found.")
-        return
-
-    print("Recent Overrides:")
-    for o in overrides:
-        legit = "?" if o["was_legitimate"] is None else ("Y" if o["was_legitimate"] else "N")
-        print(f"  [{legit}] {o['id'][:12]}: {o['reason'][:40]}")
-        print(f"      Files: {o['files_edited']}/{o['max_files']} | {o['started_at']}")
-
-
 # === Style Learning Commands ===
 
 def cmd_style_analyze(args):
@@ -2248,52 +2128,6 @@ def main():
         cmd_migrate_validate(args) if args.validate else
         cmd_migrate_rollback(args) if args.rollback else
         cmd_migrate(args))
-
-    # === Override Commands ===
-    override_parser = subparsers.add_parser("override", help="Emergency gate bypass")
-    override_subparsers = override_parser.add_subparsers(dest="override_command")
-
-    # override start
-    override_start_parser = override_subparsers.add_parser("start", help="Start emergency override")
-    override_start_parser.add_argument("reason", help="Reason for the override")
-    override_start_parser.add_argument("-t", "--tier", choices=["trivial", "quick_fix"],
-                                       default="quick_fix", help="Max tier for override")
-    override_start_parser.add_argument("-f", "--max-files", type=int, default=3,
-                                       help="Maximum files allowed")
-    override_start_parser.add_argument("-d", "--duration", type=int, default=15,
-                                       help="Duration in minutes")
-    override_start_parser.add_argument("-p", "--project", help="Project path")
-    override_start_parser.set_defaults(func=cmd_override_start)
-
-    # override status
-    override_status_parser = override_subparsers.add_parser("status", help="Check override status")
-    override_status_parser.add_argument("-p", "--project", help="Project path")
-    override_status_parser.set_defaults(func=cmd_override_status)
-
-    # override end
-    override_end_parser = override_subparsers.add_parser("end", help="End current override")
-    override_end_parser.add_argument("-p", "--project", help="Project path")
-    override_end_parser.set_defaults(func=cmd_override_end)
-
-    # override mark
-    override_mark_parser = override_subparsers.add_parser("mark", help="Mark override legitimacy")
-    override_mark_parser.add_argument("override_id", help="Override ID to mark")
-    override_mark_parser.add_argument("--legitimate", action="store_true",
-                                      help="Mark as legitimate")
-    override_mark_parser.add_argument("--not-legitimate", action="store_true",
-                                      help="Mark as not legitimate")
-    override_mark_parser.set_defaults(func=lambda args:
-        cmd_override_mark(type('Args', (), {'override_id': args.override_id, 'legitimate': not args.not_legitimate})()))
-
-    # override stats
-    override_stats_parser = override_subparsers.add_parser("stats", help="Override statistics")
-    override_stats_parser.add_argument("-d", "--days", type=int, default=30, help="Days to look back")
-    override_stats_parser.set_defaults(func=cmd_override_stats)
-
-    # override recent
-    override_recent_parser = override_subparsers.add_parser("recent", help="Show recent overrides")
-    override_recent_parser.add_argument("-l", "--limit", type=int, default=10, help="Max results")
-    override_recent_parser.set_defaults(func=cmd_override_recent)
 
     # === Style Learning Commands ===
     style_parser = subparsers.add_parser("style", help="Working style learning")
