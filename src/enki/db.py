@@ -169,6 +169,20 @@ CREATE TABLE IF NOT EXISTS enki_self_analysis (
     effective INTEGER
 );
 
+-- Overrides: emergency gate bypass tracking
+CREATE TABLE IF NOT EXISTS overrides (
+    id TEXT PRIMARY KEY,
+    session_id TEXT,
+    reason TEXT NOT NULL,
+    tier TEXT,
+    max_files INT DEFAULT 3,
+    duration_seconds INT DEFAULT 900,  -- 15 minutes default
+    files_edited INT DEFAULT 0,
+    started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    expires_at TIMESTAMP,
+    was_legitimate INTEGER  -- User marks after the fact
+);
+
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_beads_project ON beads(project);
 CREATE INDEX IF NOT EXISTS idx_beads_type ON beads(type);

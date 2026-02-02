@@ -1,6 +1,7 @@
 """MCP server exposing Enki tools."""
 
 import json
+from pathlib import Path
 from typing import Optional
 
 from mcp.server import Server
@@ -11,6 +12,21 @@ from .db import init_db, get_db
 from .beads import create_bead, get_bead, star_bead, unstar_bead, supersede_bead, BeadType
 from .search import search
 from .retention import maintain_wisdom
+from .session import (
+    get_session, get_phase, set_phase, get_goal, set_goal,
+    start_session,
+)
+from .pm import (
+    generate_perspectives, check_perspectives_complete,
+    create_spec, approve_spec, is_spec_approved, list_specs,
+    decompose_spec, save_task_graph, get_orchestration_status,
+)
+from .orchestrator import (
+    start_orchestration, load_orchestration,
+    start_task, complete_task, fail_task,
+    file_bug, close_bug, get_open_bugs,
+    get_full_orchestration_status, get_next_action,
+)
 
 # Initialize server
 server = Server("enki")
@@ -128,15 +144,255 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="enki_status",
-            description="Get memory statistics",
+            description="Get memory statistics and current session status",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "project": {
                         "type": "string",
-                        "description": "Optional project filter",
+                        "description": "Optional project path",
                     },
                 },
+            },
+        ),
+        # Session tools
+        Tool(
+            name="enki_goal",
+            description="Set the session goal (satisfies Gate 1)",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "goal": {
+                        "type": "string",
+                        "description": "What we're working on this session",
+                    },
+                    "project": {
+                        "type": "string",
+                        "description": "Optional project path",
+                    },
+                },
+                "required": ["goal"],
+            },
+        ),
+        Tool(
+            name="enki_phase",
+            description="Get or set the current session phase",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "phase": {
+                        "type": "string",
+                        "enum": ["intake", "debate", "plan", "implement", "review", "test", "ship"],
+                        "description": "Phase to set (omit to just get current)",
+                    },
+                    "project": {
+                        "type": "string",
+                        "description": "Optional project path",
+                    },
+                },
+            },
+        ),
+        # PM tools
+        Tool(
+            name="enki_debate",
+            description="Start debate phase - generate multi-perspective analysis",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "goal": {
+                        "type": "string",
+                        "description": "Feature/change to debate",
+                    },
+                    "context": {
+                        "type": "string",
+                        "description": "Additional context",
+                    },
+                    "project": {
+                        "type": "string",
+                        "description": "Optional project path",
+                    },
+                },
+                "required": ["goal"],
+            },
+        ),
+        Tool(
+            name="enki_plan",
+            description="Create a spec from debate",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Spec name (slug format)",
+                    },
+                    "problem": {
+                        "type": "string",
+                        "description": "Problem statement",
+                    },
+                    "solution": {
+                        "type": "string",
+                        "description": "Proposed solution",
+                    },
+                    "project": {
+                        "type": "string",
+                        "description": "Optional project path",
+                    },
+                },
+                "required": ["name"],
+            },
+        ),
+        Tool(
+            name="enki_approve",
+            description="Approve a spec (satisfies Gate 2)",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Spec name to approve",
+                    },
+                    "project": {
+                        "type": "string",
+                        "description": "Optional project path",
+                    },
+                },
+                "required": ["name"],
+            },
+        ),
+        Tool(
+            name="enki_decompose",
+            description="Break spec into tasks with dependencies",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Spec name to decompose",
+                    },
+                    "project": {
+                        "type": "string",
+                        "description": "Optional project path",
+                    },
+                },
+                "required": ["name"],
+            },
+        ),
+        # Orchestrator tools
+        Tool(
+            name="enki_orchestrate",
+            description="Start orchestration from approved spec",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Spec name to orchestrate",
+                    },
+                    "project": {
+                        "type": "string",
+                        "description": "Optional project path",
+                    },
+                },
+                "required": ["name"],
+            },
+        ),
+        Tool(
+            name="enki_task",
+            description="Manage orchestration tasks",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["start", "complete", "fail"],
+                        "description": "Action to perform",
+                    },
+                    "task_id": {
+                        "type": "string",
+                        "description": "Task ID",
+                    },
+                    "output": {
+                        "type": "string",
+                        "description": "Task output (for complete action)",
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "Failure reason (for fail action)",
+                    },
+                    "project": {
+                        "type": "string",
+                        "description": "Optional project path",
+                    },
+                },
+                "required": ["action", "task_id"],
+            },
+        ),
+        Tool(
+            name="enki_bug",
+            description="File or manage bugs",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["file", "close", "list"],
+                        "description": "Action to perform",
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "Bug title (for file action)",
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Bug description",
+                    },
+                    "bug_id": {
+                        "type": "string",
+                        "description": "Bug ID (for close action)",
+                    },
+                    "severity": {
+                        "type": "string",
+                        "enum": ["critical", "high", "medium", "low"],
+                        "description": "Bug severity",
+                    },
+                    "project": {
+                        "type": "string",
+                        "description": "Optional project path",
+                    },
+                },
+                "required": ["action"],
+            },
+        ),
+        # Utility tools
+        Tool(
+            name="enki_log",
+            description="Log to RUNNING.md",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "message": {
+                        "type": "string",
+                        "description": "Message to log",
+                    },
+                    "entry_type": {
+                        "type": "string",
+                        "enum": ["NOTE", "DECISION", "FILE", "CMD", "WARNING"],
+                        "description": "Type of log entry",
+                    },
+                    "project": {
+                        "type": "string",
+                        "description": "Optional project path",
+                    },
+                },
+                "required": ["message"],
+            },
+        ),
+        Tool(
+            name="enki_maintain",
+            description="Run maintenance (decay weights, archive old beads)",
+            inputSchema={
+                "type": "object",
+                "properties": {},
             },
         ),
     ]
@@ -211,45 +467,234 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
     elif name == "enki_status":
         db = get_db()
-        project = arguments.get("project")
+        project_path = Path(arguments["project"]) if arguments.get("project") else None
 
-        # Get counts
-        if project:
-            total = db.execute(
-                "SELECT COUNT(*) as count FROM beads WHERE project = ? OR project IS NULL",
-                (project,),
-            ).fetchone()["count"]
-        else:
-            total = db.execute("SELECT COUNT(*) as count FROM beads").fetchone()["count"]
-
+        # Get memory counts
+        total = db.execute("SELECT COUNT(*) as count FROM beads").fetchone()["count"]
         active = db.execute(
             "SELECT COUNT(*) as count FROM beads WHERE superseded_by IS NULL"
         ).fetchone()["count"]
-
         starred = db.execute(
             "SELECT COUNT(*) as count FROM beads WHERE starred = 1"
         ).fetchone()["count"]
 
-        by_type = db.execute(
-            "SELECT type, COUNT(*) as count FROM beads WHERE superseded_by IS NULL GROUP BY type"
-        ).fetchall()
+        # Get session status
+        session = get_session(project_path)
+        phase = get_phase(project_path) if session else "intake"
+        goal = get_goal(project_path) if session else None
 
-        type_counts = {row["type"]: row["count"] for row in by_type}
+        # Get orchestration status
+        orch_status = get_full_orchestration_status(project_path)
 
         lines = [
-            "Enki Memory Status",
+            "Enki Status",
             "=" * 40,
-            f"Total beads: {total}",
-            f"Active beads: {active}",
-            f"Starred beads: {starred}",
+            f"Phase: {phase}",
+            f"Goal: {goal or '(not set)'}",
             "",
-            "By type:",
+            "Memory:",
+            f"  Total beads: {total}",
+            f"  Active beads: {active}",
+            f"  Starred beads: {starred}",
         ]
-        for bead_type in ["decision", "solution", "learning", "violation", "pattern"]:
-            count = type_counts.get(bead_type, 0)
-            lines.append(f"  {bead_type}: {count}")
+
+        if orch_status["active"]:
+            lines.extend([
+                "",
+                "Orchestration:",
+                f"  Spec: {orch_status['spec']}",
+                f"  Progress: {orch_status['tasks']['completed']}/{orch_status['tasks']['total']}",
+            ])
 
         return [TextContent(type="text", text="\n".join(lines))]
+
+    # Session tools
+    elif name == "enki_goal":
+        project_path = Path(arguments["project"]) if arguments.get("project") else None
+        set_goal(arguments["goal"], project_path)
+        return [TextContent(type="text", text=f"Goal set: {arguments['goal']}\n\nGate 1 (Goal Required) is now satisfied.")]
+
+    elif name == "enki_phase":
+        project_path = Path(arguments["project"]) if arguments.get("project") else None
+
+        if "phase" in arguments and arguments["phase"]:
+            set_phase(arguments["phase"], project_path)
+            return [TextContent(type="text", text=f"Phase set to: {arguments['phase']}")]
+        else:
+            current = get_phase(project_path)
+            return [TextContent(type="text", text=f"Current phase: {current}")]
+
+    # PM tools
+    elif name == "enki_debate":
+        project_path = Path(arguments["project"]) if arguments.get("project") else None
+
+        perspectives_path = generate_perspectives(
+            goal=arguments["goal"],
+            context=arguments.get("context"),
+            project_path=project_path,
+        )
+
+        return [TextContent(
+            type="text",
+            text=f"Debate started for: {arguments['goal']}\n\n"
+                 f"Perspectives template created: {perspectives_path}\n\n"
+                 f"Fill in ALL perspectives before running enki_plan:\n"
+                 f"  - PM Perspective\n"
+                 f"  - CTO Perspective\n"
+                 f"  - Architect Perspective\n"
+                 f"  - DBA Perspective\n"
+                 f"  - Security Perspective\n"
+                 f"  - Devil's Advocate"
+        )]
+
+    elif name == "enki_plan":
+        project_path = Path(arguments["project"]) if arguments.get("project") else None
+
+        try:
+            spec_path = create_spec(
+                name=arguments["name"],
+                problem=arguments.get("problem"),
+                solution=arguments.get("solution"),
+                project_path=project_path,
+            )
+            return [TextContent(
+                type="text",
+                text=f"Spec created: {spec_path}\n\nEdit the spec, then use enki_approve to approve it."
+            )]
+        except ValueError as e:
+            return [TextContent(type="text", text=f"Error: {e}")]
+
+    elif name == "enki_approve":
+        project_path = Path(arguments["project"]) if arguments.get("project") else None
+
+        try:
+            approve_spec(arguments["name"], project_path)
+            return [TextContent(
+                type="text",
+                text=f"Spec approved: {arguments['name']}\n\n"
+                     f"Gate 2 (Spec Approval) is now satisfied.\n"
+                     f"You can now spawn implementation agents."
+            )]
+        except ValueError as e:
+            return [TextContent(type="text", text=f"Error: {e}")]
+
+    elif name == "enki_decompose":
+        project_path = Path(arguments["project"]) if arguments.get("project") else None
+
+        try:
+            if not is_spec_approved(arguments["name"], project_path):
+                return [TextContent(type="text", text=f"Spec not approved: {arguments['name']}")]
+
+            graph = decompose_spec(arguments["name"], project_path)
+            save_task_graph(graph, project_path)
+
+            waves = graph.get_waves()
+            lines = [f"Task graph created for: {arguments['name']}\n"]
+            for i, wave in enumerate(waves, 1):
+                lines.append(f"Wave {i}:")
+                for task in wave:
+                    lines.append(f"  - {task.id}: {task.description} ({task.agent})")
+            return [TextContent(type="text", text="\n".join(lines))]
+        except ValueError as e:
+            return [TextContent(type="text", text=f"Error: {e}")]
+
+    # Orchestrator tools
+    elif name == "enki_orchestrate":
+        project_path = Path(arguments["project"]) if arguments.get("project") else None
+
+        try:
+            graph = decompose_spec(arguments["name"], project_path)
+            orch = start_orchestration(arguments["name"], graph, project_path)
+            next_action = get_next_action(project_path)
+            return [TextContent(
+                type="text",
+                text=f"Orchestration started: {orch.id}\n"
+                     f"Spec: {arguments['name']}\n"
+                     f"Tasks: {len(graph.tasks)}\n\n"
+                     f"Next: {next_action['message']}"
+            )]
+        except ValueError as e:
+            return [TextContent(type="text", text=f"Error: {e}")]
+
+    elif name == "enki_task":
+        project_path = Path(arguments["project"]) if arguments.get("project") else None
+        action = arguments["action"]
+        task_id = arguments["task_id"]
+
+        try:
+            if action == "start":
+                task = start_task(task_id, project_path)
+                return [TextContent(
+                    type="text",
+                    text=f"Task started: {task.id}\nAgent: {task.agent}\nDescription: {task.description}"
+                )]
+            elif action == "complete":
+                task = complete_task(task_id, arguments.get("output"), project_path)
+                next_action = get_next_action(project_path)
+                return [TextContent(type="text", text=f"Task completed: {task.id}\n\nNext: {next_action['message']}")]
+            elif action == "fail":
+                task = fail_task(task_id, arguments.get("reason"), project_path)
+                status = "failed (HITL required)" if task.status == "failed" else f"will retry (attempt {task.attempts}/{task.max_attempts})"
+                return [TextContent(type="text", text=f"Task {status}: {task.id}")]
+        except ValueError as e:
+            return [TextContent(type="text", text=f"Error: {e}")]
+
+    elif name == "enki_bug":
+        project_path = Path(arguments["project"]) if arguments.get("project") else None
+        action = arguments["action"]
+
+        try:
+            if action == "file":
+                bug = file_bug(
+                    title=arguments.get("title", "Bug"),
+                    description=arguments.get("description", ""),
+                    severity=arguments.get("severity", "medium"),
+                    project_path=project_path,
+                )
+                return [TextContent(type="text", text=f"Bug filed: {bug.id}\nTitle: {bug.title}\nSeverity: {bug.severity}")]
+            elif action == "close":
+                bug = close_bug(arguments["bug_id"], "fixed", project_path)
+                return [TextContent(type="text", text=f"Bug closed: {bug.id}")]
+            elif action == "list":
+                bugs = get_open_bugs(project_path)
+                if not bugs:
+                    return [TextContent(type="text", text="No open bugs.")]
+                lines = ["Open Bugs:"]
+                for bug in bugs:
+                    lines.append(f"  {bug.id}: {bug.title} ({bug.severity})")
+                return [TextContent(type="text", text="\n".join(lines))]
+        except ValueError as e:
+            return [TextContent(type="text", text=f"Error: {e}")]
+
+    # Utility tools
+    elif name == "enki_log":
+        project_path = Path(arguments["project"]) if arguments.get("project") else Path.cwd()
+        message = arguments["message"]
+        entry_type = arguments.get("entry_type", "NOTE")
+
+        # Log to RUNNING.md
+        enki_dir = project_path / ".enki"
+        enki_dir.mkdir(exist_ok=True)
+        running_md = enki_dir / "RUNNING.md"
+
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%H:%M")
+        entry = f"[{timestamp}] {entry_type}: {message}\n"
+
+        with open(running_md, "a") as f:
+            f.write(entry)
+
+        return [TextContent(type="text", text=f"Logged: {entry.strip()}")]
+
+    elif name == "enki_maintain":
+        results = maintain_wisdom()
+        return [TextContent(
+            type="text",
+            text=f"Maintenance complete:\n"
+                 f"  Weights updated: {results['weights_updated']}\n"
+                 f"  Beads archived: {results['archived']}\n"
+                 f"  Superseded purged: {results['purged']}"
+        )]
 
     else:
         return [TextContent(type="text", text=f"Unknown tool: {name}")]

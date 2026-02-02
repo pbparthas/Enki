@@ -69,6 +69,19 @@ from .ereshkigal import (
     complete_review,
     get_report_summary,
 )
+from .migration import (
+    migrate_to_enki,
+    validate_migration,
+    rollback_migration,
+)
+from .override import (
+    start_override,
+    get_active_override,
+    end_override,
+    mark_override_legitimate,
+    get_override_stats,
+    get_recent_overrides,
+)
 
 
 def cmd_init(args):
@@ -1209,12 +1222,257 @@ def cmd_report_status(args):
     """Check if review is due."""
     init_db()
 
-    reminder = get_review_reminder()
+    if args.json:
+        # Output JSON for hook consumption
+        from .ereshkigal import (
+            get_last_review_date as ereshkigal_last_review,
+            is_review_overdue as ereshkigal_overdue,
+            get_interception_stats,
+        )
+        from datetime import datetime
 
-    if reminder:
-        print(reminder)
+        last_review = ereshkigal_last_review()
+        is_overdue = ereshkigal_overdue()
+
+        # Calculate days since review
+        days_since = 0
+        if last_review:
+            delta = datetime.now() - datetime.fromisoformat(last_review)
+            days_since = delta.days
+        else:
+            days_since = 999  # Never reviewed
+
+        # Get stats for the week
+        stats = get_interception_stats(days=7)
+
+        print(json.dumps({
+            "is_overdue": is_overdue,
+            "days_since_review": days_since,
+            "blocked_count": stats.get("blocked", 0),
+            "evasion_count": len(find_evasions_with_bugs(days=7)),
+            "false_positive_count": stats.get("false_positives", 0),
+        }))
     else:
-        print("No review due. Pattern enforcement is up to date.")
+        reminder = get_review_reminder()
+
+        if reminder:
+            print(reminder)
+        else:
+            print("No review due. Pattern enforcement is up to date.")
+
+
+# === Migration Commands (Phase 0) ===
+
+def cmd_migrate(args):
+    """Migrate from Odin/Freyja to Enki."""
+    print("Starting migration to Enki...")
+    print()
+
+    result = migrate_to_enki(
+        generate_embeddings=not args.skip_embeddings,
+        archive_hooks=not args.skip_hooks,
+        install_hooks=not args.skip_hooks,
+    )
+
+    print("Migration complete!")
+    print()
+    print(f"  Beads migrated: {result.beads_migrated}")
+    print(f"  Sessions migrated: {result.sessions_migrated}")
+    print(f"  Projects migrated: {result.projects_migrated}")
+    print(f"  Embeddings generated: {result.embeddings_generated}")
+    print(f"  Hooks archived: {result.hooks_archived}")
+    print(f"  Hooks installed: {result.hooks_installed}")
+
+    if result.errors:
+        print()
+        print("Errors encountered:")
+        for error in result.errors:
+            print(f"  - {error}")
+
+    print()
+    print("Run 'enki migrate --validate' to verify migration.")
+
+
+def cmd_migrate_validate(args):
+    """Validate migration."""
+    print("Validating migration...")
+    print()
+
+    checks = validate_migration()
+
+    all_passed = True
+
+    # Check database
+    status = "PASS" if checks["enki_db_exists"] else "FAIL"
+    if status == "FAIL":
+        all_passed = False
+    print(f"  [{status}] Enki database exists")
+
+    # Check beads
+    print(f"  [INFO] Beads migrated: {checks['beads_count']}")
+    print(f"  [INFO] Embeddings generated: {checks['embeddings_count']}")
+
+    if checks["beads_without_embeddings"] > 0:
+        print(f"  [WARN] Beads without embeddings: {checks['beads_without_embeddings']}")
+    else:
+        print(f"  [PASS] All beads have embeddings")
+
+    # Check hooks
+    status = "PASS" if checks["odin_hooks_archived"] else "FAIL"
+    if status == "FAIL":
+        all_passed = False
+    print(f"  [{status}] Odin hooks archived")
+
+    status = "PASS" if checks["freyja_hooks_archived"] else "FAIL"
+    if status == "FAIL":
+        all_passed = False
+    print(f"  [{status}] Freyja hooks archived")
+
+    if checks["enki_hooks_installed"] >= 2:
+        print(f"  [PASS] Enki hooks installed: {checks['enki_hooks_installed']}")
+    else:
+        print(f"  [WARN] Enki hooks installed: {checks['enki_hooks_installed']}")
+
+    # Errors
+    if checks["errors"]:
+        print()
+        print("Errors:")
+        for error in checks["errors"]:
+            print(f"  - {error}")
+            all_passed = False
+
+    print()
+    if all_passed:
+        print("Migration validation PASSED")
+    else:
+        print("Migration validation FAILED - see errors above")
+        sys.exit(1)
+
+
+def cmd_migrate_rollback(args):
+    """Rollback migration."""
+    if not args.force:
+        print("This will restore old Odin/Freyja hooks and remove Enki hooks.")
+        print("Migrated beads will NOT be deleted.")
+        print()
+        print("Run with --force to confirm.")
+        sys.exit(1)
+
+    print("Rolling back migration...")
+    rollback_migration()
+    print("Rollback complete.")
+    print("Note: Migrated beads have been preserved in Enki database.")
+
+
+# === Override Commands ===
+
+def cmd_override_start(args):
+    """Start an emergency override."""
+    project_path = Path(args.project) if args.project else None
+
+    override = start_override(
+        reason=args.reason,
+        tier=args.tier,
+        max_files=args.max_files,
+        duration_minutes=args.duration,
+        project_path=project_path,
+    )
+
+    from datetime import datetime
+    remaining = (override.expires_at - datetime.now()).total_seconds() / 60
+
+    print("Emergency override acknowledged.")
+    print()
+    print(f"ID: {override.id}")
+    print(f"Reason: {override.reason}")
+    print(f"Tier: {override.tier}")
+    print(f"File limit: {override.max_files}")
+    print(f"Time remaining: {remaining:.0f} minutes")
+    print()
+    print("You have limited time and scope for this override.")
+    print("After completion, mark as legitimate with:")
+    print(f"  enki override mark {override.id} --legitimate")
+
+
+def cmd_override_status(args):
+    """Check current override status."""
+    project_path = Path(args.project) if args.project else None
+
+    override = get_active_override(project_path)
+
+    if not override:
+        print("No active override.")
+        return
+
+    from datetime import datetime
+    remaining = (override.expires_at - datetime.now()).total_seconds() / 60
+
+    print("Active Override:")
+    print(f"  ID: {override.id}")
+    print(f"  Reason: {override.reason}")
+    print(f"  Files edited: {override.files_edited}/{override.max_files}")
+    print(f"  Time remaining: {remaining:.0f} minutes")
+
+
+def cmd_override_end(args):
+    """End current override."""
+    project_path = Path(args.project) if args.project else None
+
+    override = get_active_override(project_path)
+    if override:
+        end_override(override.id, project_path)
+        print(f"Override ended: {override.id}")
+        print(f"Files edited: {override.files_edited}")
+        print()
+        print("Remember to mark this override as legitimate or not:")
+        print(f"  enki override mark {override.id} --legitimate")
+        print(f"  enki override mark {override.id} --not-legitimate")
+    else:
+        print("No active override to end.")
+
+
+def cmd_override_mark(args):
+    """Mark an override as legitimate or not."""
+    was_legitimate = args.legitimate
+
+    if mark_override_legitimate(args.override_id, was_legitimate):
+        status = "legitimate" if was_legitimate else "NOT legitimate"
+        print(f"Override {args.override_id} marked as {status}")
+    else:
+        print(f"Override not found: {args.override_id}")
+        sys.exit(1)
+
+
+def cmd_override_stats(args):
+    """Show override statistics."""
+    init_db()
+
+    stats = get_override_stats(days=args.days)
+
+    print(f"Override Statistics (last {args.days} days)")
+    print("=" * 40)
+    print(f"Total overrides: {stats['total']}")
+    print(f"Legitimate: {stats['legitimate']}")
+    print(f"Not legitimate: {stats['illegitimate']}")
+    print(f"Unreviewed: {stats['unreviewed']}")
+    print(f"Average files edited: {stats['average_files_edited']}")
+
+
+def cmd_override_recent(args):
+    """Show recent overrides."""
+    init_db()
+
+    overrides = get_recent_overrides(limit=args.limit)
+
+    if not overrides:
+        print("No overrides found.")
+        return
+
+    print("Recent Overrides:")
+    for o in overrides:
+        legit = "?" if o["was_legitimate"] is None else ("Y" if o["was_legitimate"] else "N")
+        print(f"  [{legit}] {o['id'][:12]}: {o['reason'][:40]}")
+        print(f"      Files: {o['files_edited']}/{o['max_files']} | {o['started_at']}")
 
 
 def main():
@@ -1647,7 +1905,71 @@ def main():
 
     # report status
     report_status_parser = report_subparsers.add_parser("status", help="Check if review is due")
+    report_status_parser.add_argument("--json", action="store_true", help="JSON output for hooks")
     report_status_parser.set_defaults(func=cmd_report_status)
+
+    # === Migration Commands (Phase 0) ===
+    migrate_parser = subparsers.add_parser("migrate", help="Migrate from Odin/Freyja to Enki")
+    migrate_parser.add_argument("--skip-embeddings", action="store_true",
+                                help="Skip embedding generation (faster but no semantic search)")
+    migrate_parser.add_argument("--skip-hooks", action="store_true",
+                                help="Don't archive old hooks or install new ones")
+    migrate_parser.add_argument("--validate", action="store_true",
+                                help="Validate migration instead of running it")
+    migrate_parser.add_argument("--rollback", action="store_true",
+                                help="Rollback migration (restore old hooks)")
+    migrate_parser.add_argument("--force", action="store_true",
+                                help="Force operation (required for rollback)")
+    migrate_parser.set_defaults(func=lambda args:
+        cmd_migrate_validate(args) if args.validate else
+        cmd_migrate_rollback(args) if args.rollback else
+        cmd_migrate(args))
+
+    # === Override Commands ===
+    override_parser = subparsers.add_parser("override", help="Emergency gate bypass")
+    override_subparsers = override_parser.add_subparsers(dest="override_command")
+
+    # override start
+    override_start_parser = override_subparsers.add_parser("start", help="Start emergency override")
+    override_start_parser.add_argument("reason", help="Reason for the override")
+    override_start_parser.add_argument("-t", "--tier", choices=["trivial", "quick_fix"],
+                                       default="quick_fix", help="Max tier for override")
+    override_start_parser.add_argument("-f", "--max-files", type=int, default=3,
+                                       help="Maximum files allowed")
+    override_start_parser.add_argument("-d", "--duration", type=int, default=15,
+                                       help="Duration in minutes")
+    override_start_parser.add_argument("-p", "--project", help="Project path")
+    override_start_parser.set_defaults(func=cmd_override_start)
+
+    # override status
+    override_status_parser = override_subparsers.add_parser("status", help="Check override status")
+    override_status_parser.add_argument("-p", "--project", help="Project path")
+    override_status_parser.set_defaults(func=cmd_override_status)
+
+    # override end
+    override_end_parser = override_subparsers.add_parser("end", help="End current override")
+    override_end_parser.add_argument("-p", "--project", help="Project path")
+    override_end_parser.set_defaults(func=cmd_override_end)
+
+    # override mark
+    override_mark_parser = override_subparsers.add_parser("mark", help="Mark override legitimacy")
+    override_mark_parser.add_argument("override_id", help="Override ID to mark")
+    override_mark_parser.add_argument("--legitimate", action="store_true",
+                                      help="Mark as legitimate")
+    override_mark_parser.add_argument("--not-legitimate", action="store_true",
+                                      help="Mark as not legitimate")
+    override_mark_parser.set_defaults(func=lambda args:
+        cmd_override_mark(type('Args', (), {'override_id': args.override_id, 'legitimate': not args.not_legitimate})()))
+
+    # override stats
+    override_stats_parser = override_subparsers.add_parser("stats", help="Override statistics")
+    override_stats_parser.add_argument("-d", "--days", type=int, default=30, help="Days to look back")
+    override_stats_parser.set_defaults(func=cmd_override_stats)
+
+    # override recent
+    override_recent_parser = override_subparsers.add_parser("recent", help="Show recent overrides")
+    override_recent_parser.add_argument("-l", "--limit", type=int, default=10, help="Max results")
+    override_recent_parser.set_defaults(func=cmd_override_recent)
 
     args = parser.parse_args()
 

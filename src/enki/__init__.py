@@ -79,6 +79,23 @@ from .ereshkigal import (
     complete_review,
     get_report_summary,
 )
+from .migration import (
+    MigrationResult,
+    migrate_to_enki,
+    validate_migration,
+    rollback_migration,
+)
+from .override import (
+    Override,
+    start_override,
+    get_active_override,
+    check_override_allows,
+    track_override_edit,
+    end_override,
+    mark_override_legitimate,
+    get_override_stats,
+    get_recent_overrides,
+)
 
 __all__ = [
     # Database
@@ -190,4 +207,19 @@ __all__ = [
     "generate_review_checklist",
     "complete_review",
     "get_report_summary",
+    # Phase 0: Migration
+    "MigrationResult",
+    "migrate_to_enki",
+    "validate_migration",
+    "rollback_migration",
+    # Override mechanism
+    "Override",
+    "start_override",
+    "get_active_override",
+    "check_override_allows",
+    "track_override_edit",
+    "end_override",
+    "mark_override_legitimate",
+    "get_override_stats",
+    "get_recent_overrides",
 ]
