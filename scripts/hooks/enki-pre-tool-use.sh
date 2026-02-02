@@ -31,8 +31,7 @@ fi
 
 # Check if enki CLI is available
 if ! command -v enki &> /dev/null; then
-    # Fallback: allow if enki not installed
-    echo '{"decision": "allow"}'
+    echo '{"decision": "block", "reason": "Enki not installed. Cannot verify gates."}'
     exit 0
 fi
 
@@ -57,7 +56,12 @@ fi
 
 # === Layer 2: Ereshkigal Pattern Interception ===
 # Only check for tools that modify code
-if [[ "$TOOL" =~ ^(Edit|Write|MultiEdit|Bash)$ ]] && [[ -n "$REASONING" ]]; then
+if [[ "$TOOL" =~ ^(Edit|Write|MultiEdit|Bash)$ ]]; then
+    if [[ -z "$REASONING" ]]; then
+        echo '{"decision": "block", "reason": "No reasoning provided. Ereshkigal requires explanation for code changes."}'
+        exit 0
+    fi
+
     ERESHKIGAL_RESULT=$(enki ereshkigal intercept \
         --tool "$TOOL" \
         --reasoning "$REASONING" \

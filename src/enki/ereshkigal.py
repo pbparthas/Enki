@@ -263,8 +263,9 @@ def log_attempt(
             phase,
         ))
         db.commit()
-    except Exception:
-        pass
+    except Exception as e:
+        import sys
+        print(f"Ereshkigal: Failed to log interception: {e}", file=sys.stderr)
 
     return interception_id
 
@@ -517,8 +518,9 @@ def get_interception_stats(days: int = 7) -> dict:
             if row["pattern"]:
                 stats["by_pattern"][row["pattern"]] = row["count"]
 
-    except Exception:
-        pass
+    except Exception as e:
+        import sys
+        print(f"Ereshkigal: Failed to get interception stats: {e}", file=sys.stderr)
 
     return stats
 
@@ -555,7 +557,9 @@ def get_recent_interceptions(
     try:
         rows = db.execute(query, params).fetchall()
         return [dict(row) for row in rows]
-    except Exception:
+    except Exception as e:
+        import sys
+        print(f"Ereshkigal: Failed to get recent interceptions: {e}", file=sys.stderr)
         return []
 
 
@@ -782,8 +786,9 @@ def find_evasions_with_bugs(days: int = 30) -> list[dict]:
                 "correlation": "Violations occurred after this was allowed",
             })
 
-    except Exception:
-        pass
+    except Exception as e:
+        import sys
+        print(f"Ereshkigal: Failed to find evasions with bugs: {e}", file=sys.stderr)
 
     return evasions
 

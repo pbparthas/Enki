@@ -71,7 +71,6 @@ class GateAdjustment:
 TRIGGER_THRESHOLDS = {
     "same_violation_count": 3,  # Same violation N+ times triggers analysis
     "rework_correlation": 2,  # N+ rework cases after skipped phase
-    "override_frequency": 5,  # N+ overrides suggest gate too strict
     "stale_knowledge_hits": 10,  # N+ stale results suggest decay issues
 }
 

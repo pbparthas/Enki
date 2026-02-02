@@ -552,8 +552,8 @@ def file_bug(
     if db:
         try:
             db.execute("""
-                INSERT INTO violations (gate, tool, file_path, reason, was_overridden, created_at)
-                VALUES ('bug', ?, ?, ?, 0, CURRENT_TIMESTAMP)
+                INSERT INTO violations (gate, tool, file_path, reason)
+                VALUES ('bug', ?, ?, ?)
             """, (found_by, related_task or "", f"Bug: {title}"))
             db.commit()
         except Exception:
@@ -1099,13 +1099,12 @@ def get_spawn_task_call(
     prompt = generate_agent_prompt(task, orch, project_path)
 
     # Map agent to subagent_type
-    # For now, most agents use general-purpose
     # Skill-based agents need special handling
     if "skill" in agent_info:
         # For skill-based agents, the prompt tells them to use the skill
-        subagent_type = "general-purpose"
+        subagent_type = "Explore"
     else:
-        subagent_type = "general-purpose"
+        subagent_type = "Explore"
 
     return {
         "description": f"{task.agent}: {task.description[:30]}",

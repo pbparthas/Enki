@@ -25,7 +25,6 @@ class Violation:
     phase: str
     tier: str
     reason: str
-    was_overridden: bool
     timestamp: datetime
 
 
@@ -47,7 +46,6 @@ def log_violation(
     tool: str,
     reason: str,
     file_path: Optional[str] = None,
-    was_overridden: bool = False,
     project_path: Optional[Path] = None,
 ) -> Violation:
     """Log a gate violation.
@@ -57,7 +55,6 @@ def log_violation(
         tool: Tool that was attempted
         reason: Reason for violation
         file_path: File being accessed (if applicable)
-        was_overridden: Whether user overrode the block
         project_path: Project path
 
     Returns:
@@ -72,10 +69,10 @@ def log_violation(
     db.execute(
         """
         INSERT INTO violations
-        (id, session_id, gate, tool, file_path, phase, tier, reason, was_overridden)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (id, session_id, gate, tool, file_path, phase, tier, reason)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (violation_id, session_id, gate, tool, file_path, phase, tier, reason, int(was_overridden)),
+        (violation_id, session_id, gate, tool, file_path, phase, tier, reason),
     )
     db.commit()
 
@@ -88,7 +85,6 @@ def log_violation(
         phase=phase,
         tier=tier,
         reason=reason,
-        was_overridden=was_overridden,
         timestamp=datetime.now(),
     )
 
@@ -215,7 +211,6 @@ def get_violations(
             phase=row["phase"],
             tier=row["tier"],
             reason=row["reason"],
-            was_overridden=bool(row["was_overridden"]),
             timestamp=row["timestamp"],
         )
         for row in rows
@@ -294,16 +289,6 @@ def get_violation_stats(days: int = 7) -> dict:
         (f"-{days} days",),
     ).fetchall()
 
-    # Override rate
-    overridden = db.execute(
-        """
-        SELECT COUNT(*) as count FROM violations
-        WHERE timestamp > datetime('now', ?)
-        AND was_overridden = 1
-        """,
-        (f"-{days} days",),
-    ).fetchone()["count"]
-
     # Escalations
     escalations = db.execute(
         """
@@ -316,7 +301,5 @@ def get_violation_stats(days: int = 7) -> dict:
     return {
         "total_violations": total,
         "by_gate": {row["gate"]: row["count"] for row in by_gate},
-        "overridden": overridden,
-        "override_rate": overridden / total if total > 0 else 0,
         "escalations": escalations,
     }

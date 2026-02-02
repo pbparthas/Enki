@@ -83,13 +83,14 @@ class TestDetectTier:
         tier = detect_tier(files, "", temp_project)
         assert tier == "major"
 
-    def test_major_keywords_in_goal(self, temp_project):
-        """Test major tier from keywords in goal."""
+    def test_tier_based_on_file_count_not_keywords(self, temp_project):
+        """Test that tier is based on file count, not goal keywords."""
+        # Keywords in goal don't affect tier - only file/line counts matter
         tier = detect_tier([], "Refactor the authentication system", temp_project)
-        assert tier == "major"
+        assert tier == "trivial"  # No files = trivial
 
-        tier = detect_tier([], "Migrate to new database", temp_project)
-        assert tier == "major"
+        tier = detect_tier(["a.py"], "Migrate to new database", temp_project)
+        assert tier == "quick_fix"  # 1 file = quick_fix
 
 
 class TestGate1Phase:
@@ -221,8 +222,10 @@ class TestCheckAllGates:
 
     def test_passes_when_all_gates_pass(self, temp_project):
         """Test that check passes when all gates pass."""
-        set_phase("implement", temp_project)
+        # Use intake phase - implement phase requires scope
+        set_phase("intake", temp_project)
 
+        # README.md is non-impl, allowed in any phase
         result = check_all_gates("Edit", "README.md", None, temp_project)
         assert result.allowed
 

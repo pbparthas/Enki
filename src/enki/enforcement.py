@@ -18,13 +18,6 @@ IMPL_EXTENSIONS = {
     ".c", ".cpp", ".h", ".hpp", ".cs",
 }
 
-# Keywords that indicate major work
-MAJOR_KEYWORDS = [
-    "refactor", "migrate", "breaking", "architecture",
-    "redesign", "overhaul", "rewrite", "restructure",
-]
-
-
 @dataclass
 class GateResult:
     """Result of a gate check."""
@@ -105,11 +98,6 @@ def detect_tier(
 
     if goal is None:
         goal = get_goal(project_path) or ""
-
-    # Check for major keywords in goal
-    goal_lower = goal.lower()
-    if any(kw in goal_lower for kw in MAJOR_KEYWORDS):
-        return "major"
 
     # Count files and lines
     files_edited = len(session_edits)
@@ -215,7 +203,7 @@ def check_gate_2_spec(
         return GateResult(allowed=True)
 
     # Research agents allowed without spec
-    research_agents = {"Explore", "Plan", "general-purpose", "claude-code-guide"}
+    research_agents = {"Explore", "Plan"}
     if agent_type in research_agents:
         return GateResult(allowed=True)
 
@@ -272,20 +260,17 @@ def check_gate_3_tdd(
     tier = get_tier(project_path)
 
     if test_file is None:
-        # Feature/Major require tests, Quick Fix warns
-        if tier in {"feature", "major"}:
-            return GateResult(
-                allowed=False,
-                gate="tdd",
-                reason=(
-                    f"GATE 3: TDD Required\n\n"
-                    f"No test file found for: {file_path}\n\n"
-                    f"For {tier} tier, tests are required before implementation.\n\n"
-                    f"Create a test file first, then implement."
-                ),
-            )
-        # For quick_fix, just warn (allow but log)
-        # The violation will be logged separately
+        # All tiers require tests
+        return GateResult(
+            allowed=False,
+            gate="tdd",
+            reason=(
+                f"GATE 3: TDD Required\n\n"
+                f"No test file found for: {file_path}\n\n"
+                f"Tests are required before implementation.\n\n"
+                f"Create a test file first, then implement."
+            ),
+        )
 
     return GateResult(allowed=True)
 
@@ -309,9 +294,20 @@ def check_gate_4_scope(
 
     # Get scope files
     scope_files = get_scope_files(project_path)
+    phase = get_phase(project_path)
 
-    # If no scope defined, allow all
+    # If orchestrating without scope, block
     if not scope_files:
+        if phase == "implement":
+            return GateResult(
+                allowed=False,
+                gate="scope",
+                reason=(
+                    "GATE 4: No Scope Defined\n\n"
+                    "Implementation phase requires defined scope.\n\n"
+                    "Run /plan to define scope before implementing."
+                ),
+            )
         return GateResult(allowed=True)
 
     # Check if file is in scope

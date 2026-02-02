@@ -141,8 +141,7 @@ CREATE TABLE IF NOT EXISTS violations (
     file_path TEXT,
     phase TEXT,
     tier TEXT,
-    reason TEXT,
-    was_overridden INTEGER DEFAULT 0
+    reason TEXT
 );
 
 -- Tier escalations: when Claude's work grows beyond initial tier
@@ -167,20 +166,6 @@ CREATE TABLE IF NOT EXISTS enki_self_analysis (
     impact TEXT,
     correction TEXT,
     effective INTEGER
-);
-
--- Overrides: emergency gate bypass tracking
-CREATE TABLE IF NOT EXISTS overrides (
-    id TEXT PRIMARY KEY,
-    session_id TEXT,
-    reason TEXT NOT NULL,
-    tier TEXT,
-    max_files INT DEFAULT 3,
-    duration_seconds INT DEFAULT 900,  -- 15 minutes default
-    files_edited INT DEFAULT 0,
-    started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    expires_at TIMESTAMP,
-    was_legitimate INTEGER  -- User marks after the fact
 );
 
 -- Indexes
