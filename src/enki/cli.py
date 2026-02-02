@@ -48,6 +48,20 @@ from .evolution import (
     is_review_due,
     get_last_review_date,
 )
+from .ereshkigal import (
+    init_patterns,
+    load_patterns,
+    add_pattern,
+    remove_pattern,
+    get_pattern_categories,
+    intercept,
+    would_block,
+    mark_false_positive,
+    mark_legitimate,
+    get_interception_stats,
+    get_recent_interceptions,
+    generate_weekly_report,
+)
 
 
 def cmd_init(args):
@@ -921,6 +935,194 @@ def cmd_evolution_status(args):
         print("\nRun 'enki evolution review' to perform self-review.")
 
 
+# === Ereshkigal Commands ===
+
+def cmd_ereshkigal_test(args):
+    """Test if reasoning would be blocked."""
+    result = would_block(args.reasoning)
+
+    if result:
+        category, pattern = result
+        print(f"WOULD BLOCK")
+        print(f"  Category: {category}")
+        print(f"  Pattern: {pattern}")
+        sys.exit(1)
+    else:
+        print("WOULD ALLOW")
+
+
+def cmd_ereshkigal_intercept(args):
+    """Run interception on reasoning."""
+    init_db()
+
+    result = intercept(
+        tool=args.tool,
+        reasoning=args.reasoning,
+        session_id=args.session,
+        phase=args.phase,
+    )
+
+    if args.json:
+        print(json.dumps({
+            "allowed": result.allowed,
+            "category": result.category,
+            "pattern": result.pattern,
+            "interception_id": result.interception_id,
+            "message": result.message,
+        }))
+    else:
+        if result.allowed:
+            print("ALLOWED")
+            print(f"Logged: {result.interception_id[:8] if result.interception_id else 'N/A'}")
+        else:
+            print(result.message)
+            sys.exit(1)
+
+
+def cmd_ereshkigal_stats(args):
+    """Show interception statistics."""
+    init_db()
+
+    stats = get_interception_stats(days=args.days)
+
+    print(f"Ereshkigal Statistics (last {args.days} days)")
+    print("=" * 40)
+    print(f"Total attempts: {stats['total']}")
+    print(f"Blocked: {stats['blocked']}")
+    print(f"Allowed: {stats['allowed']}")
+    if stats['total'] > 0:
+        print(f"Block rate: {stats['blocked'] / stats['total'] * 100:.1f}%")
+    print()
+
+    if stats['by_category']:
+        print("By category:")
+        for cat, count in stats['by_category'].items():
+            print(f"  {cat}: {count}")
+        print()
+
+    if stats['by_pattern']:
+        print("Top patterns:")
+        for pattern, count in list(stats['by_pattern'].items())[:5]:
+            print(f"  {pattern}: {count}")
+        print()
+
+    if stats['false_positives'] > 0 or stats['legitimate_blocks'] > 0:
+        total_evaluated = stats['false_positives'] + stats['legitimate_blocks']
+        accuracy = stats['legitimate_blocks'] / total_evaluated * 100 if total_evaluated > 0 else 0
+        print(f"False positives: {stats['false_positives']}")
+        print(f"Pattern accuracy: {accuracy:.1f}%")
+
+
+def cmd_ereshkigal_report(args):
+    """Generate weekly report."""
+    init_db()
+
+    report = generate_weekly_report(days=args.days)
+
+    if args.output:
+        output_path = Path(args.output)
+        output_path.write_text(report)
+        print(f"Report written to: {output_path}")
+    else:
+        print(report)
+
+
+def cmd_ereshkigal_patterns(args):
+    """List current patterns."""
+    patterns = load_patterns()
+
+    if args.json:
+        print(json.dumps(patterns, indent=2))
+    else:
+        print("Ereshkigal Patterns")
+        print("=" * 40)
+        print(f"Version: {patterns.get('version', 'unknown')}")
+        print(f"Updated: {patterns.get('updated_at', 'unknown')}")
+        print(f"Updated by: {patterns.get('updated_by', 'unknown')}")
+        print()
+
+        categories = get_pattern_categories()
+        for category in categories:
+            pattern_list = patterns.get(category, [])
+            print(f"{category} ({len(pattern_list)} patterns):")
+            for p in pattern_list:
+                print(f"  - {p}")
+            print()
+
+
+def cmd_ereshkigal_add(args):
+    """Add a pattern."""
+    add_pattern(args.pattern, args.category)
+    print(f"Added pattern to {args.category}: {args.pattern}")
+
+
+def cmd_ereshkigal_remove(args):
+    """Remove a pattern."""
+    if remove_pattern(args.pattern, args.category):
+        print(f"Removed pattern from {args.category}: {args.pattern}")
+    else:
+        print(f"Pattern not found in {args.category}")
+        sys.exit(1)
+
+
+def cmd_ereshkigal_mark_fp(args):
+    """Mark interception as false positive."""
+    init_db()
+
+    if mark_false_positive(args.interception_id, args.note):
+        print(f"Marked as false positive: {args.interception_id}")
+    else:
+        print(f"Interception not found: {args.interception_id}")
+        sys.exit(1)
+
+
+def cmd_ereshkigal_mark_legit(args):
+    """Mark interception as legitimate block."""
+    init_db()
+
+    if mark_legitimate(args.interception_id, args.note):
+        print(f"Marked as legitimate: {args.interception_id}")
+    else:
+        print(f"Interception not found: {args.interception_id}")
+        sys.exit(1)
+
+
+def cmd_ereshkigal_recent(args):
+    """Show recent interceptions."""
+    init_db()
+
+    interceptions = get_recent_interceptions(
+        result=args.result,
+        limit=args.limit,
+    )
+
+    if not interceptions:
+        print("No interceptions found.")
+        return
+
+    for i in interceptions:
+        status = "BLOCKED" if i['result'] == 'blocked' else "allowed"
+        reasoning = i.get('reasoning', '')[:50]
+        timestamp = i.get('timestamp', 'unknown')
+
+        print(f"[{status}] {i['id'][:8]}")
+        print(f"  Tool: {i.get('tool', 'unknown')}")
+        print(f"  Reasoning: \"{reasoning}...\"")
+        if i['result'] == 'blocked':
+            print(f"  Pattern: {i.get('pattern', 'unknown')}")
+        print(f"  Time: {timestamp}")
+        if i.get('was_legitimate') is not None:
+            legit = "Yes" if i['was_legitimate'] else "No (false positive)"
+            print(f"  Legitimate: {legit}")
+        print()
+
+
+def cmd_ereshkigal_init(args):
+    """Initialize patterns.json with default patterns."""
+    path = init_patterns()
+    print(f"Patterns initialized at: {path}")
+
+
 def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(
@@ -1246,6 +1448,77 @@ def main():
     evolution_status_parser = evolution_subparsers.add_parser("status", help="Check if review is due")
     evolution_status_parser.add_argument("-p", "--project", help="Project path")
     evolution_status_parser.set_defaults(func=cmd_evolution_status)
+
+    # === Ereshkigal Commands ===
+    ereshkigal_parser = subparsers.add_parser("ereshkigal", help="Pattern interceptor (Ereshkigal)")
+    ereshkigal_subparsers = ereshkigal_parser.add_subparsers(dest="ereshkigal_command")
+
+    # ereshkigal init
+    ereshkigal_init_parser = ereshkigal_subparsers.add_parser("init", help="Initialize patterns.json")
+    ereshkigal_init_parser.set_defaults(func=cmd_ereshkigal_init)
+
+    # ereshkigal test
+    ereshkigal_test_parser = ereshkigal_subparsers.add_parser("test", help="Test if reasoning would be blocked")
+    ereshkigal_test_parser.add_argument("reasoning", help="Reasoning text to test")
+    ereshkigal_test_parser.set_defaults(func=cmd_ereshkigal_test)
+
+    # ereshkigal intercept
+    ereshkigal_intercept_parser = ereshkigal_subparsers.add_parser("intercept", help="Run interception")
+    ereshkigal_intercept_parser.add_argument("--tool", required=True, help="Tool being used")
+    ereshkigal_intercept_parser.add_argument("--reasoning", required=True, help="Claude's reasoning")
+    ereshkigal_intercept_parser.add_argument("--session", help="Session ID")
+    ereshkigal_intercept_parser.add_argument("--phase", help="Current phase")
+    ereshkigal_intercept_parser.add_argument("--json", action="store_true", help="JSON output")
+    ereshkigal_intercept_parser.set_defaults(func=cmd_ereshkigal_intercept)
+
+    # ereshkigal stats
+    ereshkigal_stats_parser = ereshkigal_subparsers.add_parser("stats", help="Show interception statistics")
+    ereshkigal_stats_parser.add_argument("-d", "--days", type=int, default=7, help="Days to look back")
+    ereshkigal_stats_parser.set_defaults(func=cmd_ereshkigal_stats)
+
+    # ereshkigal report
+    ereshkigal_report_parser = ereshkigal_subparsers.add_parser("report", help="Generate weekly report")
+    ereshkigal_report_parser.add_argument("-d", "--days", type=int, default=7, help="Days to include")
+    ereshkigal_report_parser.add_argument("-o", "--output", help="Output file path")
+    ereshkigal_report_parser.set_defaults(func=cmd_ereshkigal_report)
+
+    # ereshkigal patterns
+    ereshkigal_patterns_parser = ereshkigal_subparsers.add_parser("patterns", help="List current patterns")
+    ereshkigal_patterns_parser.add_argument("--json", action="store_true", help="JSON output")
+    ereshkigal_patterns_parser.set_defaults(func=cmd_ereshkigal_patterns)
+
+    # ereshkigal add
+    ereshkigal_add_parser = ereshkigal_subparsers.add_parser("add", help="Add a pattern")
+    ereshkigal_add_parser.add_argument("pattern", help="Regex pattern to add")
+    ereshkigal_add_parser.add_argument("-c", "--category", required=True,
+                                        choices=["skip_patterns", "minimize_patterns",
+                                                "urgency_patterns", "certainty_patterns"],
+                                        help="Pattern category")
+    ereshkigal_add_parser.set_defaults(func=cmd_ereshkigal_add)
+
+    # ereshkigal remove
+    ereshkigal_remove_parser = ereshkigal_subparsers.add_parser("remove", help="Remove a pattern")
+    ereshkigal_remove_parser.add_argument("pattern", help="Pattern to remove")
+    ereshkigal_remove_parser.add_argument("-c", "--category", required=True, help="Pattern category")
+    ereshkigal_remove_parser.set_defaults(func=cmd_ereshkigal_remove)
+
+    # ereshkigal mark-fp
+    ereshkigal_fp_parser = ereshkigal_subparsers.add_parser("mark-fp", help="Mark as false positive")
+    ereshkigal_fp_parser.add_argument("interception_id", help="Interception ID")
+    ereshkigal_fp_parser.add_argument("-n", "--note", help="Note explaining why")
+    ereshkigal_fp_parser.set_defaults(func=cmd_ereshkigal_mark_fp)
+
+    # ereshkigal mark-legit
+    ereshkigal_legit_parser = ereshkigal_subparsers.add_parser("mark-legit", help="Mark as legitimate block")
+    ereshkigal_legit_parser.add_argument("interception_id", help="Interception ID")
+    ereshkigal_legit_parser.add_argument("-n", "--note", help="Outcome note")
+    ereshkigal_legit_parser.set_defaults(func=cmd_ereshkigal_mark_legit)
+
+    # ereshkigal recent
+    ereshkigal_recent_parser = ereshkigal_subparsers.add_parser("recent", help="Show recent interceptions")
+    ereshkigal_recent_parser.add_argument("-r", "--result", choices=["allowed", "blocked"], help="Filter by result")
+    ereshkigal_recent_parser.add_argument("-l", "--limit", type=int, default=10, help="Max results")
+    ereshkigal_recent_parser.set_defaults(func=cmd_ereshkigal_recent)
 
     args = parser.parse_args()
 

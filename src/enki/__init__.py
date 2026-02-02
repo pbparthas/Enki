@@ -52,6 +52,23 @@ from .evolution import (
     get_evolution_summary,
     get_self_awareness_response,
 )
+from .ereshkigal import (
+    InterceptionResult,
+    init_patterns,
+    load_patterns,
+    save_patterns,
+    add_pattern,
+    remove_pattern,
+    get_pattern_categories,
+    intercept,
+    would_block,
+    log_attempt,
+    mark_false_positive,
+    mark_legitimate,
+    get_interception_stats,
+    get_recent_interceptions,
+    generate_weekly_report,
+)
 
 __all__ = [
     # Database
@@ -137,4 +154,20 @@ __all__ = [
     "explain_block",
     "get_evolution_summary",
     "get_self_awareness_response",
+    # Ereshkigal
+    "InterceptionResult",
+    "init_patterns",
+    "load_patterns",
+    "save_patterns",
+    "add_pattern",
+    "remove_pattern",
+    "get_pattern_categories",
+    "intercept",
+    "would_block",
+    "log_attempt",
+    "mark_false_positive",
+    "mark_legitimate",
+    "get_interception_stats",
+    "get_recent_interceptions",
+    "generate_weekly_report",
 ]
