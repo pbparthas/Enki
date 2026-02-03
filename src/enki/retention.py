@@ -42,17 +42,19 @@ def calculate_weight(bead: Union[Bead, dict]) -> float:
     now = datetime.now(timezone.utc)
 
     if isinstance(created_at, str):
-        # Parse SQLite timestamp
+        # Parse SQLite timestamp string
         try:
             created_at = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
         except ValueError:
             created_at = datetime.strptime(created_at, "%Y-%m-%d %H:%M:%S")
             created_at = created_at.replace(tzinfo=timezone.utc)
+    elif isinstance(created_at, (int, float)):
+        # Handle Unix timestamp
+        created_at = datetime.fromtimestamp(created_at, tz=timezone.utc)
 
     if created_at is None:
         created_at = now
-
-    if created_at.tzinfo is None:
+    elif hasattr(created_at, 'tzinfo') and created_at.tzinfo is None:
         created_at = created_at.replace(tzinfo=timezone.utc)
 
     age_days = (now - created_at).days
@@ -75,8 +77,11 @@ def calculate_weight(bead: Union[Bead, dict]) -> float:
             except ValueError:
                 last_accessed = datetime.strptime(last_accessed, "%Y-%m-%d %H:%M:%S")
                 last_accessed = last_accessed.replace(tzinfo=timezone.utc)
+        elif isinstance(last_accessed, (int, float)):
+            # Handle Unix timestamp
+            last_accessed = datetime.fromtimestamp(last_accessed, tz=timezone.utc)
 
-        if last_accessed.tzinfo is None:
+        if hasattr(last_accessed, 'tzinfo') and last_accessed.tzinfo is None:
             last_accessed = last_accessed.replace(tzinfo=timezone.utc)
 
         days_since_access = (now - last_accessed).days
