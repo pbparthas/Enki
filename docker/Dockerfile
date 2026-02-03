@@ -4,11 +4,16 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Copy only what's needed for the server
+# Create package structure
+RUN mkdir -p src/enki
+
+# Copy server files (minimal - no ML dependencies needed)
 COPY src/enki/api_server.py src/enki/api_server.py
 COPY src/enki/db.py src/enki/db.py
 COPY src/enki/auth.py src/enki/auth.py
-COPY src/enki/__init__.py src/enki/__init__.py
+
+# Create minimal __init__.py for server (avoids importing ML modules)
+RUN echo '"""Enki server package."""' > src/enki/__init__.py
 
 # Install minimal dependencies (no sentence-transformers)
 RUN pip install --no-cache-dir \
