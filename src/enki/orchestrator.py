@@ -81,6 +81,13 @@ AGENTS = {
         "tools": ["Read", "Edit", "Bash"],
         "writes_to": ["src/", "lib/"],
     },
+    "Validator-Security": {
+        "role": "Security code review using Sentinel skill",
+        "tier": "STANDARD",
+        "tools": ["Read", "Glob", "Grep"],
+        "writes_to": [],  # Read-only reviewer
+        "skill": "/sentinel-security",
+    },
 }
 
 # Map workers to their validators (two-stage where applicable)
