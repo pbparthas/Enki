@@ -29,6 +29,14 @@ from .orchestrator import (
     get_full_orchestration_status, get_next_action,
     spawn_agent_for_task, get_parallel_spawn_calls,
     AGENTS,
+    # Validation functions
+    submit_for_validation,
+    spawn_validators,
+    record_validation_result,
+    retry_rejected_task,
+    get_tasks_needing_validation,
+    get_rejected_tasks,
+    parse_validation_verdict,
 )
 from .persona import (
     build_session_start_injection,
@@ -888,6 +896,108 @@ def cmd_agents(args):
         if 'skill' in info:
             print(f"    Skill: {info['skill']}")
         print()
+
+
+# === Validation Commands ===
+
+def cmd_validate(args):
+    """Submit validation result for a task."""
+    task_id = args.task_id
+    validator = args.validator or "Validator-Code"
+    project_path = Path(args.project) if args.project else None
+
+    # Determine pass/fail
+    verdict_str = args.verdict.upper()
+    passed = verdict_str == "PASS"
+    feedback = args.feedback if not passed else None
+
+    task = record_validation_result(
+        task_id=task_id,
+        validator=validator,
+        passed=passed,
+        feedback=feedback,
+        project_path=project_path,
+    )
+
+    if passed:
+        print(f"Validation PASSED: {task_id}")
+        print(f"  Status: {task.status}")
+    else:
+        print(f"Validation FAILED: {task_id}")
+        print(f"  Status: {task.status}")
+        print(f"  Rejections: {task.rejection_count}/{task.max_rejections}")
+        if task.status == "failed":
+            print(f"  HITL required - max rejections exceeded")
+
+
+def cmd_spawn_validators(args):
+    """Spawn validators for a task."""
+    task_id = args.task_id
+    project_path = Path(args.project) if args.project else None
+
+    spawn_calls = spawn_validators(task_id, project_path)
+
+    if not spawn_calls:
+        print(f"No validators configured for task {task_id}")
+        return
+
+    if args.json:
+        print(json.dumps(spawn_calls, indent=2))
+    else:
+        print(f"Validators to spawn for {task_id}:")
+        for call in spawn_calls:
+            print(f"  - {call['validator']}: {call['params']['description']}")
+        print()
+        print("Use --json to get full spawn parameters")
+
+
+def cmd_retry(args):
+    """Get prompt to retry a rejected task."""
+    task_id = args.task_id
+    project_path = Path(args.project) if args.project else None
+
+    try:
+        params = retry_rejected_task(task_id, project_path)
+    except ValueError as e:
+        print(f"Error: {e}")
+        return
+
+    if args.json:
+        print(json.dumps(params, indent=2))
+    else:
+        print(f"Retry parameters for {task_id}:")
+        print(f"  Description: {params['description']}")
+        print()
+        print("Prompt:")
+        print("-" * 40)
+        print(params['prompt'])
+
+
+def cmd_validation_status(args):
+    """Show tasks awaiting validation or rejected."""
+    project_path = Path(args.project) if args.project else None
+
+    validating = get_tasks_needing_validation(project_path)
+    rejected = get_rejected_tasks(project_path)
+
+    if validating:
+        print("Tasks awaiting validation:")
+        for task in validating:
+            print(f"  - {task.id} ({task.agent}): {task.description[:40]}...")
+    else:
+        print("No tasks awaiting validation.")
+
+    print()
+
+    if rejected:
+        print("Rejected tasks (need retry):")
+        for task in rejected:
+            print(f"  - {task.id} ({task.agent}): rejection {task.rejection_count}/{task.max_rejections}")
+            if task.validator_feedback:
+                feedback_preview = task.validator_feedback[:60].replace('\n', ' ')
+                print(f"    Feedback: {feedback_preview}...")
+    else:
+        print("No rejected tasks.")
 
 
 # === Persona Commands ===
@@ -1932,6 +2042,31 @@ def main():
         cmd_spawn_next(args) if args.next else
         cmd_spawn(args) if args.task_id else
         print("Usage: enki spawn <task_id> or enki spawn --next or enki spawn --parallel"))
+
+    # === Validation Commands ===
+    validate_parser = subparsers.add_parser("validate", help="Submit validation result")
+    validate_parser.add_argument("task_id", help="Task ID being validated")
+    validate_parser.add_argument("verdict", choices=["pass", "fail", "PASS", "FAIL"], help="Validation verdict")
+    validate_parser.add_argument("--feedback", "-f", help="Feedback if failing (required for fail)")
+    validate_parser.add_argument("--validator", "-v", default="Validator-Code", help="Validator name")
+    validate_parser.add_argument("--project", "-p", help="Project path")
+    validate_parser.set_defaults(func=cmd_validate)
+
+    spawn_val_parser = subparsers.add_parser("spawn-validators", help="Spawn validators for a task")
+    spawn_val_parser.add_argument("task_id", help="Task ID to validate")
+    spawn_val_parser.add_argument("--project", "-p", help="Project path")
+    spawn_val_parser.add_argument("--json", action="store_true", help="Output as JSON")
+    spawn_val_parser.set_defaults(func=cmd_spawn_validators)
+
+    retry_parser = subparsers.add_parser("retry", help="Retry a rejected task")
+    retry_parser.add_argument("task_id", help="Rejected task ID")
+    retry_parser.add_argument("--project", "-p", help="Project path")
+    retry_parser.add_argument("--json", action="store_true", help="Output as JSON")
+    retry_parser.set_defaults(func=cmd_retry)
+
+    val_status_parser = subparsers.add_parser("validation-status", help="Show validation status")
+    val_status_parser.add_argument("--project", "-p", help="Project path")
+    val_status_parser.set_defaults(func=cmd_validation_status)
 
     # === Persona Commands ===
 

@@ -26,6 +26,14 @@ from .orchestrator import (
     start_task, complete_task, fail_task,
     file_bug, close_bug, get_open_bugs,
     get_full_orchestration_status, get_next_action,
+    # Validation functions
+    submit_for_validation,
+    spawn_validators,
+    record_validation_result,
+    retry_rejected_task,
+    get_tasks_needing_validation,
+    get_rejected_tasks,
+    get_validators_for_task,
 )
 
 # Initialize server
@@ -395,6 +403,88 @@ async def list_tools() -> list[Tool]:
                 "properties": {},
             },
         ),
+        # Validation tools
+        Tool(
+            name="enki_submit_for_validation",
+            description="Submit a task for validation (call when worker completes work)",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "task_id": {
+                        "type": "string",
+                        "description": "The task ID",
+                    },
+                    "output": {
+                        "type": "string",
+                        "description": "Summary of work done",
+                    },
+                },
+                "required": ["task_id", "output"],
+            },
+        ),
+        Tool(
+            name="enki_spawn_validators",
+            description="Spawn validator agents for a task awaiting validation",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "task_id": {
+                        "type": "string",
+                        "description": "The task ID to validate",
+                    },
+                },
+                "required": ["task_id"],
+            },
+        ),
+        Tool(
+            name="enki_record_validation",
+            description="Record a validator's verdict (PASS or FAIL)",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "task_id": {
+                        "type": "string",
+                        "description": "The original task ID (not the validation task)",
+                    },
+                    "validator": {
+                        "type": "string",
+                        "description": "Which validator (Validator-Tests, Validator-Code)",
+                    },
+                    "verdict": {
+                        "type": "string",
+                        "enum": ["PASS", "FAIL"],
+                        "description": "Validation verdict",
+                    },
+                    "feedback": {
+                        "type": "string",
+                        "description": "Required if verdict is FAIL - specific issues found",
+                    },
+                },
+                "required": ["task_id", "validator", "verdict"],
+            },
+        ),
+        Tool(
+            name="enki_retry_rejected_task",
+            description="Get the prompt to retry a rejected task",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "task_id": {
+                        "type": "string",
+                        "description": "The rejected task ID",
+                    },
+                },
+                "required": ["task_id"],
+            },
+        ),
+        Tool(
+            name="enki_validation_status",
+            description="Get status of tasks awaiting validation or rejected",
+            inputSchema={
+                "type": "object",
+                "properties": {},
+            },
+        ),
     ]
 
 
@@ -695,6 +785,94 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                  f"  Beads archived: {results['archived']}\n"
                  f"  Superseded purged: {results['purged']}"
         )]
+
+    # Validation tools
+    elif name == "enki_submit_for_validation":
+        try:
+            task = submit_for_validation(arguments["task_id"], arguments["output"])
+            validators = get_validators_for_task(task)
+            return [TextContent(
+                type="text",
+                text=f"Task {arguments['task_id']} submitted for validation.\nValidators: {validators}"
+            )]
+        except ValueError as e:
+            return [TextContent(type="text", text=f"Error: {e}")]
+
+    elif name == "enki_spawn_validators":
+        try:
+            spawn_calls = spawn_validators(arguments["task_id"])
+            if not spawn_calls:
+                return [TextContent(type="text", text=f"No validators configured for task {arguments['task_id']}")]
+            return [TextContent(type="text", text=json.dumps(spawn_calls, indent=2))]
+        except ValueError as e:
+            return [TextContent(type="text", text=f"Error: {e}")]
+
+    elif name == "enki_record_validation":
+        passed = arguments["verdict"].upper() == "PASS"
+        feedback = arguments.get("feedback")
+
+        if not passed and not feedback:
+            return [TextContent(type="text", text="Error: feedback is required when verdict is FAIL")]
+
+        try:
+            task = record_validation_result(
+                task_id=arguments["task_id"],
+                validator=arguments["validator"],
+                passed=passed,
+                feedback=feedback,
+            )
+
+            if task.status == "complete":
+                return [TextContent(type="text", text=f"Task {arguments['task_id']} validated and completed")]
+            elif task.status == "rejected":
+                return [TextContent(
+                    type="text",
+                    text=f"Task {arguments['task_id']} rejected (rejection {task.rejection_count}/{task.max_rejections})\n"
+                         f"Worker must fix issues and resubmit.\n"
+                         f"Use enki_retry_rejected_task to get the retry prompt."
+                )]
+            elif task.status == "failed":
+                return [TextContent(
+                    type="text",
+                    text=f"Task {arguments['task_id']} failed - HITL required\n"
+                         f"Max rejections exceeded. Human intervention needed."
+                )]
+            else:
+                return [TextContent(type="text", text=f"Task {arguments['task_id']} status: {task.status}")]
+
+        except ValueError as e:
+            return [TextContent(type="text", text=f"Error: {e}")]
+
+    elif name == "enki_retry_rejected_task":
+        try:
+            params = retry_rejected_task(arguments["task_id"])
+            return [TextContent(type="text", text=json.dumps(params, indent=2))]
+        except ValueError as e:
+            return [TextContent(type="text", text=f"Error: {e}")]
+
+    elif name == "enki_validation_status":
+        validating = get_tasks_needing_validation()
+        rejected = get_rejected_tasks()
+
+        lines = []
+
+        if validating:
+            lines.append("**Tasks Awaiting Validation:**")
+            for task in validating:
+                lines.append(f"- {task.id} ({task.agent})")
+        else:
+            lines.append("No tasks awaiting validation.")
+
+        lines.append("")
+
+        if rejected:
+            lines.append("**Rejected Tasks (need retry):**")
+            for task in rejected:
+                lines.append(f"- {task.id}: {task.rejection_count}/{task.max_rejections} rejections")
+        else:
+            lines.append("No rejected tasks.")
+
+        return [TextContent(type="text", text="\n".join(lines))]
 
     else:
         return [TextContent(type="text", text=f"Unknown tool: {name}")]

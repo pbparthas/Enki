@@ -141,13 +141,18 @@ class Task:
     id: str
     description: str
     agent: str
-    status: str = "pending"  # pending, blocked, active, complete, failed
+    status: str = "pending"  # pending, blocked, active, validating, rejected, complete, failed
     dependencies: list = field(default_factory=list)
     files_in_scope: list = field(default_factory=list)
     output: Optional[str] = None
     attempts: int = 0
     max_attempts: int = 3
     wave: int = 1
+    # Validation fields
+    validation_status: str = "none"  # none, pending, passed, failed
+    validator_feedback: Optional[str] = None
+    rejection_count: int = 0
+    max_rejections: int = 2
 
 
 @dataclass
@@ -230,6 +235,10 @@ class TaskGraph:
                     "attempts": t.attempts,
                     "max_attempts": t.max_attempts,
                     "wave": t.wave,
+                    "validation_status": t.validation_status,
+                    "validator_feedback": t.validator_feedback,
+                    "rejection_count": t.rejection_count,
+                    "max_rejections": t.max_rejections,
                 }
                 for tid, t in self.tasks.items()
             }
@@ -254,6 +263,10 @@ class TaskGraph:
                 attempts=tdata.get("attempts", 0),
                 max_attempts=tdata.get("max_attempts", 3),
                 wave=tdata.get("wave", 1),
+                validation_status=tdata.get("validation_status", "none"),
+                validator_feedback=tdata.get("validator_feedback"),
+                rejection_count=tdata.get("rejection_count", 0),
+                max_rejections=tdata.get("max_rejections", 2),
             )
             graph.tasks[tid] = task
         return graph

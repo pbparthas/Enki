@@ -77,6 +77,17 @@ AGENTS = {
     },
 }
 
+# Map workers to their validators (two-stage where applicable)
+WORKER_VALIDATORS = {
+    "QA": ["Validator-Tests"],
+    "Dev": ["Validator-Tests", "Validator-Code"],  # Two-stage: spec compliance, then code quality
+    "Architect": [],  # Design review is manual
+    "DBA": ["Validator-Code"],
+    "Docs": [],  # Doc review is manual
+    "Security": [],
+    "Reviewer": [],
+}
+
 
 @dataclass
 class Bug:
@@ -421,16 +432,21 @@ def complete_task(
     task_id: str,
     output: str = None,
     project_path: Path = None,
+    skip_validation: bool = False,
 ) -> Task:
-    """Mark a task as complete.
+    """Mark a task as complete (or submit for validation).
+
+    For worker tasks that need validation, this submits them
+    for validation instead of marking complete directly.
 
     Args:
         task_id: Task ID to complete
         output: Task output/result
         project_path: Project directory path
+        skip_validation: If True, skip validation (use for validator tasks)
 
     Returns:
-        The completed task
+        The task (in validating or complete state)
     """
     project_path = project_path or Path.cwd()
 
@@ -442,8 +458,16 @@ def complete_task(
         raise ValueError(f"Task not found: {task_id}")
 
     task = orch.task_graph.tasks[task_id]
-    task.status = "complete"
     task.output = output
+
+    # Check if this task needs validation
+    if not skip_validation and needs_validation(task):
+        # Don't complete yet - submit for validation
+        return submit_for_validation(task_id, output, project_path)
+
+    # No validation needed (or skipped) - mark complete directly
+    task.status = "complete"
+    task.validation_status = "passed"  # Implicitly passed
 
     # Add to blackboard
     orch.blackboard[f"{task.agent}:{task_id}"] = output or "completed"
@@ -912,6 +936,553 @@ def get_next_action(project_path: Path = None) -> dict:
         "action": "blocked",
         "message": "No tasks ready - check dependencies",
     }
+
+
+# === Validation Flow ===
+
+def needs_validation(task: Task) -> bool:
+    """Check if task needs validation before completion."""
+    return task.agent in WORKER_VALIDATORS and len(WORKER_VALIDATORS[task.agent]) > 0
+
+
+def get_validators_for_task(task: Task) -> list[str]:
+    """Get the validator agents for a task."""
+    return WORKER_VALIDATORS.get(task.agent, [])
+
+
+def get_next_validator(task: Task) -> Optional[str]:
+    """Get the next validator that needs to run.
+
+    For two-stage validation, returns first validator that hasn't passed.
+    """
+    validators = get_validators_for_task(task)
+    if not validators:
+        return None
+
+    # For simplicity, run validators in order
+    # First validator is spec compliance, second is code quality
+    # In full implementation, track each validator's result separately
+    return validators[0]
+
+
+def submit_for_validation(
+    task_id: str,
+    output: str,
+    project_path: Path = None,
+) -> Task:
+    """Submit a task for validation (called by worker when done).
+
+    Does NOT mark task complete. Marks it as awaiting validation.
+
+    Args:
+        task_id: Task ID
+        output: Worker's output
+        project_path: Project directory path
+
+    Returns:
+        The task in validation state
+    """
+    project_path = project_path or Path.cwd()
+
+    orch = load_orchestration(project_path)
+    if not orch:
+        raise ValueError("No active orchestration")
+
+    if task_id not in orch.task_graph.tasks:
+        raise ValueError(f"Task not found: {task_id}")
+
+    task = orch.task_graph.tasks[task_id]
+    task.output = output
+    task.status = "validating"
+    task.validation_status = "pending"
+
+    save_orchestration(orch, project_path)
+    log_to_running(f"TASK SUBMITTED FOR VALIDATION: {task_id}", project_path)
+
+    return task
+
+
+def get_validation_prompt(
+    task: Task,
+    validator_agent: str,
+    orch: 'Orchestration',
+    project_path: Path = None,
+) -> str:
+    """Generate BLIND validation prompt.
+
+    CRITICAL: Validator sees ONLY:
+    - The spec requirements
+    - The actual files (code/tests) to read themselves
+    - What they're validating against
+
+    Validator does NOT see:
+    - Worker's reasoning or thought process
+    - Worker's output text or claims
+    - How the worker approached the problem
+
+    This prevents validators from being biased by worker explanations.
+
+    Args:
+        task: Task being validated
+        validator_agent: Which validator (Validator-Tests, Validator-Code)
+        orch: Current orchestration
+        project_path: Project directory path
+
+    Returns:
+        Prompt string for validator
+    """
+    project_path = project_path or Path.cwd()
+
+    # Read spec
+    spec_content = ""
+    if orch.spec_path:
+        spec_path = project_path / orch.spec_path
+        if spec_path.exists():
+            spec_content = spec_path.read_text()
+
+    prompt_parts = [
+        f"# Validation Task",
+        f"",
+        f"You are **{validator_agent}**.",
+        f"",
+        f"## CRITICAL: Blind Validation Rules",
+        f"",
+        f"1. You must READ THE ACTUAL FILES yourself",
+        f"2. Do NOT trust any descriptions or claims about what was done",
+        f"3. Form your own independent judgment",
+        f"4. Your job is to VERIFY, not to trust",
+        f"",
+    ]
+
+    # Spec reference (this is allowed - it's the source of truth)
+    if spec_content:
+        prompt_parts.extend([
+            "## Spec Requirements (Source of Truth)",
+            "",
+            "```",
+            spec_content[:3000],
+            "```",
+            "",
+        ])
+
+    # Files to validate - validator must READ these themselves
+    if task.files_in_scope:
+        prompt_parts.extend([
+            "## Files to Validate",
+            "",
+            "You MUST read these files yourself and verify their contents:",
+            "",
+        ])
+        for f in task.files_in_scope:
+            prompt_parts.append(f"- `{f}`")
+        prompt_parts.append("")
+
+    # Validator-specific instructions
+    if validator_agent == "Validator-Tests":
+        prompt_parts.extend([
+            "## Your Task: Validate Test Coverage",
+            "",
+            "### Step 1: Read the test files",
+            "Use the Read tool to examine each test file in scope.",
+            "",
+            "### Step 2: Check against spec",
+            "For EACH requirement in the spec, verify:",
+            "- [ ] Is there a test for this requirement?",
+            "- [ ] Does the test actually test the right thing?",
+            "- [ ] Are edge cases covered?",
+            "",
+            "### Step 3: Check test quality",
+            "- [ ] Are tests runnable (proper syntax, imports)?",
+            "- [ ] Do test names describe what they test?",
+            "- [ ] Are assertions meaningful (not just `assert True`)?",
+            "",
+            "### Step 4: Deliver verdict",
+            "",
+            "You MUST end your response with exactly one of:",
+            "",
+            "```",
+            "VERDICT: PASS",
+            "```",
+            "",
+            "OR",
+            "",
+            "```",
+            "VERDICT: FAIL",
+            "ISSUES:",
+            "- [specific issue 1]",
+            "- [specific issue 2]",
+            "```",
+            "",
+            "Be SPECIFIC about failures. Vague feedback wastes cycles.",
+            "",
+        ])
+    elif validator_agent == "Validator-Code":
+        prompt_parts.extend([
+            "## Your Task: Validate Implementation",
+            "",
+            "### Step 1: Run the tests",
+            "```bash",
+            "pytest  # or appropriate test command",
+            "```",
+            "",
+            "### Step 2: Read the implementation",
+            "Use the Read tool to examine each implementation file.",
+            "",
+            "### Step 3: Verify correctness",
+            "- [ ] Do ALL tests pass?",
+            "- [ ] Does code match spec requirements?",
+            "- [ ] Any obvious bugs or logic errors?",
+            "- [ ] Does code handle edge cases?",
+            "",
+            "### Step 4: Deliver verdict",
+            "",
+            "You MUST end your response with exactly one of:",
+            "",
+            "```",
+            "VERDICT: PASS",
+            "```",
+            "",
+            "OR",
+            "",
+            "```",
+            "VERDICT: FAIL",
+            "ISSUES:",
+            "- [specific issue 1]",
+            "- [specific issue 2]",
+            "```",
+            "",
+            "Be SPECIFIC about failures. Include test output if tests fail.",
+            "",
+        ])
+
+    prompt_parts.extend([
+        "## Reminders",
+        "",
+        "- You are validating INDEPENDENTLY - read files yourself",
+        "- Do NOT suggest improvements - only PASS or FAIL on requirements",
+        "- Do NOT be lenient - if requirements aren't met, FAIL",
+        "- Your verdict will be parsed, so use the exact format above",
+        "",
+    ])
+
+    return "\n".join(prompt_parts)
+
+
+def spawn_validators(
+    task_id: str,
+    project_path: Path = None,
+) -> list[dict]:
+    """Spawn validator agents for a task.
+
+    Args:
+        task_id: Task ID to validate
+        project_path: Project directory path
+
+    Returns:
+        List of Task tool call parameters for validators
+    """
+    project_path = project_path or Path.cwd()
+
+    orch = load_orchestration(project_path)
+    if not orch:
+        raise ValueError("No active orchestration")
+
+    if task_id not in orch.task_graph.tasks:
+        raise ValueError(f"Task not found: {task_id}")
+
+    task = orch.task_graph.tasks[task_id]
+    validators = get_validators_for_task(task)
+
+    if not validators:
+        return []
+
+    spawn_calls = []
+    for validator in validators:
+        prompt = get_validation_prompt(task, validator, orch, project_path)
+
+        spawn_calls.append({
+            "task_id": f"{task_id}_validate_{validator}",
+            "original_task_id": task_id,
+            "validator": validator,
+            "params": {
+                "description": f"{validator}: Validate {task_id}",
+                "prompt": prompt,
+                "subagent_type": "Explore",  # Read-only validation
+            },
+        })
+
+    log_to_running(f"VALIDATORS SPAWNED: {validators} for {task_id}", project_path)
+
+    return spawn_calls
+
+
+def parse_validation_verdict(output: str) -> tuple[bool, Optional[str]]:
+    """Parse validator output to extract verdict.
+
+    Args:
+        output: Validator's full output
+
+    Returns:
+        (passed, feedback) tuple
+    """
+    output_upper = output.upper()
+
+    # Look for explicit verdict
+    if "VERDICT: PASS" in output_upper:
+        return True, None
+
+    if "VERDICT: FAIL" in output_upper:
+        # Extract issues after FAIL
+        fail_idx = output_upper.find("VERDICT: FAIL")
+        feedback = output[fail_idx:].strip()
+        return False, feedback
+
+    # Fallback heuristics
+    if "PASS" in output_upper and "FAIL" not in output_upper:
+        return True, None
+
+    if "FAIL" in output_upper:
+        return False, output
+
+    # Ambiguous - treat as fail to be safe
+    return False, f"Ambiguous verdict. Full output:\n{output}"
+
+
+def record_validation_result(
+    task_id: str,
+    validator: str,
+    passed: bool,
+    feedback: str = None,
+    project_path: Path = None,
+) -> Task:
+    """Record a validator's verdict.
+
+    Args:
+        task_id: Original task ID
+        validator: Which validator
+        passed: Whether validation passed
+        feedback: Feedback if failed
+        project_path: Project directory path
+
+    Returns:
+        Updated task
+    """
+    project_path = project_path or Path.cwd()
+
+    orch = load_orchestration(project_path)
+    if not orch:
+        raise ValueError("No active orchestration")
+
+    if task_id not in orch.task_graph.tasks:
+        raise ValueError(f"Task not found: {task_id}")
+
+    task = orch.task_graph.tasks[task_id]
+
+    if passed:
+        log_to_running(f"VALIDATION PASSED: {validator} approved {task_id}", project_path)
+
+        # Check if all validators have passed
+        validators = get_validators_for_task(task)
+        validator_idx = validators.index(validator) if validator in validators else 0
+
+        if validator_idx >= len(validators) - 1:
+            # Last validator passed - task complete
+            task.validation_status = "passed"
+            task.status = "complete"
+
+            # Add to blackboard
+            orch.blackboard[f"{task.agent}:{task_id}"] = task.output or "completed"
+
+            # Check if wave is complete
+            current_wave_tasks = [t for t in orch.task_graph.tasks.values() if t.wave == orch.current_wave]
+            if all(t.status == "complete" for t in current_wave_tasks):
+                orch.current_wave += 1
+
+            # Check if orchestration is complete
+            if all(t.status == "complete" for t in orch.task_graph.tasks.values()):
+                orch.status = "completed"
+                log_to_running(f"ORCHESTRATION COMPLETED: {orch.spec_name}", project_path)
+
+            log_to_running(f"TASK COMPLETED (validated): {task_id}", project_path)
+        else:
+            # More validators to run
+            log_to_running(f"STAGE {validator_idx + 1} PASSED: {task_id} awaiting next validator", project_path)
+
+    else:
+        log_to_running(f"VALIDATION FAILED: {validator} rejected {task_id}", project_path)
+
+        task.validation_status = "failed"
+        task.validator_feedback = feedback
+        task.rejection_count += 1
+
+        if task.rejection_count >= task.max_rejections:
+            # Too many rejections - escalate to human
+            task.status = "failed"
+            orch.hitl_required = True
+            orch.hitl_reason = f"Task {task_id} rejected {task.rejection_count} times. Last feedback: {feedback[:200] if feedback else 'None'}"
+            log_to_running(f"HITL REQUIRED: {task_id} exceeded rejection limit", project_path)
+        else:
+            # Send back to worker for fixes
+            task.status = "rejected"
+            log_to_running(f"TASK REJECTED: {task_id} (rejection {task.rejection_count}/{task.max_rejections})", project_path)
+
+    save_orchestration(orch, project_path)
+
+    return task
+
+
+def get_rejection_feedback_prompt(
+    task_id: str,
+    project_path: Path = None,
+) -> str:
+    """Generate prompt for worker to fix rejected task.
+
+    Args:
+        task_id: Rejected task ID
+        project_path: Project directory path
+
+    Returns:
+        Prompt with validator feedback
+    """
+    project_path = project_path or Path.cwd()
+
+    orch = load_orchestration(project_path)
+    if not orch:
+        raise ValueError("No active orchestration")
+
+    if task_id not in orch.task_graph.tasks:
+        raise ValueError(f"Task not found: {task_id}")
+
+    task = orch.task_graph.tasks[task_id]
+
+    prompt_parts = [
+        f"# Task Rejected - Fixes Required",
+        f"",
+        f"Your work on **{task_id}** was rejected by validation.",
+        f"",
+        f"## Validator Feedback",
+        f"",
+        f"```",
+        task.validator_feedback or "No specific feedback provided.",
+        f"```",
+        f"",
+        f"## Rejection Count",
+        f"",
+        f"This is rejection **{task.rejection_count}** of **{task.max_rejections}**.",
+    ]
+
+    if task.rejection_count >= task.max_rejections - 1:
+        prompt_parts.extend([
+            f"",
+            f"**WARNING**: One more rejection will escalate to human intervention.",
+            f"",
+        ])
+
+    prompt_parts.extend([
+        f"",
+        f"## Instructions",
+        f"",
+        f"1. **READ** the validator feedback carefully",
+        f"2. **FIX** the specific issues mentioned",
+        f"3. **DO NOT** make unrelated changes",
+        f"4. **SUBMIT** for validation again when done",
+        f"",
+        f"## Original Task",
+        f"",
+        f"{task.description}",
+        f"",
+    ])
+
+    if task.files_in_scope:
+        prompt_parts.extend([
+            "## Files in Scope",
+            "",
+        ])
+        for f in task.files_in_scope:
+            prompt_parts.append(f"- `{f}`")
+        prompt_parts.append("")
+
+    return "\n".join(prompt_parts)
+
+
+def retry_rejected_task(
+    task_id: str,
+    project_path: Path = None,
+) -> dict:
+    """Get spawn parameters to retry a rejected task.
+
+    Args:
+        task_id: Rejected task ID
+        project_path: Project directory path
+
+    Returns:
+        Task tool call parameters for retry
+    """
+    project_path = project_path or Path.cwd()
+
+    orch = load_orchestration(project_path)
+    if not orch:
+        raise ValueError("No active orchestration")
+
+    if task_id not in orch.task_graph.tasks:
+        raise ValueError(f"Task not found: {task_id}")
+
+    task = orch.task_graph.tasks[task_id]
+
+    if task.status != "rejected":
+        raise ValueError(f"Task not in rejected state: {task_id} (status: {task.status})")
+
+    # Mark as active again
+    task.status = "active"
+    task.validation_status = "none"
+    save_orchestration(orch, project_path)
+
+    prompt = get_rejection_feedback_prompt(task_id, project_path)
+
+    log_to_running(f"TASK RETRY: {task_id} (attempt {task.rejection_count + 1})", project_path)
+
+    return {
+        "task_id": task_id,
+        "description": f"{task.agent}: Fix {task_id} (attempt {task.rejection_count + 1})",
+        "prompt": prompt,
+        "subagent_type": "Explore",
+    }
+
+
+def get_tasks_needing_validation(project_path: Path = None) -> list[Task]:
+    """Get all tasks currently awaiting validation.
+
+    Args:
+        project_path: Project directory path
+
+    Returns:
+        List of tasks in validating state
+    """
+    project_path = project_path or Path.cwd()
+
+    orch = load_orchestration(project_path)
+    if not orch or not orch.task_graph:
+        return []
+
+    return [t for t in orch.task_graph.tasks.values() if t.status == "validating"]
+
+
+def get_rejected_tasks(project_path: Path = None) -> list[Task]:
+    """Get all tasks that were rejected and need retry.
+
+    Args:
+        project_path: Project directory path
+
+    Returns:
+        List of tasks in rejected state
+    """
+    project_path = project_path or Path.cwd()
+
+    orch = load_orchestration(project_path)
+    if not orch or not orch.task_graph:
+        return []
+
+    return [t for t in orch.task_graph.tasks.values() if t.status == "rejected"]
 
 
 # === Agent Spawning ===
