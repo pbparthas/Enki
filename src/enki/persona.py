@@ -218,6 +218,32 @@ def build_session_start_injection(project_path: Path = None) -> str:
     return "\n".join(lines)
 
 
+def build_adaptive_context_injection(
+    project_path: Path = None,
+    tier: str = "auto",
+) -> str:
+    """Build context injection using adaptive context loading.
+
+    This is an alternative to build_session_start_injection that uses
+    the adaptive context loading system for optimized token usage.
+
+    Args:
+        project_path: Project directory path
+        tier: Context tier ("minimal", "standard", "full", "auto")
+
+    Returns:
+        Formatted string for context injection
+    """
+    from .context import ContextTier, load_context, format_context_for_injection
+
+    project_path = project_path or Path.cwd()
+
+    context_tier = ContextTier(tier)
+    loaded_context = load_context(tier=context_tier, project_path=project_path)
+
+    return format_context_for_injection(loaded_context)
+
+
 def build_error_context_injection(
     error_text: str,
     project_path: Path = None,

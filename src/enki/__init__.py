@@ -120,6 +120,37 @@ from .summarization import (
     get_summarization_preview,
     get_summarization_stats,
 )
+from .worktree import (
+    Worktree,
+    create_worktree,
+    list_worktrees,
+    get_worktree,
+    remove_worktree,
+    merge_worktree,
+    exec_in_worktree,
+    is_in_worktree,
+    get_worktree_state,
+    get_worktree_root,
+)
+from .context import (
+    ContextTier,
+    LoadedContext,
+    detect_tier as detect_context_tier,
+    load_context,
+    format_context_for_injection,
+    preview_context,
+    set_default_tier,
+    get_context_config,
+    save_context_config,
+)
+from .simplifier import (
+    SimplificationResult,
+    generate_simplifier_prompt,
+    run_simplification,
+    parse_simplification_output,
+    get_modified_files,
+    SIMPLIFIER_PROMPT,
+)
 
 __all__ = [
     # Database
@@ -269,4 +300,32 @@ __all__ = [
     "run_session_summarization",
     "get_summarization_preview",
     "get_summarization_stats",
+    # Worktree management
+    "Worktree",
+    "create_worktree",
+    "list_worktrees",
+    "get_worktree",
+    "remove_worktree",
+    "merge_worktree",
+    "exec_in_worktree",
+    "is_in_worktree",
+    "get_worktree_state",
+    "get_worktree_root",
+    # Adaptive context loading
+    "ContextTier",
+    "LoadedContext",
+    "detect_context_tier",
+    "load_context",
+    "format_context_for_injection",
+    "preview_context",
+    "set_default_tier",
+    "get_context_config",
+    "save_context_config",
+    # Simplifier agent
+    "SimplificationResult",
+    "generate_simplifier_prompt",
+    "run_simplification",
+    "parse_simplification_output",
+    "get_modified_files",
+    "SIMPLIFIER_PROMPT",
 ]

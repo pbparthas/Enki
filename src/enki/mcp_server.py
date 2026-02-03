@@ -12,6 +12,18 @@ from .db import init_db, get_db
 from .beads import create_bead, get_bead, star_bead, unstar_bead, supersede_bead, BeadType
 from .search import search
 from .retention import maintain_wisdom
+
+# Import client for remote mode
+from .client import (
+    is_remote_mode,
+    remote_remember,
+    remote_recall,
+    remote_star,
+    remote_supersede,
+    remote_status,
+    remote_goal,
+    remote_phase,
+)
 from .session import (
     get_session, get_phase, set_phase, get_goal, set_goal,
     start_session,
@@ -34,6 +46,17 @@ from .orchestrator import (
     get_tasks_needing_validation,
     get_rejected_tasks,
     get_validators_for_task,
+)
+from .worktree import (
+    create_worktree,
+    list_worktrees,
+    remove_worktree,
+    merge_worktree,
+    get_worktree_state,
+)
+from .simplifier import (
+    run_simplification,
+    get_modified_files,
 )
 
 # Initialize server
@@ -485,6 +508,97 @@ async def list_tools() -> list[Tool]:
                 "properties": {},
             },
         ),
+        # Worktree tools
+        Tool(
+            name="enki_worktree_create",
+            description="Create isolated git worktree for a task",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "task_id": {
+                        "type": "string",
+                        "description": "Task ID for the worktree",
+                    },
+                    "base_branch": {
+                        "type": "string",
+                        "description": "Branch to create from (default: main)",
+                        "default": "main",
+                    },
+                },
+                "required": ["task_id"],
+            },
+        ),
+        Tool(
+            name="enki_worktree_list",
+            description="List all worktrees for the project",
+            inputSchema={
+                "type": "object",
+                "properties": {},
+            },
+        ),
+        Tool(
+            name="enki_worktree_merge",
+            description="Merge worktree branch back and optionally remove",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "task_id": {
+                        "type": "string",
+                        "description": "Task ID",
+                    },
+                    "target_branch": {
+                        "type": "string",
+                        "description": "Branch to merge into (default: main)",
+                        "default": "main",
+                    },
+                    "delete_after": {
+                        "type": "boolean",
+                        "description": "Remove worktree after merge",
+                        "default": True,
+                    },
+                },
+                "required": ["task_id"],
+            },
+        ),
+        Tool(
+            name="enki_worktree_remove",
+            description="Remove a worktree",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "task_id": {
+                        "type": "string",
+                        "description": "Task ID",
+                    },
+                    "force": {
+                        "type": "boolean",
+                        "description": "Force removal even with uncommitted changes",
+                        "default": False,
+                    },
+                },
+                "required": ["task_id"],
+            },
+        ),
+        # Simplifier tool
+        Tool(
+            name="enki_simplify",
+            description="Run code simplification on files to reduce AI-generated bloat",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "files": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Specific files to simplify (omit for all modified)",
+                    },
+                    "all_modified": {
+                        "type": "boolean",
+                        "description": "Simplify all modified files from git",
+                        "default": False,
+                    },
+                },
+            },
+        ),
     ]
 
 
@@ -492,127 +606,228 @@ async def list_tools() -> list[Tool]:
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     """Handle tool calls."""
 
-    # Ensure database is initialized
-    init_db()
+    # Check if running in remote mode (connected to Enki server)
+    remote = is_remote_mode()
+
+    # Initialize local database if not in remote mode
+    if not remote:
+        init_db()
 
     if name == "enki_remember":
-        bead = create_bead(
-            content=arguments["content"],
-            bead_type=arguments["type"],
-            summary=arguments.get("summary"),
-            project=arguments.get("project"),
-            context=arguments.get("context"),
-            tags=arguments.get("tags"),
-            starred=arguments.get("starred", False),
-        )
-        return [TextContent(
-            type="text",
-            text=f"Remembered [{bead.type}] {bead.id}\n\n{bead.content[:200]}{'...' if len(bead.content) > 200 else ''}",
-        )]
+        if remote:
+            # Remote mode: compute embedding locally, send to server
+            try:
+                result = remote_remember(
+                    content=arguments["content"],
+                    bead_type=arguments["type"],
+                    summary=arguments.get("summary"),
+                    project=arguments.get("project"),
+                    context=arguments.get("context"),
+                    tags=arguments.get("tags"),
+                    starred=arguments.get("starred", False),
+                )
+                return [TextContent(
+                    type="text",
+                    text=f"Remembered [{arguments['type']}] {result['id']} (synced to server)\n\n{arguments['content'][:200]}{'...' if len(arguments['content']) > 200 else ''}",
+                )]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Error syncing to server: {e}")]
+        else:
+            # Local mode
+            bead = create_bead(
+                content=arguments["content"],
+                bead_type=arguments["type"],
+                summary=arguments.get("summary"),
+                project=arguments.get("project"),
+                context=arguments.get("context"),
+                tags=arguments.get("tags"),
+                starred=arguments.get("starred", False),
+            )
+            return [TextContent(
+                type="text",
+                text=f"Remembered [{bead.type}] {bead.id}\n\n{bead.content[:200]}{'...' if len(bead.content) > 200 else ''}",
+            )]
 
     elif name == "enki_recall":
-        results = search(
-            query=arguments["query"],
-            project=arguments.get("project"),
-            bead_type=arguments.get("type"),
-            limit=arguments.get("limit", 10),
-        )
+        if remote:
+            # Remote mode: compute query embedding locally, search on server
+            try:
+                results = remote_recall(
+                    query=arguments["query"],
+                    project=arguments.get("project"),
+                    bead_type=arguments.get("type"),
+                    limit=arguments.get("limit", 10),
+                )
 
-        if not results:
-            return [TextContent(type="text", text="No relevant knowledge found.")]
+                if not results:
+                    return [TextContent(type="text", text="No relevant knowledge found.")]
 
-        lines = [f"Found {len(results)} results:\n"]
-        for i, result in enumerate(results, 1):
-            bead = result.bead
-            sources = "+".join(result.sources)
-            starred = "*" if bead.starred else ""
-            lines.append(
-                f"{i}. [{bead.type}]{starred} (score: {result.score:.2f}, via: {sources})\n"
-                f"   {bead.summary or bead.content[:150]}{'...' if len(bead.content) > 150 else ''}\n"
-                f"   ID: {bead.id}\n"
+                lines = [f"Found {len(results)} results (from server):\n"]
+                for i, r in enumerate(results, 1):
+                    content = r.get("content", "")
+                    summary = r.get("summary") or content[:150]
+                    lines.append(
+                        f"{i}. [{r['type']}] (score: {r.get('score', 0):.2f})\n"
+                        f"   {summary}{'...' if len(content) > 150 else ''}\n"
+                        f"   ID: {r['id']}\n"
+                    )
+
+                return [TextContent(type="text", text="\n".join(lines))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Error searching server: {e}")]
+        else:
+            # Local mode
+            results = search(
+                query=arguments["query"],
+                project=arguments.get("project"),
+                bead_type=arguments.get("type"),
+                limit=arguments.get("limit", 10),
             )
 
-        return [TextContent(type="text", text="\n".join(lines))]
+            if not results:
+                return [TextContent(type="text", text="No relevant knowledge found.")]
+
+            lines = [f"Found {len(results)} results:\n"]
+            for i, result in enumerate(results, 1):
+                bead = result.bead
+                sources = "+".join(result.sources)
+                starred = "*" if bead.starred else ""
+                lines.append(
+                    f"{i}. [{bead.type}]{starred} (score: {result.score:.2f}, via: {sources})\n"
+                    f"   {bead.summary or bead.content[:150]}{'...' if len(bead.content) > 150 else ''}\n"
+                    f"   ID: {bead.id}\n"
+                )
+
+            return [TextContent(type="text", text="\n".join(lines))]
 
     elif name == "enki_forget":
-        bead = supersede_bead(arguments["old_id"], arguments["new_id"])
-        if bead:
-            return [TextContent(type="text", text=f"Marked {arguments['old_id']} as superseded by {arguments['new_id']}")]
+        if remote:
+            try:
+                remote_supersede(arguments["old_id"], arguments["new_id"])
+                return [TextContent(type="text", text=f"Marked {arguments['old_id']} as superseded by {arguments['new_id']} (synced to server)")]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Error: {e}")]
         else:
-            return [TextContent(type="text", text=f"Bead {arguments['old_id']} not found")]
+            bead = supersede_bead(arguments["old_id"], arguments["new_id"])
+            if bead:
+                return [TextContent(type="text", text=f"Marked {arguments['old_id']} as superseded by {arguments['new_id']}")]
+            else:
+                return [TextContent(type="text", text=f"Bead {arguments['old_id']} not found")]
 
     elif name == "enki_star":
         starred = arguments.get("starred", True)
-        if starred:
-            bead = star_bead(arguments["bead_id"])
-            action = "Starred"
+        if remote:
+            try:
+                remote_star(arguments["bead_id"], starred)
+                action = "Starred" if starred else "Unstarred"
+                return [TextContent(type="text", text=f"{action} bead {arguments['bead_id']} (synced to server)")]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Error: {e}")]
         else:
-            bead = unstar_bead(arguments["bead_id"])
-            action = "Unstarred"
+            if starred:
+                bead = star_bead(arguments["bead_id"])
+                action = "Starred"
+            else:
+                bead = unstar_bead(arguments["bead_id"])
+                action = "Unstarred"
 
-        if bead:
-            return [TextContent(type="text", text=f"{action} bead {bead.id}")]
-        else:
-            return [TextContent(type="text", text=f"Bead {arguments['bead_id']} not found")]
+            if bead:
+                return [TextContent(type="text", text=f"{action} bead {bead.id}")]
+            else:
+                return [TextContent(type="text", text=f"Bead {arguments['bead_id']} not found")]
 
     elif name == "enki_status":
-        db = get_db()
-        project_path = Path(arguments["project"]) if arguments.get("project") else None
+        if remote:
+            try:
+                status = remote_status(arguments.get("project"))
+                lines = [
+                    "Enki Status (Remote Server)",
+                    "=" * 40,
+                    f"Phase: {status.get('phase', 'intake')}",
+                    f"Goal: {status.get('goal') or '(not set)'}",
+                    "",
+                    "Memory:",
+                    f"  Total beads: {status.get('total_beads', 0)}",
+                    f"  Active beads: {status.get('active_beads', 0)}",
+                    f"  Starred beads: {status.get('starred_beads', 0)}",
+                ]
+                return [TextContent(type="text", text="\n".join(lines))]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Error fetching status: {e}")]
+        else:
+            db = get_db()
+            project_path = Path(arguments["project"]) if arguments.get("project") else None
 
-        # Get memory counts
-        total = db.execute("SELECT COUNT(*) as count FROM beads").fetchone()["count"]
-        active = db.execute(
-            "SELECT COUNT(*) as count FROM beads WHERE superseded_by IS NULL"
-        ).fetchone()["count"]
-        starred = db.execute(
-            "SELECT COUNT(*) as count FROM beads WHERE starred = 1"
-        ).fetchone()["count"]
+            # Get memory counts
+            total = db.execute("SELECT COUNT(*) as count FROM beads").fetchone()["count"]
+            active = db.execute(
+                "SELECT COUNT(*) as count FROM beads WHERE superseded_by IS NULL"
+            ).fetchone()["count"]
+            starred = db.execute(
+                "SELECT COUNT(*) as count FROM beads WHERE starred = 1"
+            ).fetchone()["count"]
 
-        # Get session status
-        session = get_session(project_path)
-        phase = get_phase(project_path) if session else "intake"
-        goal = get_goal(project_path) if session else None
+            # Get session status
+            session = get_session(project_path)
+            phase = get_phase(project_path) if session else "intake"
+            goal = get_goal(project_path) if session else None
 
-        # Get orchestration status
-        orch_status = get_full_orchestration_status(project_path)
+            # Get orchestration status
+            orch_status = get_full_orchestration_status(project_path)
 
-        lines = [
-            "Enki Status",
-            "=" * 40,
-            f"Phase: {phase}",
-            f"Goal: {goal or '(not set)'}",
-            "",
-            "Memory:",
-            f"  Total beads: {total}",
-            f"  Active beads: {active}",
-            f"  Starred beads: {starred}",
-        ]
-
-        if orch_status["active"]:
-            lines.extend([
+            lines = [
+                "Enki Status",
+                "=" * 40,
+                f"Phase: {phase}",
+                f"Goal: {goal or '(not set)'}",
                 "",
-                "Orchestration:",
-                f"  Spec: {orch_status['spec']}",
-                f"  Progress: {orch_status['tasks']['completed']}/{orch_status['tasks']['total']}",
-            ])
+                "Memory:",
+                f"  Total beads: {total}",
+                f"  Active beads: {active}",
+                f"  Starred beads: {starred}",
+            ]
 
-        return [TextContent(type="text", text="\n".join(lines))]
+            if orch_status["active"]:
+                lines.extend([
+                    "",
+                    "Orchestration:",
+                    f"  Spec: {orch_status['spec']}",
+                    f"  Progress: {orch_status['tasks']['completed']}/{orch_status['tasks']['total']}",
+                ])
+
+            return [TextContent(type="text", text="\n".join(lines))]
 
     # Session tools
     elif name == "enki_goal":
         project_path = Path(arguments["project"]) if arguments.get("project") else None
-        set_goal(arguments["goal"], project_path)
-        return [TextContent(type="text", text=f"Goal set: {arguments['goal']}\n\nGate 1 (Goal Required) is now satisfied.")]
+        if remote:
+            try:
+                remote_goal(arguments["goal"], arguments.get("project"))
+                return [TextContent(type="text", text=f"Goal set: {arguments['goal']} (synced to server)\n\nGate 1 (Goal Required) is now satisfied.")]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Error: {e}")]
+        else:
+            set_goal(arguments["goal"], project_path)
+            return [TextContent(type="text", text=f"Goal set: {arguments['goal']}\n\nGate 1 (Goal Required) is now satisfied.")]
 
     elif name == "enki_phase":
         project_path = Path(arguments["project"]) if arguments.get("project") else None
-
-        if "phase" in arguments and arguments["phase"]:
-            set_phase(arguments["phase"], project_path)
-            return [TextContent(type="text", text=f"Phase set to: {arguments['phase']}")]
+        if remote:
+            try:
+                result = remote_phase(arguments.get("phase"), arguments.get("project"))
+                if arguments.get("phase"):
+                    return [TextContent(type="text", text=f"Phase set to: {arguments['phase']} (synced to server)")]
+                else:
+                    return [TextContent(type="text", text=f"Current phase: {result.get('phase', 'intake')}")]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Error: {e}")]
         else:
-            current = get_phase(project_path)
-            return [TextContent(type="text", text=f"Current phase: {current}")]
+            if "phase" in arguments and arguments["phase"]:
+                set_phase(arguments["phase"], project_path)
+                return [TextContent(type="text", text=f"Phase set to: {arguments['phase']}")]
+            else:
+                current = get_phase(project_path)
+                return [TextContent(type="text", text=f"Current phase: {current}")]
 
     # PM tools
     elif name == "enki_debate":
@@ -873,6 +1088,70 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             lines.append("No rejected tasks.")
 
         return [TextContent(type="text", text="\n".join(lines))]
+
+    # Worktree tools
+    elif name == "enki_worktree_create":
+        try:
+            path = create_worktree(
+                task_id=arguments["task_id"],
+                base_branch=arguments.get("base_branch", "main"),
+            )
+            return [TextContent(
+                type="text",
+                text=f"Created worktree at {path}\nBranch: enki/{arguments['task_id']}"
+            )]
+        except (ValueError, Exception) as e:
+            return [TextContent(type="text", text=f"Error: {e}")]
+
+    elif name == "enki_worktree_list":
+        trees = list_worktrees()
+        if not trees:
+            return [TextContent(type="text", text="No worktrees found.")]
+
+        lines = ["Worktrees:"]
+        for t in trees:
+            marker = " (main)" if not t.task_id else ""
+            lines.append(f"- {t.path} [{t.branch}]{marker}")
+
+        return [TextContent(type="text", text="\n".join(lines))]
+
+    elif name == "enki_worktree_merge":
+        success = merge_worktree(
+            task_id=arguments["task_id"],
+            target_branch=arguments.get("target_branch", "main"),
+            delete_after=arguments.get("delete_after", True),
+        )
+        if success:
+            msg = f"Merged {arguments['task_id']} into {arguments.get('target_branch', 'main')}"
+            if arguments.get("delete_after", True):
+                msg += "\nWorktree removed."
+            return [TextContent(type="text", text=msg)]
+        else:
+            return [TextContent(type="text", text=f"Error: Failed to merge {arguments['task_id']}")]
+
+    elif name == "enki_worktree_remove":
+        success = remove_worktree(
+            task_id=arguments["task_id"],
+            force=arguments.get("force", False),
+        )
+        if success:
+            return [TextContent(type="text", text=f"Removed worktree: {arguments['task_id']}")]
+        else:
+            return [TextContent(type="text", text=f"Error: Failed to remove worktree {arguments['task_id']}")]
+
+    elif name == "enki_simplify":
+        params = run_simplification(
+            files=arguments.get("files"),
+            all_modified=arguments.get("all_modified", False),
+        )
+        return [TextContent(
+            type="text",
+            text=f"Simplifier Agent Parameters:\n\n"
+                 f"Description: {params['description']}\n"
+                 f"Files: {', '.join(params.get('files', [])) or '(will detect modified files)'}\n\n"
+                 f"To spawn the Simplifier agent, use the Task tool with these parameters:\n\n"
+                 f"```json\n{json.dumps({'description': params['description'], 'prompt': params['prompt'][:500] + '...', 'subagent_type': params['subagent_type']}, indent=2)}\n```"
+        )]
 
     else:
         return [TextContent(type="text", text=f"Unknown tool: {name}")]

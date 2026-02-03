@@ -98,6 +98,34 @@ from .skills import (
     list_available_skills,
     get_skill_prompt,
 )
+from .worktree import (
+    Worktree,
+    create_worktree,
+    list_worktrees,
+    get_worktree,
+    remove_worktree,
+    merge_worktree,
+    exec_in_worktree,
+    is_in_worktree,
+    get_worktree_state,
+)
+from .context import (
+    ContextTier,
+    LoadedContext,
+    detect_tier as detect_context_tier,
+    load_context,
+    format_context_for_injection,
+    preview_context,
+    set_default_tier,
+    get_context_config,
+)
+from .simplifier import (
+    generate_simplifier_prompt,
+    run_simplification,
+    parse_simplification_output,
+    get_modified_files,
+    SimplificationResult,
+)
 from .summarization import (
     run_session_summarization,
     get_summarization_preview,
@@ -1003,11 +1031,54 @@ def cmd_validation_status(args):
 # === Persona Commands ===
 
 def cmd_context(args):
-    """Show Enki's context injection."""
+    """Show Enki's context injection (legacy)."""
     project_path = Path(args.project) if args.project else None
 
     context = build_session_start_injection(project_path)
     print(context)
+
+
+def cmd_context_load(args):
+    """Load and display adaptive context."""
+    project_path = Path(args.project) if args.project else None
+
+    tier_str = args.tier if hasattr(args, 'tier') and args.tier else "auto"
+    tier = ContextTier(tier_str)
+
+    context = load_context(tier=tier, project_path=project_path)
+
+    if hasattr(args, 'json') and args.json:
+        print(json.dumps({
+            "tier": context.tier.value,
+            "phase": context.phase,
+            "goal": context.goal,
+            "token_estimate": context.token_estimate,
+            "beads_count": len(context.beads),
+            "has_spec": context.spec is not None,
+            "has_tasks": context.task_graph is not None,
+        }, indent=2))
+    else:
+        print(format_context_for_injection(context))
+
+
+def cmd_context_preview(args):
+    """Preview what context would be loaded."""
+    project_path = Path(args.project) if args.project else None
+
+    tier_str = args.tier if hasattr(args, 'tier') and args.tier else "auto"
+    tier = ContextTier(tier_str)
+
+    preview_text = preview_context(tier=tier, project_path=project_path)
+    print(preview_text)
+
+
+def cmd_context_set_default(args):
+    """Set default context tier."""
+    project_path = Path(args.project) if args.project else None
+
+    tier = ContextTier(args.tier)
+    set_default_tier(tier, project_path)
+    print(f"Default context tier set to: {args.tier}")
 
 
 def cmd_greeting(args):
@@ -1776,6 +1847,160 @@ def cmd_summarize_stats(args):
         print(f"Potential space savings: {stats['potential_savings_chars']:,} characters")
 
 
+# === Worktree Commands ===
+
+def cmd_worktree_create(args):
+    """Create a worktree for a task."""
+    project_path = Path(args.project) if args.project else None
+
+    try:
+        path = create_worktree(
+            task_id=args.task_id,
+            branch_name=args.branch,
+            base_branch=args.base or "main",
+            project_path=project_path,
+        )
+
+        if args.json:
+            print(json.dumps({
+                "path": str(path),
+                "task_id": args.task_id,
+                "branch": args.branch or f"enki/{args.task_id}",
+            }))
+        else:
+            print(f"Worktree created: {path}")
+            print(f"Branch: {args.branch or f'enki/{args.task_id}'}")
+    except (ValueError, Exception) as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_worktree_list(args):
+    """List all worktrees."""
+    project_path = Path(args.project) if args.project else None
+
+    trees = list_worktrees(project_path)
+
+    if args.json:
+        print(json.dumps([
+            {
+                "task_id": t.task_id,
+                "path": str(t.path),
+                "branch": t.branch,
+            }
+            for t in trees
+        ], indent=2))
+    else:
+        if not trees:
+            print("No worktrees found.")
+        else:
+            print("Worktrees:")
+            for t in trees:
+                marker = " (main)" if not t.task_id else ""
+                print(f"  - {t.path} [{t.branch}]{marker}")
+
+
+def cmd_worktree_exec(args):
+    """Execute a command in a worktree."""
+    project_path = Path(args.project) if args.project else None
+
+    try:
+        if args.no_wait:
+            proc = exec_in_worktree(
+                args.task_id,
+                args.command,
+                project_path=project_path,
+                wait=False,
+            )
+            print(f"Started process with PID: {proc.pid}")
+        else:
+            result = exec_in_worktree(
+                args.task_id,
+                args.command,
+                project_path=project_path,
+                wait=True,
+            )
+            if result.stdout:
+                print(result.stdout)
+            if result.stderr:
+                print(result.stderr, file=sys.stderr)
+            sys.exit(result.returncode)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_worktree_merge(args):
+    """Merge a worktree back to target branch."""
+    project_path = Path(args.project) if args.project else None
+
+    success = merge_worktree(
+        task_id=args.task_id,
+        target_branch=args.into or "main",
+        delete_after=not args.keep,
+        project_path=project_path,
+    )
+
+    if success:
+        print(f"Merged {args.task_id} into {args.into or 'main'}")
+        if not args.keep:
+            print("Worktree removed.")
+    else:
+        print(f"Error: Failed to merge {args.task_id}", file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_worktree_remove(args):
+    """Remove a worktree."""
+    project_path = Path(args.project) if args.project else None
+
+    success = remove_worktree(
+        task_id=args.task_id,
+        force=args.force,
+        project_path=project_path,
+    )
+
+    if success:
+        print(f"Removed worktree: {args.task_id}")
+    else:
+        print(f"Error: Failed to remove worktree {args.task_id}", file=sys.stderr)
+        sys.exit(1)
+
+
+# === Simplifier Commands ===
+
+def cmd_simplify(args):
+    """Run code simplification."""
+    project_path = Path(args.project) if args.project else None
+    files = args.files if hasattr(args, 'files') and args.files else None
+    all_modified = args.all_modified if hasattr(args, 'all_modified') else False
+
+    params = run_simplification(
+        files=files,
+        all_modified=all_modified,
+        project_path=project_path,
+    )
+
+    if hasattr(args, 'json') and args.json:
+        print(json.dumps(params, indent=2))
+    else:
+        print("Simplifier Agent Parameters")
+        print("=" * 40)
+        print(f"Description: {params['description']}")
+        if params.get('files'):
+            print(f"Files: {', '.join(params['files'])}")
+        else:
+            print("Files: (will detect modified files)")
+        print()
+        print("To spawn the Simplifier agent, use the Task tool with these parameters.")
+        print("-" * 40)
+        print()
+        print("Prompt preview (first 500 chars):")
+        print(params['prompt'][:500])
+        if len(params['prompt']) > 500:
+            print("...")
+
+
 def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(
@@ -2071,7 +2296,38 @@ def main():
     # === Persona Commands ===
 
     # context
-    context_parser = subparsers.add_parser("context", help="Show Enki's context injection")
+    # === Context Commands (Adaptive Context Loading) ===
+    context_parser = subparsers.add_parser("context", help="Adaptive context management")
+    context_subparsers = context_parser.add_subparsers(dest="context_command")
+
+    # context load
+    context_load_parser = context_subparsers.add_parser("load", help="Load and display context")
+    context_load_parser.add_argument("-t", "--tier",
+        choices=["minimal", "standard", "full", "auto"],
+        default="auto",
+        help="Context tier (default: auto)")
+    context_load_parser.add_argument("-p", "--project", help="Project path")
+    context_load_parser.add_argument("--json", action="store_true", help="JSON output")
+    context_load_parser.set_defaults(func=cmd_context_load)
+
+    # context preview
+    context_preview_parser = context_subparsers.add_parser("preview", help="Preview what would be loaded")
+    context_preview_parser.add_argument("-t", "--tier",
+        choices=["minimal", "standard", "full", "auto"],
+        default="auto",
+        help="Context tier (default: auto)")
+    context_preview_parser.add_argument("-p", "--project", help="Project path")
+    context_preview_parser.set_defaults(func=cmd_context_preview)
+
+    # context set-default
+    context_default_parser = context_subparsers.add_parser("set-default", help="Set default tier")
+    context_default_parser.add_argument("tier",
+        choices=["minimal", "standard", "full", "auto"],
+        help="Default tier to set")
+    context_default_parser.add_argument("-p", "--project", help="Project path")
+    context_default_parser.set_defaults(func=cmd_context_set_default)
+
+    # Default: show legacy context (backwards compatible)
     context_parser.add_argument("-p", "--project", help="Project path")
     context_parser.set_defaults(func=cmd_context)
 
@@ -2326,6 +2582,59 @@ def main():
         cmd_summarize_stats(args) if args.stats else
         cmd_summarize_run(args) if args.confirm else
         cmd_summarize_preview(args))
+
+    # === Worktree Commands ===
+    worktree_parser = subparsers.add_parser("worktree", help="Git worktree management")
+    worktree_subparsers = worktree_parser.add_subparsers(dest="worktree_command")
+
+    # worktree create
+    worktree_create_parser = worktree_subparsers.add_parser("create", help="Create worktree for task")
+    worktree_create_parser.add_argument("task_id", help="Task ID")
+    worktree_create_parser.add_argument("-b", "--branch", help="Branch name (default: enki/TASK_ID)")
+    worktree_create_parser.add_argument("--base", default="main", help="Base branch to branch from")
+    worktree_create_parser.add_argument("-p", "--project", help="Project path")
+    worktree_create_parser.add_argument("--json", action="store_true", help="JSON output")
+    worktree_create_parser.set_defaults(func=cmd_worktree_create)
+
+    # worktree list
+    worktree_list_parser = worktree_subparsers.add_parser("list", help="List worktrees")
+    worktree_list_parser.add_argument("-p", "--project", help="Project path")
+    worktree_list_parser.add_argument("--json", action="store_true", help="JSON output")
+    worktree_list_parser.set_defaults(func=cmd_worktree_list)
+
+    # worktree exec
+    worktree_exec_parser = worktree_subparsers.add_parser("exec", help="Execute command in worktree")
+    worktree_exec_parser.add_argument("task_id", help="Task ID")
+    worktree_exec_parser.add_argument("--no-wait", action="store_true", help="Run async (don't wait)")
+    worktree_exec_parser.add_argument("-p", "--project", help="Project path")
+    worktree_exec_parser.add_argument("command", nargs="+", help="Command to run")
+    worktree_exec_parser.set_defaults(func=cmd_worktree_exec)
+
+    # worktree merge
+    worktree_merge_parser = worktree_subparsers.add_parser("merge", help="Merge worktree")
+    worktree_merge_parser.add_argument("task_id", help="Task ID")
+    worktree_merge_parser.add_argument("--into", default="main", help="Target branch")
+    worktree_merge_parser.add_argument("--keep", action="store_true", help="Keep worktree after merge")
+    worktree_merge_parser.add_argument("-p", "--project", help="Project path")
+    worktree_merge_parser.set_defaults(func=cmd_worktree_merge)
+
+    # worktree remove
+    worktree_remove_parser = worktree_subparsers.add_parser("remove", help="Remove worktree")
+    worktree_remove_parser.add_argument("task_id", help="Task ID")
+    worktree_remove_parser.add_argument("--force", action="store_true", help="Force removal")
+    worktree_remove_parser.add_argument("-p", "--project", help="Project path")
+    worktree_remove_parser.set_defaults(func=cmd_worktree_remove)
+
+    worktree_parser.set_defaults(func=cmd_worktree_list)
+
+    # === Simplifier Command ===
+    simplify_parser = subparsers.add_parser("simplify", help="Run code simplification")
+    simplify_parser.add_argument("--files", nargs="+", help="Specific files to simplify")
+    simplify_parser.add_argument("--all-modified", action="store_true",
+        help="Simplify all modified files (from git)")
+    simplify_parser.add_argument("-p", "--project", help="Project path")
+    simplify_parser.add_argument("--json", action="store_true", help="JSON output")
+    simplify_parser.set_defaults(func=cmd_simplify)
 
     args = parser.parse_args()
 

@@ -75,6 +75,12 @@ AGENTS = {
         "tools": ["Read", "Write"],
         "writes_to": ["docs/", "README"],
     },
+    "Simplifier": {
+        "role": "Reduce complexity without changing behavior",
+        "tier": "STANDARD",
+        "tools": ["Read", "Edit", "Bash"],
+        "writes_to": ["src/", "lib/"],
+    },
 }
 
 # Map workers to their validators (two-stage where applicable)
@@ -1739,6 +1745,72 @@ def get_parallel_spawn_calls(
             spawn_calls.append({
                 "task_id": task.id,
                 "params": get_spawn_task_call(task.id, project_path),
+            })
+        except Exception:
+            continue
+
+    # Save state with tasks marked active
+    if spawn_calls:
+        save_orchestration(orch, project_path)
+
+    return spawn_calls
+
+
+def spawn_parallel_tasks_with_worktrees(
+    task_ids: list[str] = None,
+    project_path: Path = None,
+) -> list[dict]:
+    """Spawn parallel tasks, each in its own worktree.
+
+    Creates isolated git worktrees for each task, allowing parallel
+    development without conflicts.
+
+    Args:
+        task_ids: List of task IDs to spawn (if None, spawns all ready tasks)
+        project_path: Project directory path
+
+    Returns:
+        List of dicts with:
+            - task_id: Task ID
+            - worktree_path: Path to the worktree
+            - params: Task tool parameters for spawning
+    """
+    from .worktree import create_worktree, get_worktree
+
+    project_path = project_path or Path.cwd()
+
+    orch = load_orchestration(project_path)
+    if not orch:
+        return []
+
+    # If no task_ids specified, get all ready tasks
+    if task_ids is None:
+        ready_tasks = orch.task_graph.get_ready_tasks() if orch.task_graph else []
+        task_ids = [t.id for t in ready_tasks]
+
+    spawn_calls = []
+    for task_id in task_ids:
+        try:
+            # Check if worktree already exists
+            existing = get_worktree(task_id, project_path)
+            if existing:
+                worktree_path = existing.path
+            else:
+                # Create worktree
+                worktree_path = create_worktree(task_id, project_path=project_path)
+
+            # Get spawn params
+            params = get_spawn_task_call(task_id, project_path)
+
+            # Mark task as active
+            task = next((t for t in orch.task_graph.tasks if t.id == task_id), None)
+            if task:
+                task.status = "active"
+
+            spawn_calls.append({
+                "task_id": task_id,
+                "worktree_path": str(worktree_path),
+                "params": params,
             })
         except Exception:
             continue
