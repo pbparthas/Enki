@@ -1,0 +1,57 @@
+# Enki Docker Compose (standalone or add to existing)
+# Usage: docker compose up -d
+
+services:
+  enki:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: enki
+    environment:
+      - ENKI_DB_PATH=/data/wisdom.db
+      - ENKI_API_KEY=${ENKI_API_KEY}
+      - ENKI_JWT_SECRET=${ENKI_JWT_SECRET}
+    volumes:
+      - enki-data:/data
+    networks:
+      - internal
+      - external
+    restart: unless-stopped
+    # Security options
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777,size=64M
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.1'
+          memory: 128M
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  internal:
+    external: true
+    name: docker_internal
+  external:
+    external: true
+    name: docker_external
+
+volumes:
+  enki-data:
+    driver: local
