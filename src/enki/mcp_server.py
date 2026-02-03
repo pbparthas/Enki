@@ -23,6 +23,16 @@ from .client import (
     remote_status,
     remote_goal,
     remote_phase,
+    startup_sync,
+    force_sync,
+    client_get_sync_status,
+)
+from .offline import (
+    ConnectionState,
+    get_connection_state,
+    is_offline,
+    get_queue_size,
+    get_cache_count,
 )
 from .session import (
     get_session, get_phase, set_phase, get_goal, set_goal,
@@ -626,9 +636,16 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                     tags=arguments.get("tags"),
                     starred=arguments.get("starred", False),
                 )
+
+                # Check if queued offline
+                if result.get("offline"):
+                    status_msg = "(queued - offline)"
+                else:
+                    status_msg = "(synced to server)"
+
                 return [TextContent(
                     type="text",
-                    text=f"Remembered [{arguments['type']}] {result['id']} (synced to server)\n\n{arguments['content'][:200]}{'...' if len(arguments['content']) > 200 else ''}",
+                    text=f"Remembered [{arguments['type']}] {result['id']} {status_msg}\n\n{arguments['content'][:200]}{'...' if len(arguments['content']) > 200 else ''}",
                 )]
             except Exception as e:
                 return [TextContent(type="text", text=f"Error syncing to server: {e}")]
@@ -662,12 +679,17 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 if not results:
                     return [TextContent(type="text", text="No relevant knowledge found.")]
 
-                lines = [f"Found {len(results)} results (from server):\n"]
+                # Check if results are from cache (offline)
+                is_cached = any(r.get("cached") for r in results)
+                source = "(from local cache - offline)" if is_cached else "(from server)"
+
+                lines = [f"Found {len(results)} results {source}:\n"]
                 for i, r in enumerate(results, 1):
                     content = r.get("content", "")
                     summary = r.get("summary") or content[:150]
+                    cached_marker = " [cached]" if r.get("cached") else ""
                     lines.append(
-                        f"{i}. [{r['type']}] (score: {r.get('score', 0):.2f})\n"
+                        f"{i}. [{r['type']}]{cached_marker} (score: {r.get('score', 0):.2f})\n"
                         f"   {summary}{'...' if len(content) > 150 else ''}\n"
                         f"   ID: {r['id']}\n"
                     )
@@ -703,8 +725,9 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     elif name == "enki_forget":
         if remote:
             try:
-                remote_supersede(arguments["old_id"], arguments["new_id"])
-                return [TextContent(type="text", text=f"Marked {arguments['old_id']} as superseded by {arguments['new_id']} (synced to server)")]
+                result = remote_supersede(arguments["old_id"], arguments["new_id"])
+                status_msg = "(queued - offline)" if result.get("offline") else "(synced to server)"
+                return [TextContent(type="text", text=f"Marked {arguments['old_id']} as superseded by {arguments['new_id']} {status_msg}")]
             except Exception as e:
                 return [TextContent(type="text", text=f"Error: {e}")]
         else:
@@ -718,9 +741,10 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         starred = arguments.get("starred", True)
         if remote:
             try:
-                remote_star(arguments["bead_id"], starred)
+                result = remote_star(arguments["bead_id"], starred)
                 action = "Starred" if starred else "Unstarred"
-                return [TextContent(type="text", text=f"{action} bead {arguments['bead_id']} (synced to server)")]
+                status_msg = "(queued - offline)" if result.get("offline") else "(synced to server)"
+                return [TextContent(type="text", text=f"{action} bead {arguments['bead_id']} {status_msg}")]
             except Exception as e:
                 return [TextContent(type="text", text=f"Error: {e}")]
         else:
@@ -740,8 +764,14 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         if remote:
             try:
                 status = remote_status(arguments.get("project"))
+
+                # Check if offline
+                offline_indicator = ""
+                if status.get("offline") or is_offline():
+                    offline_indicator = " [OFFLINE]"
+
                 lines = [
-                    "Enki Status (Remote Server)",
+                    f"Enki Status (Remote Server){offline_indicator}",
                     "=" * 40,
                     f"Phase: {status.get('phase', 'intake')}",
                     f"Goal: {status.get('goal') or '(not set)'}",
@@ -751,6 +781,16 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                     f"  Active beads: {status.get('active_beads', 0)}",
                     f"  Starred beads: {status.get('starred_beads', 0)}",
                 ]
+
+                # Add offline-specific info
+                if status.get("offline") or is_offline():
+                    lines.extend([
+                        "",
+                        "Offline Mode:",
+                        f"  Cached beads: {status.get('cached_beads', get_cache_count())}",
+                        f"  Pending sync: {status.get('pending_sync', get_queue_size())} operations",
+                    ])
+
                 return [TextContent(type="text", text="\n".join(lines))]
             except Exception as e:
                 return [TextContent(type="text", text=f"Error fetching status: {e}")]
@@ -802,8 +842,9 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         project_path = Path(arguments["project"]) if arguments.get("project") else None
         if remote:
             try:
-                remote_goal(arguments["goal"], arguments.get("project"))
-                return [TextContent(type="text", text=f"Goal set: {arguments['goal']} (synced to server)\n\nGate 1 (Goal Required) is now satisfied.")]
+                result = remote_goal(arguments["goal"], arguments.get("project"))
+                status_msg = "(queued - offline)" if result.get("offline") else "(synced to server)"
+                return [TextContent(type="text", text=f"Goal set: {arguments['goal']} {status_msg}\n\nGate 1 (Goal Required) is now satisfied.")]
             except Exception as e:
                 return [TextContent(type="text", text=f"Error: {e}")]
         else:
@@ -816,9 +857,11 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             try:
                 result = remote_phase(arguments.get("phase"), arguments.get("project"))
                 if arguments.get("phase"):
-                    return [TextContent(type="text", text=f"Phase set to: {arguments['phase']} (synced to server)")]
+                    status_msg = "(queued - offline)" if result.get("offline") else "(synced to server)"
+                    return [TextContent(type="text", text=f"Phase set to: {arguments['phase']} {status_msg}")]
                 else:
-                    return [TextContent(type="text", text=f"Current phase: {result.get('phase', 'intake')}")]
+                    offline_indicator = " (offline)" if result.get("offline") else ""
+                    return [TextContent(type="text", text=f"Current phase: {result.get('phase', 'intake')}{offline_indicator}")]
             except Exception as e:
                 return [TextContent(type="text", text=f"Error: {e}")]
         else:

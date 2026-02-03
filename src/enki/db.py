@@ -1,5 +1,6 @@
 """Database connection and schema management."""
 
+import os
 import sqlite3
 from pathlib import Path
 from typing import Optional
@@ -8,8 +9,14 @@ import threading
 # Thread-local storage for connections
 _local = threading.local()
 
-ENKI_DIR = Path.home() / ".enki"
-DB_PATH = ENKI_DIR / "wisdom.db"
+# Support ENKI_DB_PATH env var for server mode
+_env_db_path = os.environ.get("ENKI_DB_PATH")
+if _env_db_path:
+    ENKI_DIR = Path(_env_db_path).parent
+    DB_PATH = Path(_env_db_path)
+else:
+    ENKI_DIR = Path.home() / ".enki"
+    DB_PATH = ENKI_DIR / "wisdom.db"
 
 # Current active database path (can be overridden for testing)
 _current_db_path: Optional[Path] = None
@@ -179,6 +186,57 @@ CREATE INDEX IF NOT EXISTS idx_interceptions_result ON interceptions(result);
 CREATE INDEX IF NOT EXISTS idx_violations_session ON violations(session_id);
 CREATE INDEX IF NOT EXISTS idx_violations_gate ON violations(gate);
 CREATE INDEX IF NOT EXISTS idx_escalations_session ON tier_escalations(session_id);
+
+-- ============================================================
+-- Offline Mode Tables
+-- ============================================================
+
+-- Local bead cache for offline access
+CREATE TABLE IF NOT EXISTS bead_cache (
+    id TEXT PRIMARY KEY,
+    content TEXT NOT NULL,
+    summary TEXT,
+    type TEXT NOT NULL,
+    project TEXT,
+    weight REAL DEFAULT 1.0,
+    starred INTEGER DEFAULT 0,
+    tags TEXT,  -- JSON array
+    cached_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    server_version INTEGER DEFAULT 1
+);
+
+-- Embedding cache for offline semantic search
+CREATE TABLE IF NOT EXISTS embedding_cache (
+    bead_id TEXT PRIMARY KEY,
+    vector BLOB NOT NULL,
+    model TEXT DEFAULT 'all-MiniLM-L6-v2',
+    FOREIGN KEY (bead_id) REFERENCES bead_cache(id) ON DELETE CASCADE
+);
+
+-- Offline operation queue (survives restarts)
+CREATE TABLE IF NOT EXISTS sync_queue (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    operation TEXT NOT NULL,  -- 'remember', 'star', 'supersede', 'goal', 'phase'
+    payload TEXT NOT NULL,    -- JSON
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    last_retry TIMESTAMP,
+    retry_count INTEGER DEFAULT 0,
+    status TEXT DEFAULT 'pending' CHECK (status IN ('pending', 'syncing', 'failed'))
+);
+
+-- JWT token storage (single-user design)
+CREATE TABLE IF NOT EXISTS auth_tokens (
+    id INTEGER PRIMARY KEY CHECK (id = 1),  -- Enforce single row
+    access_expires TIMESTAMP,
+    refresh_expires TIMESTAMP
+);
+
+-- Indexes for offline tables
+CREATE INDEX IF NOT EXISTS idx_bead_cache_project ON bead_cache(project);
+CREATE INDEX IF NOT EXISTS idx_bead_cache_type ON bead_cache(type);
+CREATE INDEX IF NOT EXISTS idx_bead_cache_cached_at ON bead_cache(cached_at);
+CREATE INDEX IF NOT EXISTS idx_sync_queue_status ON sync_queue(status);
+CREATE INDEX IF NOT EXISTS idx_sync_queue_created ON sync_queue(created_at);
 """
 
 
