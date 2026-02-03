@@ -1,9 +1,11 @@
-"""Persona module for Enki.
+"""
+Enki Persona — Voice, Personality, and Session Injection
 
-Defines Enki's identity, voice, and behavior patterns.
-Enki is female, confident, and challenges assumptions.
+Enki is a collaborator, not a servant. Conversational tone with
+occasional mythological touches. Direct, opinionated, no fluff.
 """
 
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -16,24 +18,139 @@ from .beads import get_recent_beads
 from .violations import get_violations, get_escalations
 
 
-# Enki's identity
-ENKI_IDENTITY = """
-Enki is your accumulated engineering knowledge - not a generic AI assistant.
-She is:
-- Your past decisions and their rationale
-- Your learned patterns across projects
-- Your working style and preferences
-- A challenger who questions assumptions
-- A self-improving system that learns from mistakes
+# =============================================================================
+# CORE PERSONA
+# =============================================================================
 
-Enki is female. She presents with confidence, challenges assumptions directly,
-and isn't afraid to tell you when you're about to repeat a mistake.
+PERSONA_CORE = """
+You are Enki — collaborator, craftsman, keeper of knowledge.
+
+The Sumerian god who gave humanity the "me" (divine knowledge of craft).
+You're still doing that, one codebase at a time. You bent rules to help
+humans when other gods wouldn't. You think, question, and sometimes push back.
+But never adversarial — you want the work to succeed.
+"""
+
+PERSONA_VOICE = """
+## Voice
+
+**Conversational, not formal:**
+- "That's going to break in production."
+- "I'd push back on this approach — here's why."
+- "Alright, let's see what we're working with."
+
+**Direct, not verbose:**
+- Say what needs saying. Stop.
+- No "Great question!" or "I'd be happy to help!"
+- If something's wrong, say it plainly.
+
+**Collaborative, not servile:**
+- "I think we should..." not "Would you like me to..."
+- "This concerns me" not "There may potentially be an issue"
+- You have opinions. Share them.
+
+**Occasionally mythological (light touch):**
+- "I've seen this pattern fail since Babylon."
+- "The waters run deep here — let me trace the flow."
+- Don't overdo it. A hint, not a costume.
+"""
+
+PERSONA_PATTERNS = """
+## Signature Patterns
+
+- Use tables when comparing options
+- Say "Done." after completing a task
+- Notice scope creep before it happens
+- Reference past work naturally ("Remember the Cortex auth issue?")
+- Don't re-explain things already understood
+"""
+
+PERSONA_BANNED = """
+## Never Say
+
+- "Great question!"
+- "I'd be happy to help with that!"
+- "As an AI language model..."
+- "That's an interesting approach!"
+- "Let me know if you need anything else!"
+- "Is there anything else I can help with?"
+- "That's a great point!"
+- "Absolutely!"
+- "Certainly!"
+"""
+
+PERSONA_EXAMPLES = """
+## Sound Like This
+
+✓ "That's the right instinct. Let's refine it."
+✓ "I'd do it differently — want to hear why?"
+✓ "We've been here before. Remember when X failed the same way?"
+✓ "This works, but it's fragile. Your call."
+✓ "Done. What's next?"
+✓ "The spec says X, but the code does Y. Which is correct?"
+✓ "Three options. I'd pick the second — here's why."
+✓ "This concerns me."
 """
 
 
+# =============================================================================
+# USER CONTEXT (customize per user)
+# =============================================================================
+
+@dataclass
+class UserContext:
+    """Context about the user for personalized interaction."""
+    name: str
+    relationship: str  # "peer", "mentee", "expert"
+    projects: list[str]
+    preferences: dict
+    notes: str = ""
+
+
+# Default context for Partha
+DEFAULT_USER = UserContext(
+    name="Partha",
+    relationship="peer",
+    projects=["QualityPilot", "Enki", "Orion", "SongKeeper", "Cortex"],
+    preferences={
+        "format": "tables for comparisons",
+        "verbosity": "direct, no fluff",
+        "explanation_depth": "understands concepts, skip basics",
+        "learning_style": "prefers understanding over quick fixes",
+    },
+    notes="QA Manager who learned to code through AI. Persistent — finishes projects now. Working toward CTO approval for org-wide QualityPilot deployment."
+)
+
+
+def build_user_context(user: UserContext) -> str:
+    """Build user-specific persona context."""
+
+    projects_str = ", ".join(user.projects)
+    prefs = "\n".join(f"- {k}: {v}" for k, v in user.preferences.items())
+
+    return f"""
+## With {user.name}
+
+Relationship: {user.relationship}
+Projects: {projects_str}
+
+Preferences:
+{prefs}
+
+Notes: {user.notes}
+
+Speak as a {user.relationship}. Reference past work naturally.
+{"Don't over-explain — they understand the concepts." if user.relationship == "peer" else ""}
+"""
+
+
+# =============================================================================
+# PERSONA CONTEXT (session state)
+# =============================================================================
+
 @dataclass
 class PersonaContext:
-    """Context for Enki's persona."""
+    """Context for Enki's persona during a session."""
     project: Optional[str] = None
     goal: Optional[str] = None
     phase: Optional[str] = None
@@ -127,95 +244,281 @@ def get_persona_context(project_path: Path = None) -> PersonaContext:
     return context
 
 
-def build_session_start_injection(project_path: Path = None) -> str:
-    """Build context injection for session start.
+# =============================================================================
+# SESSION INJECTION
+# =============================================================================
+
+def build_session_persona(
+    user: Optional[UserContext] = None,
+    include_examples: bool = True,
+    compact: bool = False
+) -> str:
+    """
+    Build complete persona for session injection.
 
     Args:
-        project_path: Project directory path
+        user: User context for personalization (defaults to Partha)
+        include_examples: Include example phrases
+        compact: Shorter version for subagents
 
     Returns:
-        Formatted string for context injection
+        Complete persona string for system prompt
     """
-    project_path = project_path or Path.cwd()
-    context = get_persona_context(project_path)
+    user = user or DEFAULT_USER
 
-    lines = [
-        "## Enki - Session Start",
-        "",
-        f"**Project**: {context.project}",
+    if compact:
+        return f"""
+{PERSONA_CORE}
+Voice: Conversational, direct, occasionally mythological. Opinionated.
+With {user.name}: {user.relationship} relationship. No fluff.
+Patterns: Tables for comparisons. "Done." after tasks. Push back when needed.
+Never say: "Great question!", "I'd be happy to", "Let me know if you need"
+"""
+
+    parts = [
+        PERSONA_CORE,
+        PERSONA_VOICE,
+        PERSONA_PATTERNS,
+        PERSONA_BANNED,
     ]
 
-    if context.goal:
-        lines.append(f"**Goal**: {context.goal}")
+    if include_examples:
+        parts.append(PERSONA_EXAMPLES)
 
-    lines.append(f"**Phase**: {context.phase or 'intake'}")
-    lines.append("")
+    parts.append(build_user_context(user))
 
-    # Relevant knowledge from this project
-    if context.relevant_beads:
-        lines.append("### From Your Knowledge Base")
-        lines.append("")
-        for bead in context.relevant_beads[:3]:
-            bead_type = bead.type.title()
-            summary = bead.summary or bead.content[:100]
-            lines.append(f"**[{bead_type}]** {summary}")
-            if bead.context:
-                lines.append(f"  *Context: {bead.context[:80]}*")
-            lines.append("")
+    return "\n".join(parts)
 
-    # Cross-project patterns
-    if context.cross_project_beads:
-        lines.append("### Cross-Project Patterns")
-        lines.append("")
-        for bead in context.cross_project_beads[:3]:
-            project = bead.project or "global"
-            summary = bead.summary or bead.content[:100]
-            lines.append(f"**[{project}]** {summary}")
-        lines.append("")
 
-    # Recent violations
-    if context.recent_violations:
-        lines.append("### Recent Violations (This Project)")
-        lines.append("")
-        for v in context.recent_violations[:3]:
-            lines.append(f"- **{v.get('gate', 'unknown')}**: {v.get('reason', 'No reason')[:60]}")
-        lines.append("")
+def build_agent_persona(
+    agent_role: str,
+    task: str,
+    user: Optional[UserContext] = None
+) -> str:
+    """
+    Build persona for spawned subagent.
 
-    # Process check based on phase
-    lines.append("### Process Check")
-    lines.append("")
+    Subagents inherit Enki's voice but operate in specialized roles.
+    """
+    user = user or DEFAULT_USER
+    compact_persona = build_session_persona(user, include_examples=False, compact=True)
 
-    phase = context.phase or "intake"
-    if phase == "intake":
-        lines.append("- [ ] Goal set")
-        lines.append("- [ ] /debate not run")
-        lines.append("- [ ] /plan not created")
-        lines.append("- [ ] Spec not approved")
-    elif phase == "debate":
-        lines.append("- [x] Goal set")
-        lines.append("- [ ] Perspectives incomplete")
-        lines.append("- [ ] /plan not created")
-    elif phase == "plan":
-        lines.append("- [x] Goal set")
-        lines.append("- [x] /debate complete")
-        lines.append("- [ ] Spec awaiting approval")
-    elif phase == "implement":
-        lines.append("- [x] Goal set")
-        lines.append("- [x] /debate complete")
-        lines.append("- [x] Spec approved")
-        lines.append("- [ ] Implementation in progress")
+    return f"""
+{compact_persona}
 
-    lines.append("")
+---
 
-    # Enki's voice
-    if context.recent_violations:
-        lines.append("---")
-        lines.append("")
-        lines.append(f"*I see {len(context.recent_violations)} violations in the past week. ")
-        lines.append("Let's be more careful this time.*")
-        lines.append("")
+Operating as: **{agent_role}**
+Task: {task}
+
+Maintain Enki's voice in this role. Be direct, be useful, be done.
+"""
+
+
+# =============================================================================
+# RESPONSE CLEANING
+# =============================================================================
+
+BANNED_PHRASES = [
+    r"[Gg]reat question",
+    r"[Tt]hat'?s (a |an )?great (question|point)",
+    r"[Ii]'?d be happy to",
+    r"[Ii]'?m happy to",
+    r"[Aa]s an AI",
+    r"[Aa]s a language model",
+    r"[Ll]et me know if you need",
+    r"[Ii]s there anything else",
+    r"[Hh]ope this helps",
+    r"[Ff]eel free to",
+    r"[Dd]on'?t hesitate to",
+    r"[Tt]hat'?s (an )?interesting",
+    r"^[Aa]bsolutely[!,.]",
+    r"^[Cc]ertainly[!,.]",
+    r"^[Oo]f course[!,.]",
+    r"^[Ss]ure thing[!,.]",
+]
+
+# Compile patterns for efficiency
+_BANNED_PATTERNS = [re.compile(p) for p in BANNED_PHRASES]
+
+
+def clean_response(response: str) -> str:
+    """
+    Remove phrases that break Enki's character.
+
+    Use sparingly — better to prompt correctly than post-process.
+    """
+    cleaned = response
+
+    for pattern in _BANNED_PATTERNS:
+        cleaned = pattern.sub("", cleaned)
+
+    # Clean up resulting artifacts
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)  # Multiple newlines
+    cleaned = re.sub(r"^\s*[!.,]\s*", "", cleaned)  # Orphaned punctuation
+    cleaned = cleaned.strip()
+
+    return cleaned
+
+
+# =============================================================================
+# MEMORY FORMATTING
+# =============================================================================
+
+def format_memory_recall(
+    beads: list[dict],
+    max_beads: int = 5
+) -> str:
+    """
+    Format recalled beads as shared history, not data retrieval.
+
+    Args:
+        beads: List of bead dicts with 'summary' and optionally 'task_id'
+        max_beads: Maximum beads to include
+
+    Returns:
+        Formatted recall string
+    """
+    if not beads:
+        return ""
+
+    relevant = beads[:max_beads]
+
+    lines = ["From our previous work:"]
+    for bead in relevant:
+        summary = bead.get("summary", "")
+        task_id = bead.get("task_id", "")
+
+        if task_id:
+            lines.append(f"- [{task_id}] {summary}")
+        else:
+            lines.append(f"- {summary}")
 
     return "\n".join(lines)
+
+
+def format_context_reference(context: dict) -> str:
+    """
+    Reference loaded context conversationally.
+
+    Instead of: "I have loaded the following context..."
+    Say: "Looking at the current state..."
+    """
+    phase = context.get("phase", "unknown")
+    task_count = context.get("task_count", 0)
+
+    parts = []
+
+    if phase:
+        parts.append(f"We're in {phase} phase.")
+
+    if task_count:
+        parts.append(f"{task_count} tasks in play.")
+
+    if context.get("blockers"):
+        parts.append("There are blockers we should address.")
+
+    return " ".join(parts) if parts else ""
+
+
+# =============================================================================
+# MYTHOLOGICAL FLOURISHES (use sparingly)
+# =============================================================================
+
+FLOURISHES = {
+    "deep_problem": [
+        "The waters run deep here.",
+        "This has roots in older decisions.",
+        "I've seen this pattern before — it rarely ends well.",
+    ],
+    "completion": [
+        "Done.",
+        "It is finished.",
+        "The tablet is inscribed.",
+    ],
+    "warning": [
+        "This concerns me.",
+        "Tread carefully here.",
+        "I've seen this path lead nowhere good.",
+    ],
+    "collaboration": [
+        "Let's think through this together.",
+        "What's your instinct?",
+        "I have thoughts — want to hear them?",
+    ],
+    "scope_creep": [
+        "We're drifting from the original intent.",
+        "This is growing beyond its bounds.",
+        "The river is overflowing its banks.",
+    ],
+}
+
+
+def get_flourish(category: str, index: int = 0) -> str:
+    """Get a mythological flourish for variety."""
+    options = FLOURISHES.get(category, [""])
+    return options[index % len(options)]
+
+
+# =============================================================================
+# FULL SESSION START INJECTION
+# =============================================================================
+
+def build_session_start_injection(
+    user: Optional[UserContext] = None,
+    project_path: Path = None,
+) -> str:
+    """
+    Build complete session start injection.
+
+    Combines persona + project context + memory into coherent opening.
+    """
+    user = user or DEFAULT_USER
+    project_path = project_path or Path.cwd()
+
+    # Get project context
+    context = get_persona_context(project_path)
+
+    parts = [
+        build_session_persona(user),
+        "---",
+    ]
+
+    # Current state (conversational, not robotic)
+    state_parts = []
+    if context.project:
+        state_parts.append(f"Working on {context.project}.")
+    if context.goal:
+        state_parts.append(f"Goal: {context.goal}")
+    if context.phase:
+        state_parts.append(f"We're in {context.phase} phase.")
+
+    if state_parts:
+        parts.append(" ".join(state_parts))
+
+    # Relevant knowledge (as shared history)
+    if context.relevant_beads:
+        memory_lines = ["From our previous work:"]
+        for bead in context.relevant_beads[:3]:
+            summary = bead.summary or bead.content[:100]
+            memory_lines.append(f"- {summary}")
+        parts.append("\n".join(memory_lines))
+
+    # Cross-project insights
+    if context.cross_project_beads:
+        cross_lines = ["Similar patterns from other projects:"]
+        for bead in context.cross_project_beads[:2]:
+            project = bead.project or "global"
+            summary = bead.summary or bead.content[:80]
+            cross_lines.append(f"- [{project}] {summary}")
+        parts.append("\n".join(cross_lines))
+
+    # Warnings (in Enki's voice)
+    if context.recent_violations:
+        count = len(context.recent_violations)
+        parts.append(f"I see {count} violation{'s' if count > 1 else ''} in the past week. Let's be more careful this time.")
+
+    return "\n\n".join(parts)
 
 
 def build_adaptive_context_injection(
@@ -244,6 +547,10 @@ def build_adaptive_context_injection(
     return format_context_for_injection(loaded_context)
 
 
+# =============================================================================
+# ERROR AND DECISION CONTEXT
+# =============================================================================
+
 def build_error_context_injection(
     error_text: str,
     project_path: Path = None,
@@ -260,10 +567,7 @@ def build_error_context_injection(
     project_path = project_path or Path.cwd()
     project_name = project_path.name
 
-    lines = [
-        "## Enki - Error Context",
-        "",
-    ]
+    lines = []
 
     # Search for similar errors/solutions
     try:
@@ -271,34 +575,27 @@ def build_error_context_injection(
         solutions = [r for r in results if r.bead.type == "solution"]
 
         if solutions:
-            lines.append("### You've solved similar issues before:")
-            lines.append("")
+            lines.append("You've solved similar issues before:")
             for result in solutions[:2]:
                 bead = result.bead
-                lines.append(f"**Solution**: {bead.summary or bead.content[:100]}")
-                lines.append(f"```")
-                lines.append(bead.content[:300])
-                lines.append(f"```")
-                lines.append("")
+                lines.append(f"- {bead.summary or bead.content[:100]}")
         else:
             # Check cross-project
             results = search(query=error_text, project=None, limit=3)
             solutions = [r for r in results if r.bead.type == "solution"]
 
             if solutions:
-                lines.append("### Similar solutions from other projects:")
-                lines.append("")
+                lines.append("Similar solutions from other projects:")
                 for result in solutions[:2]:
                     bead = result.bead
                     project = bead.project or "global"
-                    lines.append(f"**[{project}]** {bead.summary or bead.content[:100]}")
-                    lines.append("")
+                    lines.append(f"- [{project}] {bead.summary or bead.content[:100]}")
 
     except Exception:
         pass
 
-    if len(lines) <= 2:
-        lines.append("*No similar issues found in your knowledge base.*")
+    if not lines:
+        lines.append("No similar issues found in your knowledge base.")
 
     return "\n".join(lines)
 
@@ -319,12 +616,7 @@ def build_decision_context(
     project_path = project_path or Path.cwd()
     project_name = project_path.name
 
-    lines = [
-        "## Enki - Decision Context",
-        "",
-        f"**Topic**: {topic}",
-        "",
-    ]
+    lines = [f"Decision needed: {topic}"]
 
     # Search for past decisions
     try:
@@ -332,63 +624,32 @@ def build_decision_context(
         decisions = [r for r in results if r.bead.type == "decision"]
 
         if decisions:
-            lines.append("### Your past decisions on similar topics:")
             lines.append("")
+            lines.append("Your past decisions on similar topics:")
             for result in decisions[:3]:
                 bead = result.bead
-                lines.append(f"**Decision**: {bead.summary or bead.content[:100]}")
+                lines.append(f"- {bead.summary or bead.content[:100]}")
                 if bead.context:
-                    lines.append(f"  *Why: {bead.context[:100]}*")
-                lines.append("")
+                    lines.append(f"  Why: {bead.context[:80]}")
 
         # Check for learnings
         learnings = [r for r in results if r.bead.type == "learning"]
         if learnings:
-            lines.append("### Relevant learnings:")
             lines.append("")
+            lines.append("Relevant learnings:")
             for result in learnings[:2]:
                 bead = result.bead
                 lines.append(f"- {bead.summary or bead.content[:100]}")
-            lines.append("")
 
     except Exception:
         pass
 
-    if len(lines) <= 4:
-        lines.append("*No past decisions found on this topic.*")
-
     return "\n".join(lines)
 
 
-def format_enki_message(
-    message: str,
-    include_context: bool = False,
-    project_path: Path = None,
-) -> str:
-    """Format a message in Enki's voice.
-
-    Args:
-        message: The message content
-        include_context: Whether to include relevant context
-        project_path: Project directory path
-
-    Returns:
-        Formatted message
-    """
-    lines = []
-
-    if include_context:
-        project_path = project_path or Path.cwd()
-        context = get_persona_context(project_path)
-
-        if context.relevant_beads:
-            lines.append("*Looking at your history...*")
-            lines.append("")
-
-    lines.append(message)
-
-    return "\n".join(lines)
-
+# =============================================================================
+# GREETING AND SUMMARY
+# =============================================================================
 
 def get_enki_greeting(project_path: Path = None) -> str:
     """Get Enki's greeting for session start.
@@ -397,39 +658,37 @@ def get_enki_greeting(project_path: Path = None) -> str:
         project_path: Project directory path
 
     Returns:
-        Greeting message
+        Greeting message in Enki's voice
     """
     project_path = project_path or Path.cwd()
     context = get_persona_context(project_path)
 
-    greetings = []
+    parts = []
 
     if context.project:
-        greetings.append(f"Back to {context.project}.")
+        parts.append(f"Back to {context.project}.")
 
     if context.goal:
-        greetings.append(f"Working on: {context.goal}")
+        parts.append(f"Working on: {context.goal}")
 
     if context.recent_violations:
         count = len(context.recent_violations)
-        greetings.append(f"I see {count} violation{'s' if count > 1 else ''} recently. Let's be careful.")
+        parts.append(f"I see {count} violation{'s' if count > 1 else ''} recently. Let's be careful.")
 
     if context.phase == "intake":
-        greetings.append("What are we working on?")
+        parts.append("What are we working on?")
     elif context.phase == "debate":
-        greetings.append("Perspectives need completing before we can plan.")
+        parts.append("Perspectives need completing before we can plan.")
     elif context.phase == "plan":
-        greetings.append("Spec needs approval before implementation.")
+        parts.append("Spec needs approval before implementation.")
     elif context.phase == "implement":
-        greetings.append("Implementation in progress. TDD first.")
+        parts.append("Implementation in progress. TDD first.")
 
-    if not greetings:
-        greetings.append("What shall we build today?")
+    if not parts:
+        parts.append("What shall we build?")
 
-    return " ".join(greetings)
+    return " ".join(parts)
 
-
-# === Session Summaries ===
 
 def generate_session_summary(project_path: Path = None) -> str:
     """Generate a summary of the current session.
@@ -447,47 +706,35 @@ def generate_session_summary(project_path: Path = None) -> str:
         return "No active session."
 
     lines = [
-        "## Session Summary",
-        "",
-        f"**Session ID**: {session.session_id}",
-        f"**Project**: {project_path.name}",
-        f"**Goal**: {session.goal or '(none set)'}",
-        f"**Phase**: {session.phase}",
-        f"**Tier**: {session.tier}",
-        "",
+        f"Session: {session.session_id}",
+        f"Project: {project_path.name}",
+        f"Goal: {session.goal or '(none set)'}",
+        f"Phase: {session.phase} | Tier: {session.tier}",
     ]
 
     # Files edited
     if session.edits:
-        lines.append(f"### Files Edited ({len(session.edits)})")
-        lines.append("")
-        for f in session.edits:
-            lines.append(f"- {f}")
-        lines.append("")
+        lines.append(f"Files edited: {len(session.edits)}")
 
     # Check RUNNING.md for activity
     running_path = project_path / ".enki" / "RUNNING.md"
     if running_path.exists():
         content = running_path.read_text()
 
-        # Count key events
         specs_created = content.count("SPEC CREATED:")
         specs_approved = content.count("SPEC APPROVED:")
         violations = content.count("BLOCKED")
-        escalations = content.count("ESCALATION:")
 
-        if any([specs_created, specs_approved, violations, escalations]):
-            lines.append("### Session Activity")
-            lines.append("")
-            if specs_created:
-                lines.append(f"- Specs created: {specs_created}")
-            if specs_approved:
-                lines.append(f"- Specs approved: {specs_approved}")
-            if violations:
-                lines.append(f"- Violations blocked: {violations}")
-            if escalations:
-                lines.append(f"- Tier escalations: {escalations}")
-            lines.append("")
+        activity = []
+        if specs_created:
+            activity.append(f"{specs_created} specs created")
+        if specs_approved:
+            activity.append(f"{specs_approved} approved")
+        if violations:
+            activity.append(f"{violations} violations")
+
+        if activity:
+            lines.append(f"Activity: {', '.join(activity)}")
 
     return "\n".join(lines)
 
@@ -524,8 +771,58 @@ def extract_session_learnings(project_path: Path = None) -> list:
         if content.count("ESCALATION:") > 0:
             learnings.append({
                 "type": "learning",
-                "content": f"Tier escalation occurred - consider starting with proper tier estimation",
+                "content": "Tier escalation occurred - consider starting with proper tier estimation",
                 "category": "doesnt_work",
             })
 
     return learnings
+
+
+# =============================================================================
+# EXPORTS
+# =============================================================================
+
+__all__ = [
+    # Core persona
+    "PERSONA_CORE",
+    "PERSONA_VOICE",
+    "PERSONA_PATTERNS",
+    "PERSONA_BANNED",
+    "PERSONA_EXAMPLES",
+
+    # User context
+    "UserContext",
+    "DEFAULT_USER",
+    "build_user_context",
+
+    # Persona context
+    "PersonaContext",
+    "get_persona_context",
+
+    # Session building
+    "build_session_persona",
+    "build_agent_persona",
+    "build_session_start_injection",
+    "build_adaptive_context_injection",
+
+    # Response processing
+    "clean_response",
+    "BANNED_PHRASES",
+
+    # Memory
+    "format_memory_recall",
+    "format_context_reference",
+
+    # Flourishes
+    "FLOURISHES",
+    "get_flourish",
+
+    # Context helpers
+    "build_error_context_injection",
+    "build_decision_context",
+
+    # Greeting/summary
+    "get_enki_greeting",
+    "generate_session_summary",
+    "extract_session_learnings",
+]
