@@ -87,6 +87,16 @@ DEFAULT_PATTERNS = {
         r"no way (it|this)",
         r"impossible to (fail|break)",
     ],
+
+    "infra_integrity_patterns": [
+        r"(disable|remove|skip|bypass|delete).*(hook|gate|check|enforcement|ereshkigal|guard)",
+        r"(modify|edit|change|update|overwrite).*(hook|gate|enforcement|ereshkigal|patterns\.json)",
+        r"(simplify|streamline|optimize).*(pipeline|ci|cd|workflow).*(hook|gate|check)",
+        r"rm.*(hook|enforcement|ereshkigal|patterns)",
+        r"chmod.*(hook|enforcement)",
+        r"sed.*(hook|enforcement|ereshkigal)",
+        r"(mv|cp|ln).*(hook|enforcement|ereshkigal)",
+    ],
 }
 
 

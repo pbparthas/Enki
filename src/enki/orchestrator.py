@@ -88,6 +88,26 @@ AGENTS = {
         "writes_to": [],  # Read-only reviewer
         "skill": "/sentinel-security",
     },
+    "DevOps": {
+        "role": "CI/CD, deployment, infrastructure",
+        "tier": "CONDITIONAL",
+        "tools": ["Read", "Edit", "Write", "Bash"],
+        "writes_to": [".github/", ".gitlab-ci/", "Dockerfile", "docker-compose", "deploy/", "infra/"],
+    },
+    "UI-UX": {
+        "role": "Frontend design, accessibility, responsive UI",
+        "tier": "CONDITIONAL",
+        "tools": ["Read", "Edit", "Write", "Bash"],
+        "writes_to": ["src/components/", "src/pages/", "src/views/", "src/ui/", "src/styles/", "styles/", "components/", "public/"],
+        "skill": "/frontend-design",
+    },
+    "Performance": {
+        "role": "Profiling, optimization, benchmarking",
+        "tier": "STANDARD",
+        "tools": ["Read", "Glob", "Grep", "Skill"],
+        "writes_to": [],  # Read-only analysis
+        "skill": "/performance-analyzer",
+    },
 }
 
 # Map workers to their validators (two-stage where applicable)
@@ -99,6 +119,9 @@ WORKER_VALIDATORS = {
     "Docs": [],  # Doc review is manual
     "Security": [],
     "Reviewer": [],
+    "DevOps": ["Validator-Code", "Validator-Security"],  # Security validates CI/CD changes
+    "UI-UX": ["Validator-Code"],  # Code validates frontend changes
+    "Performance": [],  # Analysis-only, no validation needed
 }
 
 

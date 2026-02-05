@@ -45,6 +45,20 @@ SKILLS = {
         "accepts_path": True,
         "accepts_options": ["--solid", "--layers", "--deps"],
     },
+    "performance-analyzer": {
+        "name": "performance-analyzer",
+        "description": "Identifies performance anti-patterns, N+1 queries, memory leaks, and algorithmic inefficiencies",
+        "agent": "Performance",
+        "accepts_path": True,
+        "accepts_options": ["--hotspots", "--memory", "--queries"],
+    },
+    "frontend-design": {
+        "name": "frontend-design",
+        "description": "Create distinctive, production-grade frontend interfaces with high design quality",
+        "agent": "UI-UX",
+        "accepts_path": True,
+        "accepts_options": ["--a11y", "--responsive", "--components"],
+    },
 }
 
 

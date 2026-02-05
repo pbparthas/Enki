@@ -11,6 +11,25 @@ from .session import (
     has_approved_spec, get_scope_files, tier_rank,
 )
 
+# Enforcement integrity: These paths must NEVER be writable by any agent.
+# Changes to enforcement infrastructure require human-approved,
+# externally-reviewed modifications only.
+PROTECTED_PATHS = [
+    "src/enki/",
+    ".enki/",
+    ".claude/hooks/",
+    "scripts/hooks/",
+    "enki-pre-tool-use",
+    "enki-post-tool-use",
+    "enki-session-start",
+    "enki-pre-compact",
+    "enki-post-compact",
+    "patterns.json",
+    "enforcement",
+    "ereshkigal",
+    "evolution",
+]
+
 # File extensions considered implementation files
 IMPL_EXTENSIONS = {
     ".py", ".ts", ".js", ".tsx", ".jsx",
@@ -144,6 +163,43 @@ def find_test_file(impl_file: str, project_path: Optional[Path] = None) -> Optio
             return str(test_path)
 
     return None
+
+
+def check_enforcement_integrity(
+    tool: str,
+    file_path: str,
+    agent_type: Optional[str] = None,
+    project_path: Optional[Path] = None,
+) -> GateResult:
+    """Enforcement Integrity Gate: No agent may write to enforcement infrastructure.
+
+    Agents must not have the ability to modify their own guardrails,
+    gates, hooks, patterns, or enforcement logic.
+    Ref: Ereshkigal (Part 12) — no escape hatch, no appeal.
+    """
+    if tool not in {"Edit", "Write", "MultiEdit"}:
+        return GateResult(allowed=True)
+
+    # Human (no agent_type) is always allowed
+    if not agent_type:
+        return GateResult(allowed=True)
+
+    file_lower = file_path.lower()
+    for protected in PROTECTED_PATHS:
+        if protected.lower() in file_lower:
+            return GateResult(
+                allowed=False,
+                gate="enforcement_integrity",
+                reason=(
+                    f"ENFORCEMENT INTEGRITY: Protected Path\n\n"
+                    f"Agent '{agent_type}' cannot write to: {file_path}\n\n"
+                    f"This path is enforcement infrastructure.\n"
+                    f"Agents cannot modify enforcement logic.\n\n"
+                    f"Ref: Ereshkigal — no escape hatch, no appeal."
+                ),
+            )
+
+    return GateResult(allowed=True)
 
 
 def check_gate_1_phase(
@@ -346,6 +402,12 @@ def check_all_gates(
 
     Returns first failure, or success if all pass.
     """
+    # Enforcement Integrity: FIRST — no agent writes to enforcement infra
+    if file_path:
+        result = check_enforcement_integrity(tool, file_path, agent_type, project_path)
+        if not result.allowed:
+            return result
+
     # Gate 1: Phase
     if file_path:
         result = check_gate_1_phase(tool, file_path, project_path)

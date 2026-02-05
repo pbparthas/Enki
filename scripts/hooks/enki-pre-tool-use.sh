@@ -62,10 +62,24 @@ if [[ $? -eq 0 ]] && [[ -n "$GATE_RESULT" ]]; then
 fi
 
 # === Layer 2: Ereshkigal Pattern Interception ===
-# Only require reasoning for Bash commands (Edit/Write protected by gates only)
+# Bash always needs reasoning check.
+# Edit/Write to enforcement paths also need reasoning check (Fix 6).
+NEEDS_ERESHKIGAL=false
+
 if [[ "$TOOL" == "Bash" ]]; then
+    NEEDS_ERESHKIGAL=true
+fi
+
+# Edit/Write to enforcement infrastructure paths
+if [[ "$TOOL" =~ ^(Edit|Write|MultiEdit)$ ]] && [[ -n "$FILE_PATH" ]]; then
+    if echo "$FILE_PATH" | grep -qiE "(enki|enforcement|ereshkigal|evolution|hooks|patterns\.json|\.claude/hooks)"; then
+        NEEDS_ERESHKIGAL=true
+    fi
+fi
+
+if [[ "$NEEDS_ERESHKIGAL" == "true" ]]; then
     if [[ -z "$REASONING" ]]; then
-        echo '{"decision": "block", "reason": "No reasoning provided for Bash command."}'
+        echo '{"decision": "block", "reason": "No reasoning provided. Ereshkigal requires justification."}'
         exit 0
     fi
 
@@ -80,7 +94,6 @@ if [[ "$TOOL" == "Bash" ]]; then
         ERESHKIGAL_DECISION=$(echo "$ERESHKIGAL_RESULT" | jq -r '.allowed // true')
 
         if [[ "$ERESHKIGAL_DECISION" == "false" ]]; then
-            # Ereshkigal blocked - format response
             REASON=$(echo "$ERESHKIGAL_RESULT" | jq -r '.message // "Blocked by Ereshkigal"')
             echo "{\"decision\": \"block\", \"reason\": $(echo "$REASON" | jq -Rs .)}"
             exit 0

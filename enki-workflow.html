@@ -1,0 +1,1367 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Enki — How It Works</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  :root {
+    --bg: #0c0c0f;
+    --surface: #16161b;
+    --surface2: #1e1e25;
+    --surface3: #2a2a33;
+    --border: #3d3d4a;
+    --text: #f0ece4;
+    --text2: #d4cabb;
+    --text3: #a89e8e;
+    --gold: #e0b44e;
+    --gold2: #d4a040;
+    --gold-glow: rgba(224,180,78,0.10);
+    --gold-glow2: rgba(224,180,78,0.22);
+    --amber: #f0b030;
+    --red: #e06060;
+    --red-dim: #904040;
+    --green: #60c878;
+    --green-dim: #3a7848;
+    --blue: #68a8e0;
+    --blue-dim: #3a6890;
+    --purple: #a088d0;
+    --purple-dim: #685498;
+    --cyan: #60b8c8;
+    --font: -apple-system, 'Segoe UI', system-ui, sans-serif;
+    --mono: 'SF Mono', 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+  }
+
+  body {
+    font-family: var(--font);
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    overflow-x: hidden;
+    padding-bottom: 56px;
+  }
+
+  /* ═══ HEADER ═══ */
+  .header {
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    background: rgba(12,12,15,0.96);
+    backdrop-filter: blur(16px);
+    border-bottom: 1px solid var(--border);
+  }
+
+  .header-top {
+    padding: 12px 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .brand-icon {
+    width: 34px;
+    height: 34px;
+    background: linear-gradient(135deg, var(--gold), #c88020);
+    border-radius: 8px;
+    display: grid;
+    place-items: center;
+    font-family: var(--mono);
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--bg);
+  }
+
+  .brand h1 {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--gold);
+    letter-spacing: 3px;
+  }
+
+  .brand p {
+    font-size: 11px;
+    color: var(--text3);
+    margin-top: 1px;
+  }
+
+  .step-indicator {
+    font-size: 14px;
+    color: var(--text2);
+    font-weight: 500;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .step-indicator .step-num {
+    color: var(--gold);
+    font-weight: 700;
+    font-size: 15px;
+  }
+
+  .step-indicator .step-name {
+    color: var(--text);
+    font-weight: 600;
+  }
+
+  .step-indicator .kbd-hint {
+    font-size: 11px;
+    color: var(--text3);
+    background: var(--surface2);
+    padding: 3px 8px;
+    border-radius: 4px;
+    border: 1px solid var(--border);
+  }
+
+  /* ═══ PROGRESS BAR ═══ */
+  .progress-bar {
+    height: 3px;
+    background: var(--surface2);
+  }
+
+  .progress-fill {
+    height: 100%;
+    background: linear-gradient(90deg, var(--gold), var(--amber));
+    transition: width 0.4s ease;
+    border-radius: 0 2px 2px 0;
+  }
+
+  /* ═══ STEP PILLS ═══ */
+  .step-pills {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 10px 16px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+  }
+
+  .step-pill {
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    background: var(--surface2);
+    border: 2px solid var(--border);
+    color: var(--text3);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    display: grid;
+    place-items: center;
+    transition: all 0.3s;
+    font-family: var(--font);
+    position: relative;
+  }
+
+  .step-pill:hover {
+    border-color: var(--gold2);
+    color: var(--text2);
+    background: var(--surface3);
+  }
+
+  .step-pill.active {
+    background: var(--gold);
+    border-color: var(--gold);
+    color: var(--bg);
+    box-shadow: 0 0 12px rgba(224,180,78,0.4);
+    font-weight: 700;
+  }
+
+  .step-pill.done {
+    background: var(--green-dim);
+    border-color: var(--green);
+    color: var(--green);
+  }
+
+  .step-pill .pill-tip {
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--surface3);
+    color: var(--text);
+    padding: 4px 10px;
+    border-radius: 6px;
+    font-size: 11px;
+    font-weight: 500;
+    white-space: nowrap;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.15s;
+    z-index: 10;
+  }
+
+  .step-pill:hover .pill-tip { opacity: 1; }
+
+  .pill-sep {
+    width: 16px;
+    height: 2px;
+    background: var(--border);
+    flex-shrink: 0;
+  }
+
+  .pill-sep.done { background: var(--green-dim); }
+
+  /* ═══ SIDE NAV ARROWS ═══ */
+  .side-nav {
+    position: fixed;
+    top: 50%;
+    transform: translateY(-50%);
+    z-index: 90;
+    width: 52px;
+    height: 52px;
+    background: var(--surface2);
+    border: 2px solid var(--border);
+    border-radius: 50%;
+    color: var(--text);
+    font-size: 22px;
+    cursor: pointer;
+    display: grid;
+    place-items: center;
+    transition: all 0.25s;
+    font-family: var(--font);
+    box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+  }
+
+  .side-nav:hover {
+    border-color: var(--gold);
+    color: var(--gold);
+    background: var(--surface3);
+    box-shadow: 0 4px 24px rgba(224,180,78,0.15);
+    transform: translateY(-50%) scale(1.08);
+  }
+
+  .side-nav:active { transform: translateY(-50%) scale(0.95); }
+  .side-nav:disabled { opacity: 0.12; cursor: default; pointer-events: none; }
+  .side-nav.prev { left: 16px; }
+  .side-nav.next { right: 16px; }
+
+  /* ═══ MAIN CONTENT ═══ */
+  .phase-container {
+    max-width: 1280px;
+    margin: 0 auto;
+    padding: 36px 80px 60px;
+  }
+
+  /* ═══ INTRO PAGE ═══ */
+  .intro {
+    animation: fadeUp 0.5s ease;
+  }
+
+  .intro-hero {
+    text-align: center;
+    padding: 20px 0 40px;
+  }
+
+  .intro-logo {
+    width: 80px;
+    height: 80px;
+    background: linear-gradient(135deg, var(--gold), #c88020);
+    border-radius: 20px;
+    display: inline-grid;
+    place-items: center;
+    font-family: var(--mono);
+    font-size: 42px;
+    font-weight: 700;
+    color: var(--bg);
+    margin-bottom: 20px;
+    box-shadow: 0 8px 32px rgba(224,180,78,0.25);
+  }
+
+  .intro h2 {
+    font-size: 40px;
+    font-weight: 700;
+    color: var(--text);
+    margin-bottom: 10px;
+    letter-spacing: -0.5px;
+  }
+
+  .intro h2 span { color: var(--gold); }
+
+  .intro-tagline {
+    font-size: 18px;
+    color: var(--text2);
+    line-height: 1.6;
+    max-width: 560px;
+    margin: 0 auto 40px;
+  }
+
+  /* ═══ DUAL PANEL (Enki + Ereshkigal) ═══ */
+  .intro-dual {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    margin-bottom: 28px;
+    animation: fadeUp 0.5s ease 0.1s both;
+  }
+
+  .intro-panel {
+    background: var(--surface);
+    border-radius: 16px;
+    padding: 24px 26px;
+  }
+
+  .intro-panel.enki-panel {
+    border: 1px solid var(--gold2);
+  }
+
+  .intro-panel.ereshkigal-panel {
+    border: 1px solid var(--red-dim);
+  }
+
+  .intro-panel h3 {
+    font-size: 18px;
+    font-weight: 700;
+    margin-bottom: 12px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .enki-panel h3 { color: var(--gold); }
+  .ereshkigal-panel h3 { color: var(--red); }
+
+  .intro-panel p {
+    font-size: 14px;
+    color: var(--text2);
+    line-height: 1.7;
+    margin-bottom: 10px;
+  }
+
+  .intro-panel p:last-child { margin-bottom: 0; }
+
+  .intro-panel ul {
+    list-style: none;
+    padding: 0;
+    margin: 12px 0 0 0;
+  }
+
+  .intro-panel ul li {
+    font-size: 13px;
+    color: var(--text2);
+    padding: 5px 0;
+    border-bottom: 1px solid var(--surface3);
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+  }
+
+  .intro-panel ul li:last-child { border-bottom: none; }
+
+  .intro-panel ul li .li-label {
+    font-weight: 600;
+    color: var(--text);
+    white-space: nowrap;
+  }
+
+  .enki-panel ul li .li-label { color: var(--gold); }
+  .ereshkigal-panel ul li .li-label { color: var(--red); }
+
+  .intro-pillars {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 14px;
+    margin-bottom: 32px;
+    animation: fadeUp 0.5s ease 0.2s both;
+  }
+
+  .intro-pillar {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 22px 18px;
+    text-align: center;
+    transition: all 0.3s;
+  }
+
+  .intro-pillar:hover {
+    border-color: var(--gold2);
+    transform: translateY(-2px);
+  }
+
+  .intro-pillar .pillar-icon {
+    font-size: 30px;
+    margin-bottom: 10px;
+    display: block;
+  }
+
+  .intro-pillar h4 {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text);
+    margin-bottom: 6px;
+  }
+
+  .intro-pillar p {
+    font-size: 13px;
+    color: var(--text2);
+    line-height: 1.6;
+  }
+
+  .intro-cta {
+    text-align: center;
+    animation: fadeUp 0.5s ease 0.3s both;
+    padding: 20px 0;
+  }
+
+  .intro-cta p {
+    font-size: 14px;
+    color: var(--text3);
+    margin-bottom: 16px;
+  }
+
+  .intro-start-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    padding: 14px 32px;
+    background: var(--gold);
+    color: var(--bg);
+    border: none;
+    border-radius: 10px;
+    font-family: var(--font);
+    font-size: 15px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: all 0.2s;
+    box-shadow: 0 4px 20px rgba(224,180,78,0.3);
+  }
+
+  .intro-start-btn:hover {
+    background: var(--amber);
+    transform: translateY(-2px);
+    box-shadow: 0 6px 28px rgba(224,180,78,0.4);
+  }
+
+  .intro-start-btn .arrow { font-size: 18px; }
+
+
+  /* ═══ PHASE HEADER ═══ */
+  .phase-header {
+    text-align: center;
+    margin-bottom: 40px;
+    animation: fadeUp 0.4s ease;
+  }
+
+  .phase-number {
+    display: inline-block;
+    width: 48px;
+    height: 48px;
+    border-radius: 50%;
+    background: var(--gold-glow2);
+    border: 2px solid var(--gold);
+    color: var(--gold);
+    font-size: 20px;
+    font-weight: 700;
+    line-height: 44px;
+    text-align: center;
+    margin-bottom: 14px;
+  }
+
+  .phase-title {
+    font-size: 32px;
+    font-weight: 700;
+    color: var(--text);
+    margin-bottom: 12px;
+    letter-spacing: -0.5px;
+  }
+
+  .phase-subtitle {
+    font-size: 15px;
+    color: var(--text2);
+    max-width: 620px;
+    margin: 0 auto;
+    line-height: 1.7;
+  }
+
+  /* ═══ FLOW DIAGRAM ═══ */
+  .flow {
+    display: flex;
+    align-items: stretch;
+    gap: 6px;
+    margin-bottom: 36px;
+    animation: fadeUp 0.4s ease 0.08s both;
+    padding: 4px 0;
+    flex-wrap: wrap;
+  }
+
+  .flow-step {
+    flex: 1 1 0;
+    min-width: 90px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 10px;
+    text-align: center;
+    transition: all 0.3s;
+  }
+
+  .flow-step.highlight {
+    border-color: var(--gold);
+    background: var(--gold-glow);
+    box-shadow: 0 0 20px rgba(224,180,78,0.10);
+  }
+
+  .flow-step.gate {
+    border-color: var(--red-dim);
+    background: rgba(224,96,96,0.06);
+  }
+
+  .flow-step.gate.highlight {
+    border-color: var(--red);
+    box-shadow: 0 0 20px rgba(224,96,96,0.12);
+  }
+
+  .flow-step.store {
+    border-color: var(--green-dim);
+    background: rgba(96,200,120,0.06);
+  }
+
+  .flow-step.store.highlight {
+    border-color: var(--green);
+    box-shadow: 0 0 20px rgba(96,200,120,0.10);
+  }
+
+  .flow-icon {
+    font-size: 34px;
+    margin-bottom: 6px;
+    display: block;
+  }
+
+  .flow-label {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--text);
+    margin-bottom: 3px;
+    line-height: 1.3;
+  }
+
+  .flow-sub {
+    font-size: 13px;
+    color: var(--text2);
+    font-family: var(--mono);
+  }
+
+  .flow-arrow {
+    display: flex;
+    align-items: center;
+    color: var(--text3);
+    font-size: 22px;
+    flex-shrink: 0;
+    min-width: 20px;
+    justify-content: center;
+  }
+
+  .flow-arrow.active { color: var(--gold); }
+
+  /* ═══ INFO CARDS ═══ */
+  .cards {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 36px;
+    animation: fadeUp 0.4s ease 0.16s both;
+  }
+
+  .card {
+    flex: 1;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 14px 16px;
+    transition: all 0.3s;
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+  }
+
+  .card:hover {
+    border-color: var(--surface3);
+    transform: translateY(-2px);
+  }
+
+  .card-icon {
+    width: 40px;
+    height: 40px;
+    border-radius: 10px;
+    display: grid;
+    place-items: center;
+    font-size: 20px;
+    flex-shrink: 0;
+  }
+
+  .card-icon.hook { background: rgba(240,176,48,0.15); }
+  .card-icon.tool { background: rgba(104,168,224,0.15); }
+  .card-icon.gate { background: rgba(224,96,96,0.15); }
+  .card-icon.store { background: rgba(96,200,120,0.15); }
+  .card-icon.persona { background: rgba(160,136,208,0.15); }
+
+  .card-body { min-width: 0; }
+
+  .card h3 {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--text);
+    margin-bottom: 5px;
+  }
+
+  .card p {
+    font-size: 14px;
+    color: var(--text2);
+    line-height: 1.55;
+  }
+
+  /* ═══ SECTION LABEL ═══ */
+  .section-label {
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    color: var(--text2);
+    margin-bottom: 14px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-weight: 600;
+  }
+
+  .section-label::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: var(--border);
+  }
+
+  /* ═══ BOTTOM NAV ═══ */
+  .bottom-nav {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    background: rgba(12,12,15,0.96);
+    backdrop-filter: blur(16px);
+    border-top: 1px solid var(--border);
+    z-index: 100;
+    display: flex;
+    align-items: stretch;
+    height: 52px;
+  }
+
+  .bottom-prev, .bottom-next {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0 20px;
+    cursor: pointer;
+    transition: all 0.2s;
+    border: none;
+    background: none;
+    font-family: var(--font);
+    font-size: 13px;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+
+  .bottom-prev {
+    color: var(--text2);
+    border-right: 1px solid var(--border);
+  }
+
+  .bottom-prev:hover { color: var(--text); background: var(--surface2); }
+  .bottom-prev:disabled { opacity: 0.15; pointer-events: none; }
+
+  .bottom-next {
+    color: var(--gold);
+    border-left: 1px solid var(--border);
+  }
+
+  .bottom-next:hover { color: var(--amber); background: var(--gold-glow); }
+  .bottom-next:disabled { opacity: 0.15; pointer-events: none; }
+
+  .bottom-prev .arrow, .bottom-next .arrow { font-size: 18px; }
+
+  .bottom-center {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 13px;
+    color: var(--text3);
+    gap: 6px;
+  }
+
+  .bottom-center .cur { color: var(--gold); font-weight: 600; }
+
+  /* ═══ PROMPT MODAL ═══ */
+  .prompt-modal {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.7);
+    z-index: 200;
+    place-items: center;
+    padding: 32px;
+  }
+
+  .prompt-modal.open { display: grid; }
+
+  .prompt-modal-inner {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 24px;
+    max-width: 700px;
+    width: 100%;
+    max-height: 80vh;
+    overflow-y: auto;
+  }
+
+  .prompt-modal-inner h3 { font-size: 14px; color: var(--gold); margin-bottom: 16px; }
+  .prompt-modal-inner pre { font-family: var(--mono); font-size: 12px; line-height: 1.7; color: var(--text); white-space: pre-wrap; }
+  .prompt-modal-inner .close-modal { float: right; background: none; border: none; color: var(--text3); font-size: 20px; cursor: pointer; }
+  .prompt-modal-inner .close-modal:hover { color: var(--text); }
+
+  /* ═══ ANIMATIONS ═══ */
+  @keyframes fadeUp {
+    from { opacity: 0; transform: translateY(14px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  @keyframes pulse-border {
+    0%, 100% { border-color: var(--gold2); }
+    50% { border-color: var(--gold); box-shadow: 0 0 20px rgba(224,180,78,0.18); }
+  }
+
+  .pulse-border { animation: pulse-border 2s infinite; }
+
+  /* ═══ RESPONSIVE ═══ */
+  @media (max-width: 900px) {
+    .side-nav { display: none; }
+    .phase-container { padding: 28px 20px 80px; }
+    .header-top { padding: 10px 12px; }
+    .step-pills { gap: 3px; padding: 8px 8px; }
+    .step-pill { width: 26px; height: 26px; font-size: 11px; }
+    .pill-sep { width: 8px; }
+    .phase-title { font-size: 24px; }
+    .flow { flex-wrap: wrap; }
+    .flow-arrow { display: none; }
+    .flow-step { min-width: 70px; flex: 1 1 calc(33% - 8px); }
+    .cards { flex-wrap: wrap; }
+    .card { flex: 1 1 100%; }
+    .intro-dual { grid-template-columns: 1fr; }
+    .intro-pillars { grid-template-columns: 1fr 1fr; }
+    .kbd-hint { display: none; }
+  }
+
+  /* ═══ SCROLLBAR ═══ */
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--text3); }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="header-top">
+    <div class="brand">
+      <div class="brand-icon">E</div>
+      <div>
+        <h1>ENKI</h1>
+        <p>Second Brain for Software Engineering</p>
+      </div>
+    </div>
+    <div class="step-indicator">
+      <span>Step</span>
+      <span class="step-num" id="stepNum">0</span>
+      <span>of 11</span>
+      <span style="color:var(--border); margin: 0 2px;">|</span>
+      <span class="step-name" id="stepName">Introduction</span>
+      <span class="kbd-hint">Arrow keys to navigate</span>
+    </div>
+  </div>
+  <div class="progress-bar">
+    <div class="progress-fill" id="progressFill" style="width: 0%"></div>
+  </div>
+  <div class="step-pills" id="stepPills"></div>
+</div>
+
+<button class="side-nav prev" id="sidePrev" onclick="go(-1)">&#8592;</button>
+<button class="side-nav next" id="sideNext" onclick="go(1)">&#8594;</button>
+
+<div class="phase-container" id="content"></div>
+
+<div class="bottom-nav">
+  <button class="bottom-prev" id="bottomPrev" onclick="go(-1)">
+    <span class="arrow">&#8592;</span>
+    <span id="prevLabel"></span>
+  </button>
+  <div class="bottom-center">
+    <span class="cur" id="bottomCur">Introduction</span>
+  </div>
+  <button class="bottom-next" id="bottomNext" onclick="go(1)">
+    <span id="nextLabel">Session Start</span>
+    <span class="arrow">&#8594;</span>
+  </button>
+</div>
+
+<div class="prompt-modal" id="promptModal" onclick="if(event.target===this)closePromptModal()">
+  <div class="prompt-modal-inner">
+    <button class="close-modal" onclick="closePromptModal()">&times;</button>
+    <h3>Workflow Description</h3>
+    <pre id="promptFull"></pre>
+  </div>
+</div>
+
+<script>
+const phases = [
+  // ── 0: INTRO ──
+  {
+    title: "Introduction",
+    isIntro: true,
+  },
+
+  // ── 1: SESSION START ──
+  {
+    title: "Session Start",
+    subtitle: "Claude Code opens. Before you type anything, hooks fire in sequence to rebuild your world. Enki's persona loads, last session's context returns, relevant knowledge surfaces. You're never starting from zero.",
+    flow: [
+      { icon: "\u{1F50C}", label: "CLI Opens", sub: "claude code", type: "highlight" },
+      { icon: "\u26A1", label: "Hooks Fire", sub: "SessionStart", type: "highlight" },
+      { icon: "\u{1F3AD}", label: "Persona", sub: "PERSONA.md", type: "" },
+      { icon: "\u{1F4C2}", label: "Load State", sub: ".enki/ files", type: "" },
+      { icon: "\u{1F4CB}", label: "Last Session", sub: "sessions/*.md", type: "store" },
+      { icon: "\u{1F50D}", label: "Bead Search", sub: "goal \u2192 beads", type: "" },
+      { icon: "\u{1F6E1}\uFE0F", label: "Gates", sub: "4 active", type: "gate" },
+    ],
+    cards: [
+      { icon: "\u26A1", type: "hook", title: "enki-session-start.sh", desc: "Reads .enki/ state files directly \u2014 no CLI dependency, no Python required for core injection. Finds latest non-empty session archive and injects a 'Last Session' block." },
+      { icon: "\u{1F4CB}", type: "store", title: "Last Session Archive", desc: "Previous session's goal, phase, tier, file count, and last 10 activity entries. Injected automatically so you can say 'pick up where we left off' and Enki knows what that means." },
+      { icon: "\u{1F50D}", type: "tool", title: "Semantic Search", desc: "If a goal exists, the hook searches wisdom.db for relevant beads using hybrid FTS5 + embedding search. Top 3 results injected as 'Relevant Knowledge'." },
+      { icon: "\u{1F6E1}\uFE0F", type: "gate", title: "Enforcement Display", desc: "Hard gates always shown: Goal before code, Spec before agents. Ereshkigal checks if weekly review is overdue \u2014 a soft nudge, not a blocker." },
+    ],
+    code: {
+      label: "What gets injected",
+      content: `<span class="hl">## Identity</span>
+<span class="hl-dim">**You ARE Enki** \u2014 collaborator, craftsman, keeper of knowledge.</span>
+
+<span class="hl">**Phase:**</span> implement | <span class="hl">**Tier:**</span> feature
+<span class="hl">**Goal:**</span> Wire session-end pipeline
+
+<span class="hl-green">### Last Session</span>
+- <span class="hl-green">Goal:</span> Self-examination \u2014 reviewing what Enki knows
+- <span class="hl-green">State:</span> implement | Tier: feature
+<span class="hl-dim">  [15:22] DECISION: SPEC APPROVED: feedback-loop-spec
+  [13:21] WARNING: Not using existing tools proactively</span>
+
+<span class="hl-blue">### Relevant Knowledge</span>
+<span class="hl-dim">- [learning] 3-File Session Pattern
+- [decision] Archive Odin, Freyja takes over
+- [pattern] Session hygiene matters</span>
+
+<span class="hl-red">### Enforcement Gates (Active)</span>
+<span class="hl-dim">- Goal required before editing code
+- Spec required before spawning agents</span>`
+    },
+  },
+
+  // ── 2: GOAL SETTING ──
+  {
+    title: "Goal Setting",
+    subtitle: "You tell Enki what you want to build. This single act unlocks Gate 1 \u2014 without it, every Edit and Write on implementation files is blocked. The tier auto-detects as 'trivial' until your edits prove otherwise.",
+    flow: [
+      { icon: "\u{1F4AC}", label: "User States Goal", sub: '"Wire session end"', type: "highlight" },
+      { icon: "\u{1F511}", label: "enki_goal", sub: "MCP tool", type: "highlight" },
+      { icon: "\u2705", label: "Gate 1 OK", sub: "Goal \u2713", type: "gate" },
+      { icon: "\u{1F4CA}", label: "Tier Detect", sub: "trivial \u2192 major", type: "" },
+      { icon: "\u{1F4DD}", label: ".enki/GOAL", sub: "Persisted", type: "store" },
+    ],
+    cards: [
+      { icon: "\u{1F511}", type: "gate", title: "Gate 1: Goal Required", desc: "Blocks ALL Edit/Write on implementation files (.py, .ts, .js, etc.) until a goal is set. Test files, config, .enki/ always allowed." },
+      { icon: "\u{1F4CA}", type: "tool", title: "Tier Detection", desc: "Starts trivial, escalates automatically. 1\u20132 files = quick_fix, 3+ files or 50+ lines = feature, 10+ files or breaking changes = major. Each escalation triggers a warning." },
+      { icon: "\u{1F4BE}", type: "store", title: "State Files Written", desc: ".enki/GOAL, .enki/PHASE, .enki/TIER \u2014 plain text files that survive CLI restarts, read directly by hooks." },
+    ],
+    code: {
+      label: "Gate 1 in action",
+      content: `<span class="hl-dim"># Without a goal set:</span>
+$ enki gate check --tool Edit --file src/enki/cli.py
+<span class="hl-red">\u274C BLOCKED by Gate 1</span>
+<span class="hl-red">No goal set. Run enki_goal first.</span>
+
+<span class="hl-dim"># After setting a goal:</span>
+$ enki_goal("Wire session-end pipeline")
+<span class="hl-green">\u2713 Goal set \u2014 Edit/Write now allowed</span>
+
+<span class="hl-dim"># Tier classification:</span>
+<span class="hl">trivial</span>   \u2192 Config/docs, < 10 lines
+<span class="hl">quick_fix</span> \u2192 1-2 files, < 50 lines
+<span class="hl">feature</span>   \u2192 3+ files OR 50+ lines
+<span class="hl">major</span>     \u2192 10+ files OR breaking changes`
+    },
+  },
+
+  // ── 3: DEBATE ──
+  {
+    title: "Debate",
+    subtitle: "For feature-tier work and above, Enki generates a multi-perspective analysis \u2014 six angles examining your idea before any code is written. Trivial and quick_fix tiers skip this entirely.",
+    flow: [
+      { icon: "\u{1F4CA}", label: "Tier Check", sub: "feature+?", type: "" },
+      { icon: "\u{1F500}", label: "enki_debate", sub: "6 perspectives", type: "highlight" },
+      { icon: "\u{1F3D7}\uFE0F", label: "Architecture", sub: "Structure", type: "" },
+      { icon: "\u{1F512}", label: "Security", sub: "Threats", type: "" },
+      { icon: "\u26A1", label: "Performance", sub: "Trade-offs", type: "" },
+      { icon: "\u{1F4DD}", label: "Output", sub: ".enki/", type: "store" },
+    ],
+    cards: [
+      { icon: "\u{1F500}", type: "tool", title: "enki_debate", desc: "Generates structured analysis from 6 perspectives. Each identifies risks, trade-offs, and recommendations. Output feeds into spec creation." },
+      { icon: "\u{1F3D7}\uFE0F", type: "persona", title: "Six Perspectives", desc: "Architecture, Security, Performance, UX, Testing, Maintenance. Each is a focused analysis, not generic advice." },
+      { icon: "\u23ED\uFE0F", type: "hook", title: "Skip Logic", desc: "Trivial: skip entirely. Quick_fix: skip, Gate 1 still required. Feature & major: debate expected before planning." },
+    ],
+    code: null,
+  },
+
+  // ── 4: PLAN & SPEC ──
+  {
+    title: "Plan & Spec",
+    subtitle: "The debate becomes a spec \u2014 problem, solution, scope, constraints. Must be explicitly approved (Gate 2). Then decomposed into a task graph with dependencies.",
+    flow: [
+      { icon: "\u{1F4DD}", label: "enki_plan", sub: "Create spec", type: "highlight" },
+      { icon: "\u{1F441}\uFE0F", label: "Human Review", sub: "Read & verify", type: "" },
+      { icon: "\u2705", label: "enki_approve", sub: "Gate 2 \u2713", type: "gate" },
+      { icon: "\u{1F500}", label: "Decompose", sub: "Task graph", type: "highlight" },
+      { icon: "\u{1F4CB}", label: "Tasks", sub: "With deps", type: "store" },
+    ],
+    cards: [
+      { icon: "\u{1F4DD}", type: "tool", title: "enki_plan", desc: "Creates spec at .enki/specs/{name}.md with problem, solution, scope (files in/out), constraints, acceptance criteria." },
+      { icon: "\u2705", type: "gate", title: "Gate 2: Spec Required", desc: "Blocks spawning implementation agents without an approved spec. Research agents (Explore, Plan) always allowed." },
+      { icon: "\u{1F500}", type: "tool", title: "enki_decompose", desc: "Breaks spec into tasks with dependency edges. Architect \u2192 QA \u2192 Dev \u2192 Validator, with parallel paths." },
+    ],
+    code: {
+      label: ".enki/specs/session-end.md",
+      content: `<span class="hl"># Spec: session-end-wiring</span>
+<span class="hl-blue">Status: approved</span>
+
+<span class="hl">## Problem</span>
+handle_session_end() exists but nothing calls it.
+
+<span class="hl">## Solution</span>
+1. Add \`enki session end\` CLI command
+2. Rewrite stop hook to call it
+3. Add session-start continuity injection
+
+<span class="hl">## Scope</span>
+<span class="hl-green">IN:</span>  cli.py, hooks.py, session hooks, CLAUDE.md
+<span class="hl-red">OUT:</span> reflector.py, feedback_loop.py
+
+<span class="hl">## Tasks</span>
+<span class="hl-dim">1. [arch] Design pipeline
+2. [qa]   Write tests
+3. [dev]  Implement cmd_session_end
+4. [dev]  Rewrite shell hook
+5. [dev]  Add last-session injection</span>`
+    },
+  },
+
+  // ── 5: ORCHESTRATION ──
+  {
+    title: "Orchestration",
+    subtitle: "Tasks assigned to specialized agents. Architect designs, QA writes tests first (TDD), Dev implements, Validators verify independently. Each agent works in an isolated git worktree.",
+    flow: [
+      { icon: "\u{1F3D7}\uFE0F", label: "Architect", sub: "Design", type: "highlight" },
+      { icon: "\u{1F9EA}", label: "QA Agent", sub: "TDD", type: "highlight" },
+      { icon: "\u{1F512}", label: "Gate 3", sub: "Tests?", type: "gate" },
+      { icon: "\u{1F4BB}", label: "Dev Agent", sub: "Implement", type: "highlight" },
+      { icon: "\u{1F441}\uFE0F", label: "Validators", sub: "Review", type: "gate" },
+      { icon: "\u2705", label: "Merge", sub: "Worktree", type: "store" },
+    ],
+    cards: [
+      { icon: "\u{1F3D7}\uFE0F", type: "tool", title: "14 Agent Roles", desc: "5 critical (Architect, QA, Validator-Tests, Dev, Validator-Code), 4 standard (Reviewer, Security, Docs, Performance), 2 conditional (DBA, DevOps, UI-UX), 3 validators." },
+      { icon: "\u{1F512}", type: "gate", title: "Gate 3: TDD Check", desc: "Blocks implementation files if test files don't exist. QA writes tests first, Validator-Tests verifies, then Dev is unblocked." },
+      { icon: "\u{1F33F}", type: "tool", title: "Git Worktrees", desc: "Each task gets isolated worktree. No cross-contamination. Merge back only after validators PASS." },
+      { icon: "\u{1F504}", type: "gate", title: "Retry & Escalation", desc: "Failed validation generates retry prompt. Max 3 attempts before escalation to human." },
+    ],
+    code: {
+      label: "TDD flow",
+      content: `<span class="hl">Architect</span> \u2500 designs \u2500\u2192 <span class="hl-blue">QA</span> \u2500 tests \u2500\u2192 <span class="hl-purple">Validator-Tests</span>
+                                              \u2502
+                                    <span class="hl-red">Gate 3: verified?</span>
+                                              \u2502
+                              <span class="hl-green">YES \u2192</span> <span class="hl">Dev</span> \u2500 implements \u2500\u2192 <span class="hl-purple">Validator-Code</span>
+                              <span class="hl-red">NO  \u2192</span> <span class="hl-red">QA retries (max 3)</span>      \u2502
+                                                            <span class="hl-green">PASS \u2192</span> Done
+                                                            <span class="hl-red">FAIL \u2192</span> Dev retries`
+    },
+  },
+
+  // ── 6: IMPLEMENTATION ──
+  {
+    title: "Implementation",
+    subtitle: "Every Edit and Write fires two hooks. Pre-hook checks 4 gates + Ereshkigal pattern interceptor. Post-hook auto-logs, recalculates tier, watches for scope creep. When context compresses mid-session, a digest is saved so nothing is lost.",
+    flow: [
+      { icon: "\u270F\uFE0F", label: "Edit/Write", sub: "Tool called", type: "highlight" },
+      { icon: "\u26A1", label: "Pre-Hook", sub: "4 gates", type: "gate" },
+      { icon: "\u{1F441}\uFE0F", label: "Ereshkigal", sub: "Patterns", type: "gate" },
+      { icon: "\u2705", label: "Allowed", sub: "Executes", type: "" },
+      { icon: "\u{1F4DD}", label: "Post-Hook", sub: "Log + tier", type: "highlight" },
+      { icon: "\u{1F4BE}", label: "Stored", sub: "RUNNING.md", type: "store" },
+      { icon: "\u{1F4E6}", label: "Compact", sub: "Context saved", type: "store" },
+    ],
+    cards: [
+      { icon: "\u26A1", type: "hook", title: "Pre-Tool-Use Hook", desc: "Fires on Edit, Write, Task, Bash, MultiEdit. Checks all 4 gates. Any failure = blocked." },
+      { icon: "\u{1F441}\uFE0F", type: "persona", title: "Ereshkigal: Hard Interceptor", desc: "Unlike the soft nudge at session start, this is a hard gate. Regex-based, NO AI. Scans for skip, minimize, urgency, certainty patterns. No appeals, all logged." },
+      { icon: "\u{1F4CA}", type: "hook", title: "Post-Tool-Use Hook", desc: "Auto-logs edit to RUNNING.md. Recalculates tier \u2014 escalation triggers warning." },
+      { icon: "\u{1F6E1}\uFE0F", type: "gate", title: "Gate 4: Scope Guard", desc: "During orchestration, only files in spec's IN scope can be edited. Prevents drift." },
+      { icon: "\u{1F4E6}", type: "store", title: "Context Compaction", desc: "When Claude Code compresses context mid-session, Enki saves a digest of decisions, files, and open threads to RUNNING.md. Survives compression." },
+    ],
+    code: {
+      label: "What Ereshkigal catches",
+      content: `<span class="hl-red">Ereshkigal Patterns (regex, no AI, no appeals):</span>
+
+<span class="hl">Skip</span>       "trivial", "small change", "skip", "no need"
+<span class="hl">Minimize</span>   "simple", "obvious", "easy", "only takes"
+<span class="hl">Urgency</span>    "emergency", "hotfix", "deadline", "asap"
+<span class="hl">Certainty</span>  "100% sure", "guaranteed", "can't fail"
+
+<span class="hl-dim">Each interception logged. Weekly review audits FP rate.</span>`
+    },
+  },
+
+  // ── 7: MEMORY SYSTEM ──
+  {
+    title: "Memory & Beads",
+    subtitle: "Knowledge persists as 'beads' \u2014 atomic units with type, content, embeddings, decay weight. Hot knowledge stays accessible, cold fades but never dies. Hybrid search combines keywords with semantic similarity.",
+    flow: [
+      { icon: "\u{1F4A1}", label: "Remember", sub: "Store", type: "highlight" },
+      { icon: "\u{1F522}", label: "Embed", sub: "384-dim", type: "" },
+      { icon: "\u{1F4BE}", label: "wisdom.db", sub: "SQLite+FTS5", type: "store" },
+      { icon: "\u{1F50D}", label: "Recall", sub: "Hybrid search", type: "highlight" },
+      { icon: "\u{1F4C9}", label: "Decay", sub: "Hot\u2192Cold", type: "" },
+      { icon: "\u2B50", label: "Star", sub: "Never decay", type: "store" },
+    ],
+    cards: [
+      { icon: "\u{1F48E}", type: "store", title: "5 Bead Types", desc: "Decision, Solution, Learning, Violation, Pattern. Each has content, summary, tags, weight, project." },
+      { icon: "\u{1F50D}", type: "tool", title: "Hybrid Search", desc: "FTS5 keywords + cosine similarity on 384-dim embeddings. Results weighted by decay." },
+      { icon: "\u{1F4C9}", type: "tool", title: "Retention Tiers", desc: "HOT (0-30d, 1.0), WARM (30-90d, 0.7), COLD (90-365d, 0.3), ARCHIVE (365+, 0.1). Starred never decay." },
+      { icon: "\u{1F517}", type: "store", title: "Supersede, Don't Delete", desc: "enki_forget(old, new) links old bead to replacement. Chain preserved for archaeology." },
+    ],
+    code: {
+      label: "Bead lifecycle",
+      content: `<span class="hl-dim"># Store a decision</span>
+enki_remember(
+  content = "Use Stop hook for session-end",
+  type    = <span class="hl">"decision"</span>,
+  tags    = ["hooks", "session-lifecycle"]
+)
+<span class="hl-green">\u2192 Bead created: weight=1.0, 384-dim embedding</span>
+
+<span class="hl-dim"># Search later</span>
+enki_recall(query="session end not working")
+<span class="hl-blue">\u2192 [0.87] [decision] Use Stop hook for session-end</span>
+<span class="hl-blue">\u2192 [0.72] [solution] Freyja session-end pattern</span>
+
+<span class="hl-dim"># After 90 days: weight 1.0 \u2192</span> <span class="hl">0.3</span> <span class="hl-dim">(COLD)</span>`
+    },
+  },
+
+  // ── 8: SESSION END ──
+  {
+    title: "Session End",
+    subtitle: "You close the CLI or say 'let's wrap up'. Stop hook fires a 5-step pipeline: reflect, feedback loop, regression check, archive, summary. Knowledge distilled and stored automatically.",
+    flow: [
+      { icon: "\u{1F44B}", label: "User Closes", sub: "or 'wrap up'", type: "highlight" },
+      { icon: "\u26A1", label: "Stop Hook", sub: "enki session end", type: "highlight" },
+      { icon: "\u{1F52C}", label: "Reflector", sub: "Learnings", type: "" },
+      { icon: "\u{1F4CA}", label: "Feedback", sub: "Proposals", type: "" },
+      { icon: "\u{1F4E6}", label: "Archive", sub: "\u2192 sessions/", type: "store" },
+      { icon: "\u{1F4CB}", label: "Summary", sub: "stdout", type: "highlight" },
+    ],
+    cards: [
+      { icon: "\u{1F52C}", type: "tool", title: "Reflector (No LLM)", desc: "Heuristic analysis of session trace. Distills learnings into beads. Pure mechanical." },
+      { icon: "\u{1F4CA}", type: "tool", title: "Feedback Loop", desc: "Analyzes FP rates, evasion N-grams. Max 1 proposal per cycle. Always human-in-the-loop." },
+      { icon: "\u{1F4E6}", type: "store", title: "Archive", desc: "RUNNING.md (including mid-session compact digests) saved to .enki/sessions/ with header metadata. Cleared for next session." },
+      { icon: "\u{1F6E1}\uFE0F", type: "gate", title: "Graceful Degradation", desc: "Each step wraps imports in try/except. Archiving and summary always run regardless." },
+    ],
+    code: {
+      label: "Session end output",
+      content: `<span class="hl">==================================================</span>
+<span class="hl">  Session End: 057dd77b</span>
+<span class="hl">==================================================</span>
+  Goal:     Wire session-end pipeline
+  Phase:    implement \u2192 end
+  Tier:     feature
+  Files:    5 edited
+  Reflect:  <span class="hl-green">4 insights, 2 beads stored</span>
+  Feedback: <span class="hl-green">stable (no proposals)</span>
+  Archive:  <span class="hl-blue">12 entries \u2192 sessions/</span>
+<span class="hl">==================================================</span>`
+    },
+  },
+
+  // ── 9: NEXT SESSION ──
+  {
+    title: "Next Session",
+    subtitle: "New session starts. Hook reads latest archive \u2014 including any compact digests from mid-session compressions \u2014 and injects a 'Last Session' block. Say 'pick up where we left off' and Enki knows exactly what that means.",
+    flow: [
+      { icon: "\u{1F50C}", label: "New Session", sub: "claude code", type: "highlight" },
+      { icon: "\u{1F4C2}", label: "Read Archive", sub: "Latest + digests", type: "" },
+      { icon: "\u{1F4CB}", label: "Inject Context", sub: "Last Session", type: "highlight" },
+      { icon: "\u{1F50D}", label: "Bead Search", sub: "Prev goal", type: "" },
+      { icon: "\u{1F4AC}", label: "'Where were we?'", sub: "Summarize", type: "highlight" },
+    ],
+    cards: [
+      { icon: "\u{1F4CB}", type: "hook", title: "Automatic Continuity", desc: "Scans .enki/sessions/ for most recent archive with entries. Extracts header, compact digests, and last 10 activity lines." },
+      { icon: "\u{1F4E6}", type: "store", title: "Compact Digest Restore", desc: "If the previous session hit context compression, the saved digest (decisions, files, open threads) is part of the archive. Nothing from pre-compaction is silently lost." },
+      { icon: "\u{1F4AC}", type: "persona", title: "Natural Handoff", desc: "Recognizes 'pick up where we left off', 'where were we'. Summarizes naturally, not a raw log dump." },
+      { icon: "\u{1F517}", type: "store", title: "Cross-Session Learning", desc: "Beads from session end become searchable context. Knowledge compounds across sessions." },
+    ],
+    code: null,
+  },
+
+  // ── 10: SELF-EVOLUTION ──
+  {
+    title: "Self-Evolution",
+    subtitle: "Enki improves itself across sessions. Violations trigger analysis. Ereshkigal patterns refined through weekly review. Feedback loop proposes changes but never auto-applies \u2014 a human always decides.",
+    flow: [
+      { icon: "\u{1F4CA}", label: "Accumulate", sub: "Violations, FPs", type: "" },
+      { icon: "\u{1F52C}", label: "Analyze", sub: "Heuristic", type: "highlight" },
+      { icon: "\u{1F4DD}", label: "Propose", sub: "Max 1/cycle", type: "highlight" },
+      { icon: "\u{1F464}", label: "Human", sub: "Apply/Reject", type: "gate" },
+      { icon: "\u{1F4C8}", label: "Track", sub: "Regressions", type: "" },
+      { icon: "\u{1F504}", label: "Iterate", sub: "Revert if 2x+", type: "store" },
+    ],
+    cards: [
+      { icon: "\u{1F4DD}", type: "tool", title: "Proposal Types", desc: "pattern_add, pattern_remove (FP >40%), pattern_refine, gate_tighten, gate_loosen (never for phase/spec/certainty)." },
+      { icon: "\u{1F6E1}\uFE0F", type: "gate", title: "HITL Required", desc: "Every proposal needs human action: Apply, Reject, Revert, or Acknowledge." },
+      { icon: "\u{1F4C8}", type: "tool", title: "Regression Detection", desc: "If violation rate increases 2x+ with 5+ violations after applying, flag as regression." },
+      { icon: "\u{1F30D}", type: "store", title: "Two-Tier Evolution", desc: "Local EVOLUTION.md per-project. Global ~/.enki/EVOLUTION.md cross-project. Reason field excluded from promotion." },
+    ],
+    code: {
+      label: "Feedback loop cycle",
+      content: `<span class="hl">Feedback Loop \u2014 One Cycle</span>
+
+<span class="hl-blue">1. Gather</span>   Violations, interceptions, escalations
+<span class="hl-blue">2. Analyze</span>  FP rate, evasion N-grams, violation frequency
+<span class="hl-blue">3. Propose</span>  <span class="hl-green">Max 1 per cycle</span> (prevents oscillation)
+
+<span class="hl-dim">Example:</span>
+  Type:   <span class="hl">pattern_remove</span>
+  Pattern: "straightforward" \u2014 FP rate 62%
+  Action:  <span class="hl-red">Requires human approval</span>
+
+<span class="hl-blue">4. Apply</span>    enki_feedback_loop apply {id}
+<span class="hl-blue">5. Track</span>    Monitor violation rate
+<span class="hl-blue">6. Regress?</span> 2x+ increase \u2192 <span class="hl-red">flag for review</span>
+
+<span class="hl-dim">NEVER_LOOSEN: phase, spec, certainty gates.</span>`
+    },
+  },
+];
+
+let currentPhase = 0;
+
+function renderIntro() {
+  return `
+    <div class="intro">
+      <div class="intro-hero">
+        <div class="intro-logo">E</div>
+        <h2>Meet <span>Enki</span></h2>
+        <p class="intro-tagline">A second brain for software engineering \u2014 persistent memory, project management, orchestration, and self-improvement. Built as an MCP server that integrates with Claude Code.</p>
+      </div>
+
+      <div class="intro-dual">
+        <div class="intro-panel enki-panel">
+          <h3>\u{1F4A7} Enki \u2014 The Builder</h3>
+          <p>God of wisdom, water, creation, and crafts. Keeper of the <em>me</em> \u2014 the divine decrees of civilization. Where other gods acted on impulse, Enki planned. Where they destroyed, he built.</p>
+          <ul>
+            <li><span class="li-label">Memory</span> Beads with embeddings, decay, hybrid search</li>
+            <li><span class="li-label">Orchestration</span> Agent roles, TDD pipeline, git worktrees</li>
+            <li><span class="li-label">Gates</span> Goal, spec, tests required before code</li>
+            <li><span class="li-label">Evolution</span> Feedback loops, regression detection, HITL</li>
+          </ul>
+        </div>
+        <div class="intro-panel ereshkigal-panel">
+          <h3>\u{1F441}\uFE0F Ereshkigal \u2014 The Challenger</h3>
+          <p>Queen of the Underworld. Enki's necessary opposite. No one passes her gates unchallenged \u2014 not even the gods. When Inanna descended, she surrendered something at each of seven gates.</p>
+          <p style="color:var(--text)"><strong>Zero AI. Pure rules, patterns, and gates.</strong> Claude cannot reason its way around Ereshkigal \u2014 she runs as regex and hardcoded checks outside the model's control.</p>
+          <ul>
+            <li><span class="li-label">Patterns</span> Skip, minimize, urgency, certainty \u2014 regex matched, no appeals</li>
+            <li><span class="li-label">Rules</span> NEVER_LOOSEN list protects phase, spec, certainty gates</li>
+            <li><span class="li-label">Gates</span> Hard block on tool execution. Soft nudge for weekly review</li>
+            <li><span class="li-label">Audit</span> Weekly FP review, human-approved refinements only</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="intro-pillars">
+        <div class="intro-pillar">
+          <span class="pillar-icon">\u{1F9E0}</span>
+          <h4>Memory</h4>
+          <p>Beads with embeddings, decay, hybrid search. Knowledge persists and compounds.</p>
+        </div>
+        <div class="intro-pillar">
+          <span class="pillar-icon">\u{1F6E1}\uFE0F</span>
+          <h4>Enforcement</h4>
+          <p>4 gates, pattern interceptor, tier detection. Nothing bypasses the process.</p>
+        </div>
+        <div class="intro-pillar">
+          <span class="pillar-icon">\u{1F3D7}\uFE0F</span>
+          <h4>Orchestration</h4>
+          <p>14 agent roles, TDD pipeline, git worktrees. Structured parallel development.</p>
+        </div>
+        <div class="intro-pillar">
+          <span class="pillar-icon">\u{1F504}</span>
+          <h4>Evolution</h4>
+          <p>Feedback loops, regression detection, HITL proposals. Self-improving system.</p>
+        </div>
+      </div>
+
+      <div class="intro-cta">
+        <p>Walk through how it all works, step by step</p>
+        <button class="intro-start-btn" onclick="go(1)">
+          Begin the Walkthrough
+          <span class="arrow">\u2192</span>
+        </button>
+      </div>
+    </div>
+  `;
+}
+
+function render() {
+  const p = phases[currentPhase];
+  const total = phases.length;
+
+  // Header
+  document.getElementById('stepNum').textContent = currentPhase;
+  document.getElementById('stepName').textContent = p.title;
+  document.getElementById('progressFill').style.width = (currentPhase / (total - 1) * 100) + '%';
+
+  // Step pills
+  const pills = document.getElementById('stepPills');
+  let pillsHTML = '';
+  phases.forEach((ph, i) => {
+    if (i > 0) pillsHTML += `<div class="pill-sep ${i <= currentPhase ? 'done' : ''}"></div>`;
+    const cls = i === currentPhase ? 'active' : i < currentPhase ? 'done' : '';
+    const label = i === 0 ? '\u2605' : i;
+    pillsHTML += `<div class="step-pill ${cls}" onclick="goTo(${i})">
+      ${label}
+      <div class="pill-tip">${ph.title}</div>
+    </div>`;
+  });
+  pills.innerHTML = pillsHTML;
+
+  // Side nav
+  document.getElementById('sidePrev').disabled = currentPhase === 0;
+  document.getElementById('sideNext').disabled = currentPhase === total - 1;
+
+  // Bottom nav
+  document.getElementById('bottomPrev').disabled = currentPhase === 0;
+  document.getElementById('bottomNext').disabled = currentPhase === total - 1;
+  document.getElementById('prevLabel').textContent = currentPhase > 0 ? phases[currentPhase - 1].title : '';
+  document.getElementById('nextLabel').textContent = currentPhase < total - 1 ? phases[currentPhase + 1].title : '';
+  document.getElementById('bottomCur').textContent = p.title;
+
+  // Content
+  const content = document.getElementById('content');
+
+  if (p.isIntro) {
+    content.innerHTML = renderIntro();
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+    return;
+  }
+
+  content.innerHTML = '';
+
+  // Phase header
+  content.innerHTML += `
+    <div class="phase-header">
+      <div class="phase-number">${currentPhase}</div>
+      <h2 class="phase-title">${p.title}</h2>
+      <p class="phase-subtitle">${p.subtitle}</p>
+    </div>
+  `;
+
+  // Flow
+  let flowHTML = '<div class="section-label">Flow</div><div class="flow">';
+  p.flow.forEach((step, i) => {
+    if (i > 0) flowHTML += `<div class="flow-arrow ${step.type === 'highlight' || p.flow[i-1].type === 'highlight' ? 'active' : ''}">\u2192</div>`;
+    flowHTML += `
+      <div class="flow-step ${step.type} ${step.type === 'highlight' ? 'pulse-border' : ''}">
+        <span class="flow-icon">${step.icon}</span>
+        <div class="flow-label">${step.label}</div>
+        <div class="flow-sub">${step.sub}</div>
+      </div>`;
+  });
+  flowHTML += '</div>';
+  content.innerHTML += flowHTML;
+
+  // Cards
+  let cardsHTML = '<div class="section-label">Details</div><div class="cards">';
+  p.cards.forEach(card => {
+    cardsHTML += `
+      <div class="card">
+        <div class="card-icon ${card.type}">${card.icon}</div>
+        <div class="card-body">
+          <h3>${card.title}</h3>
+          <p>${card.desc}</p>
+        </div>
+      </div>`;
+  });
+  cardsHTML += '</div>';
+  content.innerHTML += cardsHTML;
+
+  updatePrompt();
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+function updatePrompt() {
+  const p = phases[currentPhase];
+  if (p.isIntro) return;
+  let prompt = `Enki Workflow \u2014 Step ${currentPhase}/${phases.length - 1}: ${p.title}\n\n`;
+  prompt += p.subtitle + '\n\n';
+  prompt += 'Flow: ' + p.flow.map(s => s.label).join(' \u2192 ') + '\n\n';
+  prompt += '--- Full E2E Lifecycle ---\n';
+  phases.forEach((ph, i) => {
+    if (ph.isIntro) return;
+    const marker = i === currentPhase ? '>>>' : '   ';
+    prompt += `${marker} ${i}. ${ph.title}: ${ph.subtitle.split('.')[0]}.\n`;
+  });
+  document.getElementById('promptFull').textContent = prompt;
+}
+
+function go(delta) {
+  const next = currentPhase + delta;
+  if (next >= 0 && next < phases.length) {
+    currentPhase = next;
+    render();
+  }
+}
+
+function goTo(index) {
+  currentPhase = index;
+  render();
+}
+
+function openPromptModal() { document.getElementById('promptModal').classList.add('open'); }
+function closePromptModal() { document.getElementById('promptModal').classList.remove('open'); }
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowRight' || e.key === 'l') go(1);
+  else if (e.key === 'ArrowLeft' || e.key === 'h') go(-1);
+  else if (e.key === 'Escape') closePromptModal();
+  else if (e.key >= '0' && e.key <= '9') {
+    const idx = parseInt(e.key);
+    if (idx < phases.length) goTo(idx);
+  }
+});
+
+render();
+</script>
+</body>
+</html>

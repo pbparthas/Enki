@@ -48,8 +48,8 @@ FEEDBACK_THRESHOLDS = {
 }
 
 NEVER_LOOSEN = {
-    "gates": {"phase", "spec"},
-    "pattern_categories": {"certainty_patterns"},
+    "gates": {"phase", "spec", "scope", "enforcement_integrity"},
+    "pattern_categories": {"certainty_patterns", "infra_integrity_patterns"},
 }
 
 MAX_PROPOSALS_PER_CYCLE = 1
