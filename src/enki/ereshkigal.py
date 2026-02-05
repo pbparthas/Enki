@@ -108,6 +108,10 @@ def get_patterns_path(patterns_file: Optional[Path] = None) -> Path:
 def init_patterns(patterns_file: Optional[Path] = None) -> Path:
     """Initialize patterns.json with default patterns if it doesn't exist.
 
+    Also backfills any missing categories from DEFAULT_PATTERNS into
+    existing files — ensures new pattern categories (e.g. infra_integrity_patterns)
+    reach existing installations without requiring a manual reset.
+
     Args:
         patterns_file: Optional path to patterns file
 
@@ -120,6 +124,22 @@ def init_patterns(patterns_file: Optional[Path] = None) -> Path:
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, 'w') as f:
             json.dump(DEFAULT_PATTERNS, f, indent=2)
+    else:
+        # Backfill missing categories from defaults
+        with open(path) as f:
+            existing = json.load(f)
+
+        missing = []
+        for category, patterns in DEFAULT_PATTERNS.items():
+            if isinstance(patterns, list) and category not in existing:
+                existing[category] = patterns
+                missing.append(category)
+
+        if missing:
+            existing["updated_at"] = datetime.now().strftime("%Y-%m-%d")
+            existing["updated_by"] = "backfill"
+            with open(path, 'w') as f:
+                json.dump(existing, f, indent=2)
 
     return path
 
