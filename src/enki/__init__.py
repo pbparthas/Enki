@@ -54,6 +54,14 @@ from .evolution import (
     explain_block,
     get_evolution_summary,
     get_self_awareness_response,
+    # Two-tier evolution
+    get_local_evolution_path,
+    get_global_evolution_path,
+    migrate_per_project_evolution,
+    promote_to_global,
+    get_evolution_context_for_session,
+    prune_local_evolution,
+    prune_global_evolution,
 )
 from .ereshkigal import (
     InterceptionResult,
@@ -151,6 +159,17 @@ from .simplifier import (
     get_modified_files,
     SIMPLIFIER_PROMPT,
 )
+from .reflector import (
+    ExecutionTrace,
+    Reflection,
+    Skill,
+    gather_execution_trace,
+    reflect_on_session,
+    distill_reflections,
+    store_skills,
+    close_feedback_loop,
+    analyze_cross_session_patterns,
+)
 
 __all__ = [
     # Database
@@ -241,6 +260,14 @@ __all__ = [
     "explain_block",
     "get_evolution_summary",
     "get_self_awareness_response",
+    # Two-tier evolution
+    "get_local_evolution_path",
+    "get_global_evolution_path",
+    "migrate_per_project_evolution",
+    "promote_to_global",
+    "get_evolution_context_for_session",
+    "prune_local_evolution",
+    "prune_global_evolution",
     # Ereshkigal
     "InterceptionResult",
     "init_patterns",
@@ -328,4 +355,14 @@ __all__ = [
     "parse_simplification_output",
     "get_modified_files",
     "SIMPLIFIER_PROMPT",
+    # Reflector
+    "ExecutionTrace",
+    "Reflection",
+    "Skill",
+    "gather_execution_trace",
+    "reflect_on_session",
+    "distill_reflections",
+    "store_skills",
+    "close_feedback_loop",
+    "analyze_cross_session_patterns",
 ]

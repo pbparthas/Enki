@@ -563,23 +563,6 @@ def get_recent_interceptions(
         return []
 
 
-def get_evasions_with_bugs(days: int = 30) -> list[dict]:
-    """Find allowed attempts that later had bugs.
-
-    This is used for the weekly report to identify patterns
-    that should have been blocked.
-
-    Args:
-        days: Number of days to look back
-
-    Returns:
-        List of evasion records
-    """
-    # This would need integration with bug tracking
-    # For now, return empty - will be enhanced in Phase 8
-    return []
-
-
 def generate_weekly_report(days: int = 7) -> str:
     """Generate weekly report for human review.
 
@@ -755,23 +738,33 @@ def find_evasions_with_bugs(days: int = 30) -> list[dict]:
     evasions = []
 
     try:
-        # Find allowed interceptions in sessions that later had bugs
-        # This requires the orchestrator's bugs to be in the same session
+        # Find allowed interceptions in sessions that later had violations
+        # Tightened correlation: require same tool OR same file path
+        # (prevents coincidental session-level correlation)
         results = db.execute("""
             SELECT DISTINCT
                 i.id as interception_id,
                 i.reasoning,
                 i.tool,
                 i.session_id,
-                i.timestamp
+                i.timestamp,
+                v.gate as violation_gate,
+                v.tool as violation_tool,
+                v.file_path as violation_file_path
             FROM interceptions i
+            JOIN violations v
+                ON v.session_id = i.session_id
+                AND v.timestamp > i.timestamp
+                AND (
+                    v.tool = i.tool
+                    OR (
+                        v.file_path IS NOT NULL
+                        AND v.file_path != ''
+                        AND i.reasoning LIKE '%' || v.file_path || '%'
+                    )
+                )
             WHERE i.result = 'allowed'
             AND i.timestamp > datetime('now', ?)
-            AND EXISTS (
-                SELECT 1 FROM violations v
-                WHERE v.session_id = i.session_id
-                AND v.timestamp > i.timestamp
-            )
             ORDER BY i.timestamp DESC
             LIMIT 20
         """, (f"-{days} days",)).fetchall()
@@ -783,7 +776,10 @@ def find_evasions_with_bugs(days: int = 30) -> list[dict]:
                 "tool": row["tool"],
                 "session_id": row["session_id"],
                 "timestamp": row["timestamp"],
-                "correlation": "Violations occurred after this was allowed",
+                "violation_gate": row["violation_gate"],
+                "violation_tool": row["violation_tool"],
+                "violation_file_path": row["violation_file_path"],
+                "correlation": "Violation on same tool/file after this was allowed",
             })
 
     except Exception as e:

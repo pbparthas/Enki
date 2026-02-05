@@ -166,6 +166,31 @@ def handle_session_start(
         context["enki_greeting"] = "What shall we work on?"
         context["enki_context"] = ""
 
+    # Migrate per-project evolution (idempotent)
+    try:
+        from .evolution import migrate_per_project_evolution
+        migrate_per_project_evolution(project_path or Path.cwd())
+    except Exception:
+        pass
+
+    # Load evolution context (local + global merged)
+    try:
+        from .evolution import get_evolution_context_for_session
+        evo_context = get_evolution_context_for_session(project_path or Path.cwd())
+        if evo_context:
+            context["evolution_context"] = evo_context
+    except Exception:
+        pass
+
+    # Surface feedback loop alerts
+    try:
+        from .feedback_loop import get_session_start_alerts
+        alerts = get_session_start_alerts()
+        if alerts:
+            context["feedback_alerts"] = alerts
+    except Exception:
+        pass
+
     # Search for relevant beads if goal provided
     if goal:
         try:
@@ -188,45 +213,52 @@ def handle_session_start(
 def handle_session_end(project_path: Optional[Path] = None) -> dict:
     """Handle session end hook.
 
-    Generates session summary and extracts learnings.
+    Runs both feedback loops:
+    1. Reflector: session → reflect → distill → store beads
+    2. Feedback loop: analyze FP/evasions → propose changes (never auto-apply)
+    3. Regression check: flag applied proposals showing regression
 
     Args:
         project_path: Project path
 
     Returns:
-        Dict with summary and learnings
+        Dict with reflection report, feedback proposals, and regressions
     """
-    from .persona import generate_session_summary, extract_session_learnings
-    from .beads import create_bead
     from .session import get_session
 
     session = get_session(project_path)
     if not session:
         return {"summary": "No active session."}
 
-    summary = generate_session_summary(project_path)
-    learnings = extract_session_learnings(project_path)
-
-    # Optionally store learnings as beads
-    stored_learnings = []
-    for learning in learnings:
-        try:
-            bead = create_bead(
-                content=learning["content"],
-                bead_type=learning["type"],
-                project=project_path.name if project_path else None,
-                context=f"Session {session.session_id}",
-                tags=[learning.get("category", "session")],
-            )
-            stored_learnings.append(bead.id)
-        except Exception:
-            pass
-
-    return {
-        "summary": summary,
-        "learnings_extracted": len(learnings),
-        "learnings_stored": stored_learnings,
+    result = {
+        "session_id": session.session_id,
+        "reflection": None,
+        "feedback": None,
+        "regressions": [],
     }
+
+    # Loop 1: Reflect → store learnings as beads
+    try:
+        from .reflector import close_feedback_loop as reflect
+        result["reflection"] = reflect(project_path)
+    except Exception as e:
+        result["reflection"] = {"error": str(e)}
+
+    # Loop 2: Analyze → propose enforcement changes (never auto-apply)
+    try:
+        from .feedback_loop import run_feedback_cycle
+        result["feedback"] = run_feedback_cycle(project_path)
+    except Exception as e:
+        result["feedback"] = {"error": str(e)}
+
+    # Loop 3: Check regressions on previously applied proposals
+    try:
+        from .feedback_loop import check_for_regressions
+        result["regressions"] = check_for_regressions()
+    except Exception as e:
+        result["regressions"] = [{"error": str(e)}]
+
+    return result
 
 
 def parse_hook_input(stdin_data: str) -> dict:

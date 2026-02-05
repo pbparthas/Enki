@@ -589,6 +589,44 @@ async def list_tools() -> list[Tool]:
                 "required": ["task_id"],
             },
         ),
+        # Reflector tool
+        Tool(
+            name="enki_reflect",
+            description="Close the feedback loop — reflect on session and store learnings",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "project_path": {
+                        "type": "string",
+                        "description": "Project directory path (default: current)",
+                    },
+                },
+            },
+        ),
+        # Feedback loop tool
+        Tool(
+            name="enki_feedback_loop",
+            description="Manage enforcement feedback proposals (run, status, apply, reject, revert, acknowledge)",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["run", "status", "apply", "reject", "revert", "acknowledge"],
+                        "description": "Action to perform",
+                    },
+                    "proposal_id": {
+                        "type": "string",
+                        "description": "Proposal ID (required for apply/reject/revert/acknowledge)",
+                    },
+                    "project": {
+                        "type": "string",
+                        "description": "Optional project path",
+                    },
+                },
+                "required": ["action"],
+            },
+        ),
         # Simplifier tool
         Tool(
             name="enki_simplify",
@@ -1181,6 +1219,104 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             return [TextContent(type="text", text=f"Removed worktree: {arguments['task_id']}")]
         else:
             return [TextContent(type="text", text=f"Error: Failed to remove worktree {arguments['task_id']}")]
+
+    elif name == "enki_reflect":
+        from .reflector import close_feedback_loop
+        project_path = Path(arguments.get("project_path", "."))
+
+        try:
+            report = close_feedback_loop(project_path)
+
+            lines = [f"## Session Reflection: {report['session_id']}"]
+            for r in report["reflections"]:
+                icon = {"worked": "✓", "failed": "✗", "pattern": "⟳", "warning": "⚠"}.get(r["category"], "?")
+                lines.append(f"- {icon} {r['description']}")
+
+            lines.append(f"\n**Skills stored:** {report['skills_stored']} new, {report['skills_duplicate']} duplicates")
+            return [TextContent(type="text", text="\n".join(lines))]
+        except Exception as e:
+            return [TextContent(type="text", text=f"Reflection error: {e}")]
+
+    elif name == "enki_feedback_loop":
+        from .feedback_loop import (
+            run_feedback_cycle, get_feedback_summary,
+            apply_proposal, reject_proposal,
+            revert_proposal, acknowledge_regression,
+        )
+        action = arguments["action"]
+        proposal_id = arguments.get("proposal_id")
+        project_path = Path(arguments["project"]) if arguments.get("project") else None
+
+        try:
+            if action == "run":
+                report = run_feedback_cycle(project_path)
+                if report["proposals_stored"]:
+                    return [TextContent(
+                        type="text",
+                        text=f"Feedback cycle complete.\n"
+                             f"FP patterns analyzed: {report['fp_patterns_analyzed']}\n"
+                             f"Evasion patterns analyzed: {report['evasion_patterns_analyzed']}\n"
+                             f"Proposals generated: {report['proposals_generated']}\n"
+                             f"Proposal IDs: {', '.join(report['proposals_stored'])}\n\n"
+                             f"Review with `enki_feedback_loop status`."
+                    )]
+                else:
+                    return [TextContent(
+                        type="text",
+                        text=f"Feedback cycle complete. System is stable.\n"
+                             f"FP patterns analyzed: {report['fp_patterns_analyzed']}\n"
+                             f"Evasion patterns analyzed: {report['evasion_patterns_analyzed']}\n"
+                             f"No proposals needed."
+                    )]
+
+            elif action == "status":
+                summary = get_feedback_summary()
+                return [TextContent(type="text", text=summary)]
+
+            elif action == "apply":
+                if not proposal_id:
+                    return [TextContent(type="text", text="Error: proposal_id required for apply")]
+                result = apply_proposal(proposal_id)
+                if "error" in result:
+                    return [TextContent(type="text", text=f"Error: {result['error']}")]
+                return [TextContent(
+                    type="text",
+                    text=f"Proposal applied: {result['proposal_id']}\n{result['change_summary']}"
+                )]
+
+            elif action == "reject":
+                if not proposal_id:
+                    return [TextContent(type="text", text="Error: proposal_id required for reject")]
+                result = reject_proposal(proposal_id)
+                if "error" in result:
+                    return [TextContent(type="text", text=f"Error: {result['error']}")]
+                return [TextContent(type="text", text=f"Proposal rejected: {result['proposal_id']}")]
+
+            elif action == "revert":
+                if not proposal_id:
+                    return [TextContent(type="text", text="Error: proposal_id required for revert")]
+                result = revert_proposal(proposal_id)
+                if "error" in result:
+                    return [TextContent(type="text", text=f"Error: {result['error']}")]
+                return [TextContent(
+                    type="text",
+                    text=f"Proposal reverted: {result['proposal_id']}\n"
+                         f"Previous status: {result['previous_status']}"
+                )]
+
+            elif action == "acknowledge":
+                if not proposal_id:
+                    return [TextContent(type="text", text="Error: proposal_id required for acknowledge")]
+                result = acknowledge_regression(proposal_id)
+                if "error" in result:
+                    return [TextContent(type="text", text=f"Error: {result['error']}")]
+                return [TextContent(type="text", text=f"Regression acknowledged: {result['proposal_id']}")]
+
+            else:
+                return [TextContent(type="text", text=f"Unknown action: {action}")]
+
+        except Exception as e:
+            return [TextContent(type="text", text=f"Feedback loop error: {e}")]
 
     elif name == "enki_simplify":
         params = run_simplification(

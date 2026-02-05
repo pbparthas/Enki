@@ -237,6 +237,36 @@ CREATE INDEX IF NOT EXISTS idx_bead_cache_type ON bead_cache(type);
 CREATE INDEX IF NOT EXISTS idx_bead_cache_cached_at ON bead_cache(cached_at);
 CREATE INDEX IF NOT EXISTS idx_sync_queue_status ON sync_queue(status);
 CREATE INDEX IF NOT EXISTS idx_sync_queue_created ON sync_queue(created_at);
+
+-- ============================================================
+-- Feedback Loop Tables
+-- ============================================================
+
+-- Feedback proposals: enforcement change proposals from feedback analysis
+CREATE TABLE IF NOT EXISTS feedback_proposals (
+    id TEXT PRIMARY KEY,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    session_id TEXT,
+    proposal_type TEXT NOT NULL CHECK (proposal_type IN (
+        'gate_loosen', 'gate_tighten',
+        'pattern_add', 'pattern_remove', 'pattern_refine'
+    )),
+    target TEXT NOT NULL,
+    description TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    old_value TEXT,
+    new_value TEXT,
+    evidence_json TEXT,
+    status TEXT DEFAULT 'pending' CHECK (status IN (
+        'pending', 'applied', 'regressed', 'reverted', 'rejected', 'acknowledged'
+    )),
+    applied_at TIMESTAMP,
+    reverted_at TIMESTAMP,
+    pre_apply_snapshot TEXT,
+    post_apply_snapshot TEXT,
+    sessions_since_apply INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_proposals_status ON feedback_proposals(status);
 """
 
 
