@@ -213,16 +213,19 @@ def handle_session_start(
 def handle_session_end(project_path: Optional[Path] = None) -> dict:
     """Handle session end hook.
 
-    Runs both feedback loops:
-    1. Reflector: session → reflect → distill → store beads
-    2. Feedback loop: analyze FP/evasions → propose changes (never auto-apply)
-    3. Regression check: flag applied proposals showing regression
+    Runs the full session-end pipeline:
+    1. Reflector: extract learnings as beads (heuristic, no LLM)
+    2. Feedback loop: propose enforcement adjustments (HITL only)
+    3. Regression checks: flag applied proposals showing regression
+
+    All steps degrade gracefully — archiving and summary work even
+    if reflector/feedback_loop modules aren't available yet.
 
     Args:
         project_path: Project path
 
     Returns:
-        Dict with reflection report, feedback proposals, and regressions
+        Dict with summary, reflection report, feedback report, regressions
     """
     from .session import get_session
 
@@ -232,31 +235,39 @@ def handle_session_end(project_path: Optional[Path] = None) -> dict:
 
     result = {
         "session_id": session.session_id,
-        "reflection": None,
-        "feedback": None,
-        "regressions": [],
+        "goal": session.goal,
+        "phase": session.phase,
+        "tier": session.tier,
+        "files_edited": len(session.edits) if session.edits else 0,
     }
 
     # Loop 1: Reflect → store learnings as beads
     try:
         from .reflector import close_feedback_loop as reflect
-        result["reflection"] = reflect(project_path)
+        reflection_report = reflect(project_path)
+        result["reflection"] = reflection_report
+    except ImportError:
+        result["reflection"] = {"status": "unavailable"}
     except Exception as e:
-        result["reflection"] = {"error": str(e)}
+        result["reflection"] = {"status": f"error: {e}"}
 
     # Loop 2: Analyze → propose enforcement changes (never auto-apply)
     try:
         from .feedback_loop import run_feedback_cycle
         result["feedback"] = run_feedback_cycle(project_path)
+    except ImportError:
+        result["feedback"] = {"status": "module not available"}
     except Exception as e:
-        result["feedback"] = {"error": str(e)}
+        result["feedback"] = {"status": f"error: {e}"}
 
     # Loop 3: Check regressions on previously applied proposals
     try:
         from .feedback_loop import check_for_regressions
         result["regressions"] = check_for_regressions()
+    except ImportError:
+        result["regressions"] = {"status": "module not available"}
     except Exception as e:
-        result["regressions"] = [{"error": str(e)}]
+        result["regressions"] = {"status": f"error: {e}"}
 
     return result
 

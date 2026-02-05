@@ -394,6 +394,157 @@ def cmd_session_track_edit(args):
         set_tier(new_tier, project_path)
 
 
+def cmd_session_end(args):
+    """End session: reflect, archive, summarize.
+
+    This is the proper session end that:
+    1. Runs reflector (extract learnings as beads)
+    2. Runs feedback loop (propose enforcement adjustments)
+    3. Checks for regressions on applied proposals
+    4. Archives RUNNING.md to sessions/
+    5. Outputs a summary table
+    """
+    init_db()
+    project_path = Path(args.project) if args.project else None
+    project_path = project_path or Path.cwd()
+
+    session = get_session(project_path)
+    if not session:
+        print("No active session.")
+        sys.exit(1)
+
+    enki_dir = project_path / ".enki"
+    results = {
+        "session_id": session.session_id,
+        "goal": session.goal,
+        "phase": session.phase,
+        "tier": session.tier,
+        "files_edited": len(session.edits),
+        "reflection": None,
+        "feedback": None,
+        "regressions": None,
+        "archived": False,
+    }
+
+    # --- Step 1: Reflector (graceful degradation) ---
+    try:
+        from .reflector import close_feedback_loop as reflect
+        reflection_report = reflect(project_path)
+        results["reflection"] = {
+            "reflections": len(reflection_report.get("reflections", [])),
+            "skills_stored": reflection_report.get("skills_stored", 0),
+            "skills_duplicate": reflection_report.get("skills_duplicate", 0),
+        }
+    except ImportError:
+        results["reflection"] = {"status": "module not available"}
+    except Exception as e:
+        results["reflection"] = {"status": f"error: {e}"}
+
+    # --- Step 2: Feedback loop (graceful degradation) ---
+    try:
+        from .feedback_loop import run_feedback_cycle
+        feedback_report = run_feedback_cycle(project_path)
+        results["feedback"] = {
+            "proposals_generated": feedback_report.get("proposals_generated", 0),
+            "status": feedback_report.get("status", "stable"),
+        }
+    except ImportError:
+        results["feedback"] = {"status": "module not available"}
+    except Exception as e:
+        results["feedback"] = {"status": f"error: {e}"}
+
+    # --- Step 3: Regression checks (graceful degradation) ---
+    try:
+        from .feedback_loop import check_for_regressions
+        regression_report = check_for_regressions()
+        results["regressions"] = regression_report
+    except ImportError:
+        results["regressions"] = {"status": "module not available"}
+    except Exception as e:
+        results["regressions"] = {"status": f"error: {e}"}
+
+    # --- Step 4: Archive RUNNING.md ---
+    running_path = enki_dir / "RUNNING.md"
+    if running_path.exists():
+        sessions_dir = enki_dir / "sessions"
+        sessions_dir.mkdir(exist_ok=True)
+
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        archive_name = f"{timestamp}_{session.session_id[:8]}.md"
+        archive_path = sessions_dir / archive_name
+
+        try:
+            content = running_path.read_text()
+            line_count = len([l for l in content.strip().split("\n") if l.strip()])
+
+            # Write archive with header
+            with open(archive_path, "w") as f:
+                f.write(f"# Session Archive: {session.session_id}\n")
+                f.write(f"# Goal: {session.goal or '(none)'}\n")
+                f.write(f"# Phase: {session.phase} | Tier: {session.tier}\n")
+                f.write(f"# Files: {len(session.edits)} | Entries: {line_count}\n")
+                f.write(f"# Archived: {datetime.now().isoformat()}\n\n")
+                f.write(content)
+
+            # Clear RUNNING.md for next session
+            running_path.write_text("")
+            results["archived"] = True
+            results["archive_path"] = str(archive_path)
+            results["entries_archived"] = line_count
+        except Exception as e:
+            results["archived"] = False
+            results["archive_error"] = str(e)
+
+    # --- Step 5: Output ---
+    if args.json:
+        print(json.dumps(results, default=str))
+    else:
+        # Summary table
+        print(f"\n{'=' * 50}")
+        print(f"  Session End: {session.session_id[:8]}")
+        print(f"{'=' * 50}")
+        print(f"  Goal:    {session.goal or '(none)'}")
+        print(f"  Phase:   {session.phase} → end")
+        print(f"  Tier:    {session.tier}")
+        print(f"  Files:   {len(session.edits)} edited")
+
+        # Reflection results
+        ref = results.get("reflection", {})
+        if isinstance(ref, dict) and ref.get("skills_stored") is not None:
+            print(f"  Reflect: {ref.get('reflections', 0)} insights, "
+                  f"{ref['skills_stored']} beads stored "
+                  f"({ref.get('skills_duplicate', 0)} deduped)")
+        else:
+            status = ref.get("status", "skipped") if isinstance(ref, dict) else "skipped"
+            print(f"  Reflect: {status}")
+
+        # Feedback results
+        fb = results.get("feedback", {})
+        if isinstance(fb, dict) and fb.get("proposals_generated") is not None:
+            count = fb["proposals_generated"]
+            if count > 0:
+                print(f"  Feedback: {count} proposal(s) pending review")
+            else:
+                print(f"  Feedback: stable (no proposals)")
+        else:
+            status = fb.get("status", "skipped") if isinstance(fb, dict) else "skipped"
+            print(f"  Feedback: {status}")
+
+        # Regression results
+        reg = results.get("regressions")
+        if isinstance(reg, list) and reg:
+            print(f"  ⚠ Regressions: {len(reg)} flagged for review")
+
+        # Archive results
+        if results.get("archived"):
+            print(f"  Archive: {results.get('entries_archived', 0)} entries → sessions/")
+        else:
+            print(f"  Archive: no RUNNING.md to archive")
+
+        print(f"{'=' * 50}\n")
+
+
 # === Gate Commands ===
 
 def cmd_gate_check(args):
@@ -2101,6 +2252,12 @@ def main():
     session_edit_parser.add_argument("--file", required=True, help="File path")
     session_edit_parser.add_argument("-p", "--project", help="Project path")
     session_edit_parser.set_defaults(func=cmd_session_track_edit)
+
+    # session end
+    session_end_parser = session_subparsers.add_parser("end", help="End session: reflect, archive, summarize")
+    session_end_parser.add_argument("-p", "--project", help="Project path")
+    session_end_parser.add_argument("--json", action="store_true", help="JSON output")
+    session_end_parser.set_defaults(func=cmd_session_end)
 
     # === Gate Commands ===
     gate_parser = subparsers.add_parser("gate", help="Gate enforcement")

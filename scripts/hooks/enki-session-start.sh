@@ -103,6 +103,52 @@ else
 fi
 
 # =============================================================================
+# LAST SESSION CONTEXT (from .enki/sessions/ — automatic continuity)
+# =============================================================================
+
+if [[ -d "$ENKI_DIR/sessions" ]]; then
+    # Find the most recent archive with actual content (skip empty archives)
+    LAST_ARCHIVE=""
+    for candidate in $(ls -t "$ENKI_DIR/sessions/"*.md 2>/dev/null | head -5); do
+        ENTRY_COUNT=$(grep -c "^\[" "$candidate" 2>/dev/null)
+        ENTRY_COUNT=${ENTRY_COUNT:-0}
+        if [[ "$ENTRY_COUNT" -gt 0 ]]; then
+            LAST_ARCHIVE="$candidate"
+            break
+        fi
+    done
+
+    if [[ -n "$LAST_ARCHIVE" && -f "$LAST_ARCHIVE" ]]; then
+        # Extract header lines (lines starting with #)
+        LAST_GOAL=$(grep "^# Goal:" "$LAST_ARCHIVE" 2>/dev/null | head -1 | sed 's/^# Goal: //')
+        LAST_PHASE=$(grep "^# Phase:" "$LAST_ARCHIVE" 2>/dev/null | head -1 | sed 's/^# Phase: //')
+        LAST_FILES=$(grep "^# Files:" "$LAST_ARCHIVE" 2>/dev/null | head -1 | sed 's/^# Files: //')
+        LAST_ARCHIVED=$(grep "^# Archived:" "$LAST_ARCHIVE" 2>/dev/null | head -1 | sed 's/^# Archived: //' | cut -c1-16)
+
+        # Get last 10 non-empty, non-header entries
+        LAST_ENTRIES=$(grep -v "^#" "$LAST_ARCHIVE" 2>/dev/null | grep -v "^$" | tail -10)
+
+        if [[ -n "$LAST_GOAL" ]]; then
+            echo ""
+            echo "### Last Session"
+            echo "- **Goal:** $LAST_GOAL"
+            [[ -n "$LAST_PHASE" ]] && echo "- **State:** $LAST_PHASE"
+            [[ -n "$LAST_FILES" ]] && echo "- **Scope:** $LAST_FILES"
+            [[ -n "$LAST_ARCHIVED" ]] && echo "- **When:** $LAST_ARCHIVED"
+
+            if [[ -n "$LAST_ENTRIES" ]]; then
+                echo ""
+                echo "**Recent activity:**"
+                echo '```'
+                echo "$LAST_ENTRIES"
+                echo '```'
+            fi
+            echo ""
+        fi
+    fi
+fi
+
+# =============================================================================
 # ERESHKIGAL REVIEW CHECK (via Python, optional)
 # =============================================================================
 
