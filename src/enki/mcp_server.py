@@ -1,6 +1,11 @@
-"""MCP server exposing Enki tools."""
+"""MCP server exposing Enki tools.
+
+P2-02: Refactored from 680-line if/elif chain into dispatch map + per-tool handlers.
+"""
 
 import json
+import logging
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -68,6 +73,9 @@ from .simplifier import (
     run_simplification,
     get_modified_files,
 )
+from .path_utils import validate_project_path
+
+logger = logging.getLogger(__name__)
 
 # Initialize server
 server = Server("enki")
@@ -650,690 +658,537 @@ async def list_tools() -> list[Tool]:
     ]
 
 
-@server.call_tool()
-async def call_tool(name: str, arguments: dict) -> list[TextContent]:
-    """Handle tool calls."""
+# =============================================================================
+# P2-02: Per-tool handler functions
+# =============================================================================
+# Each handler: def _handle_X(args, remote) -> list[TextContent]
 
-    # Check if running in remote mode (connected to Enki server)
-    remote = is_remote_mode()
+def _get_project_path(arguments: dict) -> Optional[Path]:
+    """Extract project_path from arguments."""
+    raw = arguments.get("project") or arguments.get("project_path")
+    return Path(raw) if raw else None
 
-    # Initialize local database if not in remote mode
-    if not remote:
-        init_db()
 
-    if name == "enki_remember":
-        if remote:
-            # Remote mode: compute embedding locally, send to server
-            try:
-                result = remote_remember(
-                    content=arguments["content"],
-                    bead_type=arguments["type"],
-                    summary=arguments.get("summary"),
-                    project=arguments.get("project"),
-                    context=arguments.get("context"),
-                    tags=arguments.get("tags"),
-                    starred=arguments.get("starred", False),
-                )
+def _status_label(result: dict) -> str:
+    """Generate status label from store result."""
+    if result.get("offline"):
+        return " (queued - offline)"
+    if result.get("fallback"):
+        return " (local fallback)"
+    return ""
 
-                # Check if queued offline
-                if result.get("offline"):
-                    status_msg = "(queued - offline)"
-                else:
-                    status_msg = "(synced to server)"
 
-                return [TextContent(
-                    type="text",
-                    text=f"Remembered [{arguments['type']}] {result['id']} {status_msg}\n\n{arguments['content'][:200]}{'...' if len(arguments['content']) > 200 else ''}",
-                )]
-            except Exception as e:
-                return [TextContent(type="text", text=f"Error syncing to server: {e}")]
-        else:
-            # Local mode
-            bead = create_bead(
-                content=arguments["content"],
-                bead_type=arguments["type"],
-                summary=arguments.get("summary"),
-                project=arguments.get("project"),
-                context=arguments.get("context"),
-                tags=arguments.get("tags"),
-                starred=arguments.get("starred", False),
-            )
-            return [TextContent(
-                type="text",
-                text=f"Remembered [{bead.type}] {bead.id}\n\n{bead.content[:200]}{'...' if len(bead.content) > 200 else ''}",
-            )]
+def _handle_remember(arguments: dict, remote: bool) -> list[TextContent]:
+    from .store import get_store
+    store = get_store(remote)
+    result = store.remember(
+        content=arguments["content"], bead_type=arguments["type"],
+        summary=arguments.get("summary"), project=arguments.get("project"),
+        context=arguments.get("context"), tags=arguments.get("tags"),
+        starred=arguments.get("starred", False),
+    )
+    label = _status_label(result)
+    content = arguments["content"]
+    preview = f"{content[:200]}{'...' if len(content) > 200 else ''}"
+    return [TextContent(type="text", text=f"Remembered [{result['type']}] {result['id']}{label}\n\n{preview}")]
 
-    elif name == "enki_recall":
-        if remote:
-            # Remote mode: compute query embedding locally, search on server
-            try:
-                results = remote_recall(
-                    query=arguments["query"],
-                    project=arguments.get("project"),
-                    bead_type=arguments.get("type"),
-                    limit=arguments.get("limit", 10),
-                )
 
-                if not results:
-                    return [TextContent(type="text", text="No relevant knowledge found.")]
+def _handle_recall(arguments: dict, remote: bool) -> list[TextContent]:
+    from .store import get_store
+    store = get_store(remote)
+    results = store.recall(
+        query=arguments["query"], project=arguments.get("project"),
+        bead_type=arguments.get("type"), limit=arguments.get("limit", 10),
+    )
+    if not results:
+        return [TextContent(type="text", text="No relevant knowledge found.")]
 
-                # Check if results are from cache (offline)
-                is_cached = any(r.get("cached") for r in results)
-                source = "(from local cache - offline)" if is_cached else "(from server)"
-
-                lines = [f"Found {len(results)} results {source}:\n"]
-                for i, r in enumerate(results, 1):
-                    content = r.get("content", "")
-                    summary = r.get("summary") or content[:150]
-                    cached_marker = " [cached]" if r.get("cached") else ""
-                    lines.append(
-                        f"{i}. [{r['type']}]{cached_marker} (score: {r.get('score', 0):.2f})\n"
-                        f"   {summary}{'...' if len(content) > 150 else ''}\n"
-                        f"   ID: {r['id']}\n"
-                    )
-
-                return [TextContent(type="text", text="\n".join(lines))]
-            except Exception as e:
-                return [TextContent(type="text", text=f"Error searching server: {e}")]
-        else:
-            # Local mode
-            results = search(
-                query=arguments["query"],
-                project=arguments.get("project"),
-                bead_type=arguments.get("type"),
-                limit=arguments.get("limit", 10),
-            )
-
-            if not results:
-                return [TextContent(type="text", text="No relevant knowledge found.")]
-
-            lines = [f"Found {len(results)} results:\n"]
-            for i, result in enumerate(results, 1):
-                bead = result.bead
-                sources = "+".join(result.sources)
-                starred = "*" if bead.starred else ""
-                lines.append(
-                    f"{i}. [{bead.type}]{starred} (score: {result.score:.2f}, via: {sources})\n"
-                    f"   {bead.summary or bead.content[:150]}{'...' if len(bead.content) > 150 else ''}\n"
-                    f"   ID: {bead.id}\n"
-                )
-
-            return [TextContent(type="text", text="\n".join(lines))]
-
-    elif name == "enki_forget":
-        if remote:
-            try:
-                result = remote_supersede(arguments["old_id"], arguments["new_id"])
-                status_msg = "(queued - offline)" if result.get("offline") else "(synced to server)"
-                return [TextContent(type="text", text=f"Marked {arguments['old_id']} as superseded by {arguments['new_id']} {status_msg}")]
-            except Exception as e:
-                return [TextContent(type="text", text=f"Error: {e}")]
-        else:
-            bead = supersede_bead(arguments["old_id"], arguments["new_id"])
-            if bead:
-                return [TextContent(type="text", text=f"Marked {arguments['old_id']} as superseded by {arguments['new_id']}")]
-            else:
-                return [TextContent(type="text", text=f"Bead {arguments['old_id']} not found")]
-
-    elif name == "enki_star":
-        starred = arguments.get("starred", True)
-        if remote:
-            try:
-                result = remote_star(arguments["bead_id"], starred)
-                action = "Starred" if starred else "Unstarred"
-                status_msg = "(queued - offline)" if result.get("offline") else "(synced to server)"
-                return [TextContent(type="text", text=f"{action} bead {arguments['bead_id']} {status_msg}")]
-            except Exception as e:
-                return [TextContent(type="text", text=f"Error: {e}")]
-        else:
-            if starred:
-                bead = star_bead(arguments["bead_id"])
-                action = "Starred"
-            else:
-                bead = unstar_bead(arguments["bead_id"])
-                action = "Unstarred"
-
-            if bead:
-                return [TextContent(type="text", text=f"{action} bead {bead.id}")]
-            else:
-                return [TextContent(type="text", text=f"Bead {arguments['bead_id']} not found")]
-
-    elif name == "enki_status":
-        if remote:
-            try:
-                status = remote_status(arguments.get("project"))
-
-                # Check if offline
-                offline_indicator = ""
-                if status.get("offline") or is_offline():
-                    offline_indicator = " [OFFLINE]"
-
-                lines = [
-                    f"Enki Status (Remote Server){offline_indicator}",
-                    "=" * 40,
-                    f"Phase: {status.get('phase', 'intake')}",
-                    f"Goal: {status.get('goal') or '(not set)'}",
-                    "",
-                    "Memory:",
-                    f"  Total beads: {status.get('total_beads', 0)}",
-                    f"  Active beads: {status.get('active_beads', 0)}",
-                    f"  Starred beads: {status.get('starred_beads', 0)}",
-                ]
-
-                # Add offline-specific info
-                if status.get("offline") or is_offline():
-                    lines.extend([
-                        "",
-                        "Offline Mode:",
-                        f"  Cached beads: {status.get('cached_beads', get_cache_count())}",
-                        f"  Pending sync: {status.get('pending_sync', get_queue_size())} operations",
-                    ])
-
-                return [TextContent(type="text", text="\n".join(lines))]
-            except Exception as e:
-                return [TextContent(type="text", text=f"Error fetching status: {e}")]
-        else:
-            db = get_db()
-            project_path = Path(arguments["project"]) if arguments.get("project") else None
-
-            # Get memory counts
-            total = db.execute("SELECT COUNT(*) as count FROM beads").fetchone()["count"]
-            active = db.execute(
-                "SELECT COUNT(*) as count FROM beads WHERE superseded_by IS NULL"
-            ).fetchone()["count"]
-            starred = db.execute(
-                "SELECT COUNT(*) as count FROM beads WHERE starred = 1"
-            ).fetchone()["count"]
-
-            # Get session status
-            session = get_session(project_path)
-            phase = get_phase(project_path) if session else "intake"
-            goal = get_goal(project_path) if session else None
-
-            # Get orchestration status
-            orch_status = get_full_orchestration_status(project_path)
-
-            lines = [
-                "Enki Status",
-                "=" * 40,
-                f"Phase: {phase}",
-                f"Goal: {goal or '(not set)'}",
-                "",
-                "Memory:",
-                f"  Total beads: {total}",
-                f"  Active beads: {active}",
-                f"  Starred beads: {starred}",
-            ]
-
-            if orch_status["active"]:
-                lines.extend([
-                    "",
-                    "Orchestration:",
-                    f"  Spec: {orch_status['spec']}",
-                    f"  Progress: {orch_status['tasks']['completed']}/{orch_status['tasks']['total']}",
-                ])
-
-            return [TextContent(type="text", text="\n".join(lines))]
-
-    # Session tools
-    elif name == "enki_goal":
-        project_path = Path(arguments["project"]) if arguments.get("project") else None
-        if remote:
-            try:
-                result = remote_goal(arguments["goal"], arguments.get("project"))
-                status_msg = "(queued - offline)" if result.get("offline") else "(synced to server)"
-                return [TextContent(type="text", text=f"Goal set: {arguments['goal']} {status_msg}\n\nGate 1 (Goal Required) is now satisfied.")]
-            except Exception as e:
-                return [TextContent(type="text", text=f"Error: {e}")]
-        else:
-            set_goal(arguments["goal"], project_path)
-            return [TextContent(type="text", text=f"Goal set: {arguments['goal']}\n\nGate 1 (Goal Required) is now satisfied.")]
-
-    elif name == "enki_phase":
-        project_path = Path(arguments["project"]) if arguments.get("project") else None
-        if remote:
-            try:
-                result = remote_phase(arguments.get("phase"), arguments.get("project"))
-                if arguments.get("phase"):
-                    status_msg = "(queued - offline)" if result.get("offline") else "(synced to server)"
-                    return [TextContent(type="text", text=f"Phase set to: {arguments['phase']} {status_msg}")]
-                else:
-                    offline_indicator = " (offline)" if result.get("offline") else ""
-                    return [TextContent(type="text", text=f"Current phase: {result.get('phase', 'intake')}{offline_indicator}")]
-            except Exception as e:
-                return [TextContent(type="text", text=f"Error: {e}")]
-        else:
-            if "phase" in arguments and arguments["phase"]:
-                set_phase(arguments["phase"], project_path)
-                return [TextContent(type="text", text=f"Phase set to: {arguments['phase']}")]
-            else:
-                current = get_phase(project_path)
-                return [TextContent(type="text", text=f"Current phase: {current}")]
-
-    # PM tools
-    elif name == "enki_debate":
-        project_path = Path(arguments["project"]) if arguments.get("project") else None
-
-        perspectives_path = generate_perspectives(
-            goal=arguments["goal"],
-            context=arguments.get("context"),
-            project_path=project_path,
+    is_cached = any(r.get("cached") for r in results)
+    source_note = " (from local cache - offline)" if is_cached else ""
+    lines = [f"Found {len(results)} results{source_note}:\n"]
+    for i, r in enumerate(results, 1):
+        starred_marker = "*" if r.get("starred") else ""
+        cached_marker = " [cached]" if r.get("cached") else ""
+        content = r.get("content", "")
+        summary = r.get("summary") or content[:150]
+        lines.append(
+            f"{i}. [{r['type']}]{starred_marker}{cached_marker} (score: {r.get('score', 0):.2f}, via: {r.get('sources', '')})\n"
+            f"   {summary}{'...' if len(content) > 150 else ''}\n"
+            f"   ID: {r['id']}\n"
         )
+    return [TextContent(type="text", text="\n".join(lines))]
 
-        return [TextContent(
-            type="text",
-            text=f"Debate started for: {arguments['goal']}\n\n"
-                 f"Perspectives template created: {perspectives_path}\n\n"
-                 f"Fill in ALL perspectives before running enki_plan:\n"
-                 f"  - PM Perspective\n"
-                 f"  - CTO Perspective\n"
-                 f"  - Architect Perspective\n"
-                 f"  - DBA Perspective\n"
-                 f"  - Security Perspective\n"
-                 f"  - Devil's Advocate"
+
+def _handle_forget(arguments: dict, remote: bool) -> list[TextContent]:
+    from .store import get_store
+    store = get_store(remote)
+    result = store.supersede(arguments["old_id"], arguments["new_id"])
+    if not result["found"]:
+        return [TextContent(type="text", text=f"Bead {arguments['old_id']} not found")]
+    label = _status_label(result)
+    return [TextContent(type="text", text=f"Marked {arguments['old_id']} as superseded by {arguments['new_id']}{label}")]
+
+
+def _handle_star(arguments: dict, remote: bool) -> list[TextContent]:
+    from .store import get_store
+    store = get_store(remote)
+    starred = arguments.get("starred", True)
+    result = store.star(arguments["bead_id"], starred)
+    action = "Starred" if starred else "Unstarred"
+    if not result["found"]:
+        return [TextContent(type="text", text=f"Bead {arguments['bead_id']} not found")]
+    label = _status_label(result)
+    return [TextContent(type="text", text=f"{action} bead {arguments['bead_id']}{label}")]
+
+
+def _handle_status(arguments: dict, remote: bool) -> list[TextContent]:
+    from .store import get_store
+    store = get_store(remote)
+    status = store.get_status(arguments.get("project"))
+    offline = status.get("offline", False)
+    fallback = status.get("fallback", False)
+    header = "Enki Status"
+    if offline:
+        header += " [OFFLINE]"
+    elif fallback:
+        header += " (local fallback)"
+    lines = [
+        header, "=" * 40,
+        f"Phase: {status.get('phase', 'intake')}",
+        f"Goal: {status.get('goal') or '(not set)'}",
+        "", "Memory:",
+        f"  Total beads: {status.get('total_beads', 0)}",
+        f"  Active beads: {status.get('active_beads', 0)}",
+        f"  Starred beads: {status.get('starred_beads', 0)}",
+    ]
+    if offline:
+        lines.extend(["", "Offline Mode:",
+            f"  Cached beads: {status.get('cached_beads', 0)}",
+            f"  Pending sync: {status.get('pending_sync', 0)} operations",
+        ])
+    orch = status.get("orchestration")
+    if orch and orch.get("active"):
+        lines.extend(["", "Orchestration:",
+            f"  Spec: {orch['spec']}",
+            f"  Progress: {orch['tasks']['completed']}/{orch['tasks']['total']}",
+        ])
+    return [TextContent(type="text", text="\n".join(lines))]
+
+
+def _handle_goal(arguments: dict, remote: bool) -> list[TextContent]:
+    from .store import get_store
+    store = get_store(remote)
+    result = store.set_goal(arguments["goal"], arguments.get("project"))
+    label = _status_label(result)
+    return [TextContent(type="text", text=f"Goal set: {arguments['goal']}{label}\n\nGate 1 (Goal Required) is now satisfied.")]
+
+
+def _handle_phase(arguments: dict, remote: bool) -> list[TextContent]:
+    from .store import get_store
+    store = get_store(remote)
+    phase_arg = arguments.get("phase")
+    result = store.get_or_set_phase(phase_arg, arguments.get("project"))
+    label = _status_label(result)
+    if phase_arg:
+        return [TextContent(type="text", text=f"Phase set to: {phase_arg}{label}")]
+    return [TextContent(type="text", text=f"Current phase: {result['phase']}{label}")]
+
+
+def _handle_debate(arguments: dict, remote: bool) -> list[TextContent]:
+    project_path = _get_project_path(arguments)
+    perspectives_path = generate_perspectives(
+        goal=arguments["goal"], context=arguments.get("context"), project_path=project_path,
+    )
+    return [TextContent(type="text",
+        text=f"Debate started for: {arguments['goal']}\n\n"
+             f"Perspectives template created: {perspectives_path}\n\n"
+             f"Fill in ALL perspectives before running enki_plan:\n"
+             f"  - PM Perspective\n  - CTO Perspective\n  - Architect Perspective\n"
+             f"  - DBA Perspective\n  - Security Perspective\n  - Devil's Advocate",
+    )]
+
+
+def _handle_plan(arguments: dict, remote: bool) -> list[TextContent]:
+    project_path = _get_project_path(arguments)
+    try:
+        spec_path = create_spec(
+            name=arguments["name"], problem=arguments.get("problem"),
+            solution=arguments.get("solution"), project_path=project_path,
+        )
+        return [TextContent(type="text", text=f"Spec created: {spec_path}\n\nEdit the spec, then use enki_approve to approve it.")]
+    except ValueError as e:
+        return [TextContent(type="text", text=f"Error: {e}")]
+
+
+def _handle_approve(arguments: dict, remote: bool) -> list[TextContent]:
+    project_path = _get_project_path(arguments)
+    try:
+        approve_spec(arguments["name"], project_path)
+        return [TextContent(type="text",
+            text=f"Spec approved: {arguments['name']}\n\nGate 2 (Spec Approval) is now satisfied.\nYou can now spawn implementation agents.",
         )]
+    except ValueError as e:
+        return [TextContent(type="text", text=f"Error: {e}")]
 
-    elif name == "enki_plan":
-        project_path = Path(arguments["project"]) if arguments.get("project") else None
 
-        try:
-            spec_path = create_spec(
-                name=arguments["name"],
-                problem=arguments.get("problem"),
-                solution=arguments.get("solution"),
+def _handle_decompose(arguments: dict, remote: bool) -> list[TextContent]:
+    project_path = _get_project_path(arguments)
+    try:
+        if not is_spec_approved(arguments["name"], project_path):
+            return [TextContent(type="text", text=f"Spec not approved: {arguments['name']}")]
+        graph = decompose_spec(arguments["name"], project_path)
+        save_task_graph(graph, project_path)
+        waves = graph.get_waves()
+        lines = [f"Task graph created for: {arguments['name']}\n"]
+        for i, wave in enumerate(waves, 1):
+            lines.append(f"Wave {i}:")
+            for task in wave:
+                lines.append(f"  - {task.id}: {task.description} ({task.agent})")
+        return [TextContent(type="text", text="\n".join(lines))]
+    except ValueError as e:
+        return [TextContent(type="text", text=f"Error: {e}")]
+
+
+def _handle_orchestrate(arguments: dict, remote: bool) -> list[TextContent]:
+    project_path = _get_project_path(arguments)
+    try:
+        graph = decompose_spec(arguments["name"], project_path)
+        orch = start_orchestration(arguments["name"], graph, project_path)
+        next_action = get_next_action(project_path)
+        return [TextContent(type="text",
+            text=f"Orchestration started: {orch.id}\nSpec: {arguments['name']}\n"
+                 f"Tasks: {len(graph.tasks)}\n\nNext: {next_action['message']}",
+        )]
+    except ValueError as e:
+        return [TextContent(type="text", text=f"Error: {e}")]
+
+
+def _handle_task(arguments: dict, remote: bool) -> list[TextContent]:
+    project_path = _get_project_path(arguments)
+    action = arguments["action"]
+    task_id = arguments["task_id"]
+    try:
+        if action == "start":
+            task = start_task(task_id, project_path)
+            return [TextContent(type="text", text=f"Task started: {task.id}\nAgent: {task.agent}\nDescription: {task.description}")]
+        elif action == "complete":
+            task = complete_task(task_id, arguments.get("output"), project_path)
+            next_action = get_next_action(project_path)
+            return [TextContent(type="text", text=f"Task completed: {task.id}\n\nNext: {next_action['message']}")]
+        elif action == "fail":
+            task = fail_task(task_id, arguments.get("reason"), project_path)
+            status = "failed (HITL required)" if task.status == "failed" else f"will retry (attempt {task.attempts}/{task.max_attempts})"
+            return [TextContent(type="text", text=f"Task {status}: {task.id}")]
+    except ValueError as e:
+        return [TextContent(type="text", text=f"Error: {e}")]
+    return [TextContent(type="text", text=f"Unknown task action: {action}")]
+
+
+def _handle_bug(arguments: dict, remote: bool) -> list[TextContent]:
+    project_path = _get_project_path(arguments)
+    action = arguments["action"]
+    try:
+        if action == "file":
+            bug = file_bug(
+                title=arguments.get("title", "Bug"),
+                description=arguments.get("description", ""),
+                found_by=arguments.get("found_by", "enki"),
+                severity=arguments.get("severity", "medium"),
                 project_path=project_path,
             )
-            return [TextContent(
-                type="text",
-                text=f"Spec created: {spec_path}\n\nEdit the spec, then use enki_approve to approve it."
-            )]
-        except ValueError as e:
-            return [TextContent(type="text", text=f"Error: {e}")]
-
-    elif name == "enki_approve":
-        project_path = Path(arguments["project"]) if arguments.get("project") else None
-
-        try:
-            approve_spec(arguments["name"], project_path)
-            return [TextContent(
-                type="text",
-                text=f"Spec approved: {arguments['name']}\n\n"
-                     f"Gate 2 (Spec Approval) is now satisfied.\n"
-                     f"You can now spawn implementation agents."
-            )]
-        except ValueError as e:
-            return [TextContent(type="text", text=f"Error: {e}")]
-
-    elif name == "enki_decompose":
-        project_path = Path(arguments["project"]) if arguments.get("project") else None
-
-        try:
-            if not is_spec_approved(arguments["name"], project_path):
-                return [TextContent(type="text", text=f"Spec not approved: {arguments['name']}")]
-
-            graph = decompose_spec(arguments["name"], project_path)
-            save_task_graph(graph, project_path)
-
-            waves = graph.get_waves()
-            lines = [f"Task graph created for: {arguments['name']}\n"]
-            for i, wave in enumerate(waves, 1):
-                lines.append(f"Wave {i}:")
-                for task in wave:
-                    lines.append(f"  - {task.id}: {task.description} ({task.agent})")
+            return [TextContent(type="text", text=f"Bug filed: {bug.id}\nTitle: {bug.title}\nSeverity: {bug.severity}")]
+        elif action == "close":
+            bug = close_bug(arguments["bug_id"], "fixed", project_path)
+            return [TextContent(type="text", text=f"Bug closed: {bug.id}")]
+        elif action == "list":
+            bugs = get_open_bugs(project_path)
+            if not bugs:
+                return [TextContent(type="text", text="No open bugs.")]
+            lines = ["Open Bugs:"]
+            for bug in bugs:
+                lines.append(f"  {bug.id}: {bug.title} ({bug.severity})")
             return [TextContent(type="text", text="\n".join(lines))]
-        except ValueError as e:
-            return [TextContent(type="text", text=f"Error: {e}")]
+    except ValueError as e:
+        return [TextContent(type="text", text=f"Error: {e}")]
+    return [TextContent(type="text", text=f"Unknown bug action: {action}")]
 
-    # Orchestrator tools
-    elif name == "enki_orchestrate":
-        project_path = Path(arguments["project"]) if arguments.get("project") else None
 
-        try:
-            graph = decompose_spec(arguments["name"], project_path)
-            orch = start_orchestration(arguments["name"], graph, project_path)
-            next_action = get_next_action(project_path)
-            return [TextContent(
-                type="text",
-                text=f"Orchestration started: {orch.id}\n"
-                     f"Spec: {arguments['name']}\n"
-                     f"Tasks: {len(graph.tasks)}\n\n"
-                     f"Next: {next_action['message']}"
+def _handle_log(arguments: dict, remote: bool) -> list[TextContent]:
+    project_path = Path(arguments.get("project", "."))
+    enki_dir = project_path / ".enki"
+    enki_dir.mkdir(exist_ok=True)
+    running_md = enki_dir / "RUNNING.md"
+    timestamp = datetime.now().strftime("%H:%M")
+    entry = f"[{timestamp}] {arguments.get('entry_type', 'NOTE')}: {arguments['message']}\n"
+    with open(running_md, "a") as f:
+        f.write(entry)
+    return [TextContent(type="text", text=f"Logged: {entry.strip()}")]
+
+
+def _handle_maintain(arguments: dict, remote: bool) -> list[TextContent]:
+    results = maintain_wisdom()
+    return [TextContent(type="text",
+        text=f"Maintenance complete:\n  Weights updated: {results['weights_updated']}\n"
+             f"  Beads archived: {results['archived']}\n  Superseded purged: {results['purged']}",
+    )]
+
+
+def _handle_submit_for_validation(arguments: dict, remote: bool) -> list[TextContent]:
+    try:
+        task = submit_for_validation(arguments["task_id"], arguments["output"])
+        validators = get_validators_for_task(task)
+        return [TextContent(type="text", text=f"Task {arguments['task_id']} submitted for validation.\nValidators: {validators}")]
+    except ValueError as e:
+        return [TextContent(type="text", text=f"Error: {e}")]
+
+
+def _handle_spawn_validators(arguments: dict, remote: bool) -> list[TextContent]:
+    try:
+        spawn_calls = spawn_validators(arguments["task_id"])
+        if not spawn_calls:
+            return [TextContent(type="text", text=f"No validators configured for task {arguments['task_id']}")]
+        return [TextContent(type="text", text=json.dumps(spawn_calls, indent=2))]
+    except ValueError as e:
+        return [TextContent(type="text", text=f"Error: {e}")]
+
+
+def _handle_record_validation(arguments: dict, remote: bool) -> list[TextContent]:
+    passed = arguments["verdict"].upper() == "PASS"
+    feedback = arguments.get("feedback")
+    if not passed and not feedback:
+        return [TextContent(type="text", text="Error: feedback is required when verdict is FAIL")]
+    try:
+        task = record_validation_result(
+            task_id=arguments["task_id"], validator=arguments["validator"],
+            passed=passed, feedback=feedback,
+        )
+        if task.status == "complete":
+            return [TextContent(type="text", text=f"Task {arguments['task_id']} validated and completed")]
+        elif task.status == "rejected":
+            return [TextContent(type="text",
+                text=f"Task {arguments['task_id']} rejected (rejection {task.rejection_count}/{task.max_rejections})\n"
+                     f"Worker must fix issues and resubmit.\nUse enki_retry_rejected_task to get the retry prompt.",
             )]
-        except ValueError as e:
-            return [TextContent(type="text", text=f"Error: {e}")]
-
-    elif name == "enki_task":
-        project_path = Path(arguments["project"]) if arguments.get("project") else None
-        action = arguments["action"]
-        task_id = arguments["task_id"]
-
-        try:
-            if action == "start":
-                task = start_task(task_id, project_path)
-                return [TextContent(
-                    type="text",
-                    text=f"Task started: {task.id}\nAgent: {task.agent}\nDescription: {task.description}"
-                )]
-            elif action == "complete":
-                task = complete_task(task_id, arguments.get("output"), project_path)
-                next_action = get_next_action(project_path)
-                return [TextContent(type="text", text=f"Task completed: {task.id}\n\nNext: {next_action['message']}")]
-            elif action == "fail":
-                task = fail_task(task_id, arguments.get("reason"), project_path)
-                status = "failed (HITL required)" if task.status == "failed" else f"will retry (attempt {task.attempts}/{task.max_attempts})"
-                return [TextContent(type="text", text=f"Task {status}: {task.id}")]
-        except ValueError as e:
-            return [TextContent(type="text", text=f"Error: {e}")]
-
-    elif name == "enki_bug":
-        project_path = Path(arguments["project"]) if arguments.get("project") else None
-        action = arguments["action"]
-
-        try:
-            if action == "file":
-                bug = file_bug(
-                    title=arguments.get("title", "Bug"),
-                    description=arguments.get("description", ""),
-                    severity=arguments.get("severity", "medium"),
-                    project_path=project_path,
-                )
-                return [TextContent(type="text", text=f"Bug filed: {bug.id}\nTitle: {bug.title}\nSeverity: {bug.severity}")]
-            elif action == "close":
-                bug = close_bug(arguments["bug_id"], "fixed", project_path)
-                return [TextContent(type="text", text=f"Bug closed: {bug.id}")]
-            elif action == "list":
-                bugs = get_open_bugs(project_path)
-                if not bugs:
-                    return [TextContent(type="text", text="No open bugs.")]
-                lines = ["Open Bugs:"]
-                for bug in bugs:
-                    lines.append(f"  {bug.id}: {bug.title} ({bug.severity})")
-                return [TextContent(type="text", text="\n".join(lines))]
-        except ValueError as e:
-            return [TextContent(type="text", text=f"Error: {e}")]
-
-    # Utility tools
-    elif name == "enki_log":
-        project_path = Path(arguments["project"]) if arguments.get("project") else Path.cwd()
-        message = arguments["message"]
-        entry_type = arguments.get("entry_type", "NOTE")
-
-        # Log to RUNNING.md
-        enki_dir = project_path / ".enki"
-        enki_dir.mkdir(exist_ok=True)
-        running_md = enki_dir / "RUNNING.md"
-
-        from datetime import datetime
-        timestamp = datetime.now().strftime("%H:%M")
-        entry = f"[{timestamp}] {entry_type}: {message}\n"
-
-        with open(running_md, "a") as f:
-            f.write(entry)
-
-        return [TextContent(type="text", text=f"Logged: {entry.strip()}")]
-
-    elif name == "enki_maintain":
-        results = maintain_wisdom()
-        return [TextContent(
-            type="text",
-            text=f"Maintenance complete:\n"
-                 f"  Weights updated: {results['weights_updated']}\n"
-                 f"  Beads archived: {results['archived']}\n"
-                 f"  Superseded purged: {results['purged']}"
-        )]
-
-    # Validation tools
-    elif name == "enki_submit_for_validation":
-        try:
-            task = submit_for_validation(arguments["task_id"], arguments["output"])
-            validators = get_validators_for_task(task)
-            return [TextContent(
-                type="text",
-                text=f"Task {arguments['task_id']} submitted for validation.\nValidators: {validators}"
+        elif task.status == "failed":
+            return [TextContent(type="text",
+                text=f"Task {arguments['task_id']} failed - HITL required\nMax rejections exceeded. Human intervention needed.",
             )]
-        except ValueError as e:
-            return [TextContent(type="text", text=f"Error: {e}")]
+        return [TextContent(type="text", text=f"Task {arguments['task_id']} status: {task.status}")]
+    except ValueError as e:
+        return [TextContent(type="text", text=f"Error: {e}")]
 
-    elif name == "enki_spawn_validators":
-        try:
-            spawn_calls = spawn_validators(arguments["task_id"])
-            if not spawn_calls:
-                return [TextContent(type="text", text=f"No validators configured for task {arguments['task_id']}")]
-            return [TextContent(type="text", text=json.dumps(spawn_calls, indent=2))]
-        except ValueError as e:
-            return [TextContent(type="text", text=f"Error: {e}")]
 
-    elif name == "enki_record_validation":
-        passed = arguments["verdict"].upper() == "PASS"
-        feedback = arguments.get("feedback")
+def _handle_retry_rejected_task(arguments: dict, remote: bool) -> list[TextContent]:
+    try:
+        params = retry_rejected_task(arguments["task_id"])
+        return [TextContent(type="text", text=json.dumps(params, indent=2))]
+    except ValueError as e:
+        return [TextContent(type="text", text=f"Error: {e}")]
 
-        if not passed and not feedback:
-            return [TextContent(type="text", text="Error: feedback is required when verdict is FAIL")]
 
-        try:
-            task = record_validation_result(
-                task_id=arguments["task_id"],
-                validator=arguments["validator"],
-                passed=passed,
-                feedback=feedback,
-            )
-
-            if task.status == "complete":
-                return [TextContent(type="text", text=f"Task {arguments['task_id']} validated and completed")]
-            elif task.status == "rejected":
-                return [TextContent(
-                    type="text",
-                    text=f"Task {arguments['task_id']} rejected (rejection {task.rejection_count}/{task.max_rejections})\n"
-                         f"Worker must fix issues and resubmit.\n"
-                         f"Use enki_retry_rejected_task to get the retry prompt."
-                )]
-            elif task.status == "failed":
-                return [TextContent(
-                    type="text",
-                    text=f"Task {arguments['task_id']} failed - HITL required\n"
-                         f"Max rejections exceeded. Human intervention needed."
-                )]
-            else:
-                return [TextContent(type="text", text=f"Task {arguments['task_id']} status: {task.status}")]
-
-        except ValueError as e:
-            return [TextContent(type="text", text=f"Error: {e}")]
-
-    elif name == "enki_retry_rejected_task":
-        try:
-            params = retry_rejected_task(arguments["task_id"])
-            return [TextContent(type="text", text=json.dumps(params, indent=2))]
-        except ValueError as e:
-            return [TextContent(type="text", text=f"Error: {e}")]
-
-    elif name == "enki_validation_status":
-        validating = get_tasks_needing_validation()
-        rejected = get_rejected_tasks()
-
-        lines = []
-
-        if validating:
-            lines.append("**Tasks Awaiting Validation:**")
-            for task in validating:
-                lines.append(f"- {task.id} ({task.agent})")
-        else:
-            lines.append("No tasks awaiting validation.")
-
-        lines.append("")
-
-        if rejected:
-            lines.append("**Rejected Tasks (need retry):**")
-            for task in rejected:
-                lines.append(f"- {task.id}: {task.rejection_count}/{task.max_rejections} rejections")
-        else:
-            lines.append("No rejected tasks.")
-
-        return [TextContent(type="text", text="\n".join(lines))]
-
-    # Worktree tools
-    elif name == "enki_worktree_create":
-        try:
-            path = create_worktree(
-                task_id=arguments["task_id"],
-                base_branch=arguments.get("base_branch", "main"),
-            )
-            return [TextContent(
-                type="text",
-                text=f"Created worktree at {path}\nBranch: enki/{arguments['task_id']}"
-            )]
-        except (ValueError, Exception) as e:
-            return [TextContent(type="text", text=f"Error: {e}")]
-
-    elif name == "enki_worktree_list":
-        trees = list_worktrees()
-        if not trees:
-            return [TextContent(type="text", text="No worktrees found.")]
-
-        lines = ["Worktrees:"]
-        for t in trees:
-            marker = " (main)" if not t.task_id else ""
-            lines.append(f"- {t.path} [{t.branch}]{marker}")
-
-        return [TextContent(type="text", text="\n".join(lines))]
-
-    elif name == "enki_worktree_merge":
-        success = merge_worktree(
-            task_id=arguments["task_id"],
-            target_branch=arguments.get("target_branch", "main"),
-            delete_after=arguments.get("delete_after", True),
-        )
-        if success:
-            msg = f"Merged {arguments['task_id']} into {arguments.get('target_branch', 'main')}"
-            if arguments.get("delete_after", True):
-                msg += "\nWorktree removed."
-            return [TextContent(type="text", text=msg)]
-        else:
-            return [TextContent(type="text", text=f"Error: Failed to merge {arguments['task_id']}")]
-
-    elif name == "enki_worktree_remove":
-        success = remove_worktree(
-            task_id=arguments["task_id"],
-            force=arguments.get("force", False),
-        )
-        if success:
-            return [TextContent(type="text", text=f"Removed worktree: {arguments['task_id']}")]
-        else:
-            return [TextContent(type="text", text=f"Error: Failed to remove worktree {arguments['task_id']}")]
-
-    elif name == "enki_reflect":
-        from .reflector import close_feedback_loop
-        project_path = Path(arguments.get("project_path", "."))
-
-        try:
-            report = close_feedback_loop(project_path)
-
-            lines = [f"## Session Reflection: {report['session_id']}"]
-            for r in report["reflections"]:
-                icon = {"worked": "✓", "failed": "✗", "pattern": "⟳", "warning": "⚠"}.get(r["category"], "?")
-                lines.append(f"- {icon} {r['description']}")
-
-            lines.append(f"\n**Skills stored:** {report['skills_stored']} new, {report['skills_duplicate']} duplicates")
-            return [TextContent(type="text", text="\n".join(lines))]
-        except Exception as e:
-            return [TextContent(type="text", text=f"Reflection error: {e}")]
-
-    elif name == "enki_feedback_loop":
-        from .feedback_loop import (
-            run_feedback_cycle, get_feedback_summary,
-            apply_proposal, reject_proposal,
-            revert_proposal, acknowledge_regression,
-        )
-        action = arguments["action"]
-        proposal_id = arguments.get("proposal_id")
-        project_path = Path(arguments["project"]) if arguments.get("project") else None
-
-        try:
-            if action == "run":
-                report = run_feedback_cycle(project_path)
-                if report["proposals_stored"]:
-                    return [TextContent(
-                        type="text",
-                        text=f"Feedback cycle complete.\n"
-                             f"FP patterns analyzed: {report['fp_patterns_analyzed']}\n"
-                             f"Evasion patterns analyzed: {report['evasion_patterns_analyzed']}\n"
-                             f"Proposals generated: {report['proposals_generated']}\n"
-                             f"Proposal IDs: {', '.join(report['proposals_stored'])}\n\n"
-                             f"Review with `enki_feedback_loop status`."
-                    )]
-                else:
-                    return [TextContent(
-                        type="text",
-                        text=f"Feedback cycle complete. System is stable.\n"
-                             f"FP patterns analyzed: {report['fp_patterns_analyzed']}\n"
-                             f"Evasion patterns analyzed: {report['evasion_patterns_analyzed']}\n"
-                             f"No proposals needed."
-                    )]
-
-            elif action == "status":
-                summary = get_feedback_summary()
-                return [TextContent(type="text", text=summary)]
-
-            elif action == "apply":
-                if not proposal_id:
-                    return [TextContent(type="text", text="Error: proposal_id required for apply")]
-                result = apply_proposal(proposal_id)
-                if "error" in result:
-                    return [TextContent(type="text", text=f"Error: {result['error']}")]
-                return [TextContent(
-                    type="text",
-                    text=f"Proposal applied: {result['proposal_id']}\n{result['change_summary']}"
-                )]
-
-            elif action == "reject":
-                if not proposal_id:
-                    return [TextContent(type="text", text="Error: proposal_id required for reject")]
-                result = reject_proposal(proposal_id)
-                if "error" in result:
-                    return [TextContent(type="text", text=f"Error: {result['error']}")]
-                return [TextContent(type="text", text=f"Proposal rejected: {result['proposal_id']}")]
-
-            elif action == "revert":
-                if not proposal_id:
-                    return [TextContent(type="text", text="Error: proposal_id required for revert")]
-                result = revert_proposal(proposal_id)
-                if "error" in result:
-                    return [TextContent(type="text", text=f"Error: {result['error']}")]
-                return [TextContent(
-                    type="text",
-                    text=f"Proposal reverted: {result['proposal_id']}\n"
-                         f"Previous status: {result['previous_status']}"
-                )]
-
-            elif action == "acknowledge":
-                if not proposal_id:
-                    return [TextContent(type="text", text="Error: proposal_id required for acknowledge")]
-                result = acknowledge_regression(proposal_id)
-                if "error" in result:
-                    return [TextContent(type="text", text=f"Error: {result['error']}")]
-                return [TextContent(type="text", text=f"Regression acknowledged: {result['proposal_id']}")]
-
-            else:
-                return [TextContent(type="text", text=f"Unknown action: {action}")]
-
-        except Exception as e:
-            return [TextContent(type="text", text=f"Feedback loop error: {e}")]
-
-    elif name == "enki_simplify":
-        params = run_simplification(
-            files=arguments.get("files"),
-            all_modified=arguments.get("all_modified", False),
-        )
-        return [TextContent(
-            type="text",
-            text=f"Simplifier Agent Parameters:\n\n"
-                 f"Description: {params['description']}\n"
-                 f"Files: {', '.join(params.get('files', [])) or '(will detect modified files)'}\n\n"
-                 f"To spawn the Simplifier agent, use the Task tool with these parameters:\n\n"
-                 f"```json\n{json.dumps({'description': params['description'], 'prompt': params['prompt'][:500] + '...', 'subagent_type': params['subagent_type']}, indent=2)}\n```"
-        )]
-
+def _handle_validation_status(arguments: dict, remote: bool) -> list[TextContent]:
+    validating = get_tasks_needing_validation()
+    rejected = get_rejected_tasks()
+    lines = []
+    if validating:
+        lines.append("**Tasks Awaiting Validation:**")
+        for task in validating:
+            lines.append(f"- {task.id} ({task.agent})")
     else:
-        return [TextContent(type="text", text=f"Unknown tool: {name}")]
+        lines.append("No tasks awaiting validation.")
+    lines.append("")
+    if rejected:
+        lines.append("**Rejected Tasks (need retry):**")
+        for task in rejected:
+            lines.append(f"- {task.id}: {task.rejection_count}/{task.max_rejections} rejections")
+    else:
+        lines.append("No rejected tasks.")
+    return [TextContent(type="text", text="\n".join(lines))]
+
+
+def _handle_worktree_create(arguments: dict, remote: bool) -> list[TextContent]:
+    try:
+        path = create_worktree(task_id=arguments["task_id"], base_branch=arguments.get("base_branch", "main"))
+        return [TextContent(type="text", text=f"Created worktree at {path}\nBranch: enki/{arguments['task_id']}")]
+    except (ValueError, Exception) as e:
+        return [TextContent(type="text", text=f"Error: {e}")]
+
+
+def _handle_worktree_list(arguments: dict, remote: bool) -> list[TextContent]:
+    trees = list_worktrees()
+    if not trees:
+        return [TextContent(type="text", text="No worktrees found.")]
+    lines = ["Worktrees:"]
+    for t in trees:
+        marker = " (main)" if not t.task_id else ""
+        lines.append(f"- {t.path} [{t.branch}]{marker}")
+    return [TextContent(type="text", text="\n".join(lines))]
+
+
+def _handle_worktree_merge(arguments: dict, remote: bool) -> list[TextContent]:
+    success = merge_worktree(
+        task_id=arguments["task_id"],
+        target_branch=arguments.get("target_branch", "main"),
+        delete_after=arguments.get("delete_after", True),
+    )
+    if success:
+        msg = f"Merged {arguments['task_id']} into {arguments.get('target_branch', 'main')}"
+        if arguments.get("delete_after", True):
+            msg += "\nWorktree removed."
+        return [TextContent(type="text", text=msg)]
+    return [TextContent(type="text", text=f"Error: Failed to merge {arguments['task_id']}")]
+
+
+def _handle_worktree_remove(arguments: dict, remote: bool) -> list[TextContent]:
+    success = remove_worktree(task_id=arguments["task_id"], force=arguments.get("force", False))
+    if success:
+        return [TextContent(type="text", text=f"Removed worktree: {arguments['task_id']}")]
+    return [TextContent(type="text", text=f"Error: Failed to remove worktree {arguments['task_id']}")]
+
+
+def _handle_reflect(arguments: dict, remote: bool) -> list[TextContent]:
+    from .reflector import close_feedback_loop
+    project_path = Path(arguments.get("project_path", "."))
+    try:
+        report = close_feedback_loop(project_path)
+        lines = [f"## Session Reflection: {report['session_id']}"]
+        for r in report["reflections"]:
+            icon = {"worked": "✓", "failed": "✗", "pattern": "⟳", "warning": "⚠"}.get(r["category"], "?")
+            lines.append(f"- {icon} {r['description']}")
+        lines.append(f"\n**Skills stored:** {report['skills_stored']} new, {report['skills_duplicate']} duplicates")
+        return [TextContent(type="text", text="\n".join(lines))]
+    except Exception as e:
+        return [TextContent(type="text", text=f"Reflection error: {e}")]
+
+
+def _handle_feedback_loop(arguments: dict, remote: bool) -> list[TextContent]:
+    from .feedback_loop import (
+        run_feedback_cycle, get_feedback_summary,
+        apply_proposal, reject_proposal,
+        revert_proposal, acknowledge_regression,
+    )
+    action = arguments["action"]
+    proposal_id = arguments.get("proposal_id")
+    project_path = _get_project_path(arguments)
+    try:
+        if action == "run":
+            report = run_feedback_cycle(project_path)
+            if report["proposals_stored"]:
+                return [TextContent(type="text",
+                    text=f"Feedback cycle complete.\nFP patterns analyzed: {report['fp_patterns_analyzed']}\n"
+                         f"Evasion patterns analyzed: {report['evasion_patterns_analyzed']}\n"
+                         f"Proposals generated: {report['proposals_generated']}\n"
+                         f"Proposal IDs: {', '.join(report['proposals_stored'])}\n\nReview with `enki_feedback_loop status`.",
+                )]
+            return [TextContent(type="text",
+                text=f"Feedback cycle complete. System is stable.\nFP patterns analyzed: {report['fp_patterns_analyzed']}\n"
+                     f"Evasion patterns analyzed: {report['evasion_patterns_analyzed']}\nNo proposals needed.",
+            )]
+        elif action == "status":
+            return [TextContent(type="text", text=get_feedback_summary())]
+        elif action == "apply":
+            if not proposal_id:
+                return [TextContent(type="text", text="Error: proposal_id required for apply")]
+            result = apply_proposal(proposal_id)
+            if "error" in result:
+                return [TextContent(type="text", text=f"Error: {result['error']}")]
+            return [TextContent(type="text", text=f"Proposal applied: {result['proposal_id']}\n{result['change_summary']}")]
+        elif action == "reject":
+            if not proposal_id:
+                return [TextContent(type="text", text="Error: proposal_id required for reject")]
+            result = reject_proposal(proposal_id)
+            if "error" in result:
+                return [TextContent(type="text", text=f"Error: {result['error']}")]
+            return [TextContent(type="text", text=f"Proposal rejected: {result['proposal_id']}")]
+        elif action == "revert":
+            if not proposal_id:
+                return [TextContent(type="text", text="Error: proposal_id required for revert")]
+            result = revert_proposal(proposal_id)
+            if "error" in result:
+                return [TextContent(type="text", text=f"Error: {result['error']}")]
+            return [TextContent(type="text", text=f"Proposal reverted: {result['proposal_id']}\nPrevious status: {result['previous_status']}")]
+        elif action == "acknowledge":
+            if not proposal_id:
+                return [TextContent(type="text", text="Error: proposal_id required for acknowledge")]
+            result = acknowledge_regression(proposal_id)
+            if "error" in result:
+                return [TextContent(type="text", text=f"Error: {result['error']}")]
+            return [TextContent(type="text", text=f"Regression acknowledged: {result['proposal_id']}")]
+        return [TextContent(type="text", text=f"Unknown action: {action}")]
+    except Exception as e:
+        return [TextContent(type="text", text=f"Feedback loop error: {e}")]
+
+
+def _handle_simplify(arguments: dict, remote: bool) -> list[TextContent]:
+    params = run_simplification(files=arguments.get("files"), all_modified=arguments.get("all_modified", False))
+    return [TextContent(type="text",
+        text=f"Simplifier Agent Parameters:\n\nDescription: {params['description']}\n"
+             f"Files: {', '.join(params.get('files', [])) or '(will detect modified files)'}\n\n"
+             f"To spawn the Simplifier agent, use the Task tool with these parameters:\n\n"
+             f"```json\n{json.dumps({'description': params['description'], 'prompt': params['prompt'][:500] + '...', 'subagent_type': params['subagent_type']}, indent=2)}\n```",
+    )]
+
+
+# =============================================================================
+# P2-02: Dispatch map — tool name → handler
+# =============================================================================
+
+TOOL_HANDLERS: dict[str, object] = {
+    "enki_remember": _handle_remember,
+    "enki_recall": _handle_recall,
+    "enki_forget": _handle_forget,
+    "enki_star": _handle_star,
+    "enki_status": _handle_status,
+    "enki_goal": _handle_goal,
+    "enki_phase": _handle_phase,
+    "enki_debate": _handle_debate,
+    "enki_plan": _handle_plan,
+    "enki_approve": _handle_approve,
+    "enki_decompose": _handle_decompose,
+    "enki_orchestrate": _handle_orchestrate,
+    "enki_task": _handle_task,
+    "enki_bug": _handle_bug,
+    "enki_log": _handle_log,
+    "enki_maintain": _handle_maintain,
+    "enki_submit_for_validation": _handle_submit_for_validation,
+    "enki_spawn_validators": _handle_spawn_validators,
+    "enki_record_validation": _handle_record_validation,
+    "enki_retry_rejected_task": _handle_retry_rejected_task,
+    "enki_validation_status": _handle_validation_status,
+    "enki_worktree_create": _handle_worktree_create,
+    "enki_worktree_list": _handle_worktree_list,
+    "enki_worktree_merge": _handle_worktree_merge,
+    "enki_worktree_remove": _handle_worktree_remove,
+    "enki_reflect": _handle_reflect,
+    "enki_feedback_loop": _handle_feedback_loop,
+    "enki_simplify": _handle_simplify,
+}
+
+
+@server.call_tool()
+async def call_tool(name: str, arguments: dict) -> list[TextContent]:
+    """Handle tool calls via dispatch map (P2-02)."""
+
+    # P1-02: Validate project_path early — reject path traversal
+    raw_project = arguments.get("project") or arguments.get("project_path")
+    if raw_project:
+        try:
+            validated = validate_project_path(raw_project)
+            if validated:
+                arguments["project"] = str(validated)
+                if "project_path" in arguments:
+                    arguments["project_path"] = str(validated)
+        except ValueError as e:
+            return [TextContent(type="text", text=f"Error: {e}")]
+
+    # Always initialize local database — it's the fallback when remote is unreachable
+    init_db()
+    remote = is_remote_mode()
+
+    handler = TOOL_HANDLERS.get(name)
+    if handler:
+        return handler(arguments, remote)
+    return [TextContent(type="text", text=f"Unknown tool: {name}")]
 
 
 async def main():

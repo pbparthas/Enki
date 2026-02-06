@@ -5,13 +5,17 @@ Uses OS keychain (via keyring) for secure token storage,
 with SQLite fallback for headless environments.
 """
 
+import logging
 import os
+import sqlite3
 import threading
 from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
 from typing import Optional
 
 import jwt
+
+logger = logging.getLogger(__name__)
 
 from .db import get_db, init_db
 
@@ -144,8 +148,9 @@ def store_tokens(tokens: TokenPair) -> None:
             keyring.set_password("enki", "access_token", tokens.access_token)
             keyring.set_password("enki", "refresh_token", tokens.refresh_token)
             return
-        except Exception:
+        except Exception as e:
             # Fall through to SQLite storage
+            logger.warning("Non-fatal error in auth (keyring store): %s", e)
             pass
 
     # Fallback: store in SQLite (less secure but works on headless servers)
@@ -191,7 +196,8 @@ def get_stored_tokens() -> Optional[TokenPair]:
         try:
             access_token = keyring.get_password("enki", "access_token")
             refresh_token = keyring.get_password("enki", "refresh_token")
-        except Exception:
+        except Exception as e:
+            logger.warning("Non-fatal error in auth (keyring retrieve): %s", e)
             pass
 
     # Fallback to SQLite
@@ -221,7 +227,10 @@ def clear_stored_tokens() -> None:
 
     # Clear from SQLite
     conn.execute("DELETE FROM auth_tokens WHERE id = 1")
-    conn.execute("DELETE FROM auth_tokens_fallback WHERE id = 1")
+    try:
+        conn.execute("DELETE FROM auth_tokens_fallback WHERE id = 1")
+    except sqlite3.OperationalError:
+        pass  # Table may not exist if keyring was always used
     conn.commit()
 
     # Clear from keyring
@@ -229,7 +238,8 @@ def clear_stored_tokens() -> None:
         try:
             keyring.delete_password("enki", "access_token")
             keyring.delete_password("enki", "refresh_token")
-        except Exception:
+        except Exception as e:
+            logger.warning("Non-fatal error in auth (keyring clear): %s", e)
             pass
 
 

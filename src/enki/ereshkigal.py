@@ -11,8 +11,11 @@ Claude cannot reason with Ereshkigal. She doesn't understand context.
 She matches patterns and blocks. That's the point.
 """
 
+import logging
 import re
 import json
+import signal
+import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -20,6 +23,18 @@ from typing import Optional
 from dataclasses import dataclass
 
 from .db import get_db
+from .enforcement_types import EnforcementDecision
+
+logger = logging.getLogger(__name__)
+
+# P1-19: ReDoS protection — detect nested quantifiers
+_REDOS_NESTED_QUANTIFIER_RE = re.compile(
+    r'([+*])\s*\)\s*[+*?]'  # (x+)+ or (x*)*  or (x+)? etc.
+    r'|'
+    r'([+*])\s*\}\s*[+*?]'  # {n}+ style (rare but possible)
+)
+
+_REGEX_TIMEOUT_SECS = 2
 
 
 # Default patterns file location
@@ -34,6 +49,14 @@ class InterceptionResult:
     pattern: Optional[str] = None
     interception_id: Optional[str] = None
     message: Optional[str] = None
+
+    def to_decision(self) -> EnforcementDecision:
+        """Convert to shared EnforcementDecision (P2-16)."""
+        return EnforcementDecision(
+            allowed=self.allowed, source="interception",
+            category=self.category, pattern=self.pattern,
+            reason=self.message, decision_id=self.interception_id,
+        )
 
 
 # Default patterns - used to initialize patterns.json
@@ -180,6 +203,57 @@ def save_patterns(patterns: dict, patterns_file: Optional[Path] = None) -> None:
         json.dump(patterns, f, indent=2)
 
 
+def validate_pattern(pattern: str) -> None:
+    """Validate a regex pattern for correctness and ReDoS safety.
+
+    P1-19: Rejects patterns with nested quantifiers that cause
+    catastrophic backtracking.
+
+    Args:
+        pattern: Regex pattern string to validate
+
+    Raises:
+        ValueError: If pattern is invalid or has ReDoS risk
+    """
+    try:
+        re.compile(pattern)
+    except re.error as e:
+        raise ValueError(f"Invalid regex: {e}")
+
+    if _REDOS_NESTED_QUANTIFIER_RE.search(pattern):
+        raise ValueError(
+            f"Pattern rejected: nested quantifiers detected (ReDoS risk). "
+            f"Pattern: {pattern!r}"
+        )
+
+
+def _safe_regex_search(pattern: str, text: str, timeout_secs: int = _REGEX_TIMEOUT_SECS):
+    """Run re.search with timeout to prevent ReDoS.
+
+    Uses SIGALRM on main thread (Unix). Falls back to unguarded
+    search in non-main threads (e.g., MCP server).
+
+    Returns:
+        Match object or None
+    Raises:
+        TimeoutError: If regex exceeds timeout
+    """
+    if threading.current_thread() is threading.main_thread():
+        def _alarm_handler(signum, frame):
+            raise TimeoutError(f"Regex timed out after {timeout_secs}s: {pattern!r}")
+
+        old_handler = signal.signal(signal.SIGALRM, _alarm_handler)
+        signal.alarm(timeout_secs)
+        try:
+            return re.search(pattern, text, re.IGNORECASE)
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, old_handler)
+    else:
+        # Non-main thread: SIGALRM unavailable, run unguarded
+        return re.search(pattern, text, re.IGNORECASE)
+
+
 def add_pattern(
     pattern: str,
     category: str,
@@ -191,7 +265,11 @@ def add_pattern(
         pattern: Regex pattern to add
         category: Category to add to (skip_patterns, minimize_patterns, etc.)
         patterns_file: Optional path to patterns file
+
+    Raises:
+        ValueError: If pattern is invalid or has ReDoS risk
     """
+    validate_pattern(pattern)
     patterns = load_patterns(patterns_file)
 
     if category not in patterns:
@@ -325,51 +403,36 @@ def intercept(
     """
     patterns = load_patterns(patterns_file)
 
-    # Check each category
-    for category, pattern_list in patterns.items():
-        # Skip metadata keys
-        if category in {"version", "updated_at", "updated_by"}:
-            continue
+    match = _match_first_pattern(reasoning, patterns)
+    if match:
+        category, pattern = match
+        interception_id = log_attempt(
+            tool=tool,
+            reasoning=reasoning,
+            result="blocked",
+            session_id=session_id,
+            task_id=task_id,
+            phase=phase,
+            category=category,
+            pattern=pattern,
+        )
 
-        if not isinstance(pattern_list, list):
-            continue
+        message = (
+            f"BLOCKED by Ereshkigal\n"
+            f"Category: {category}\n"
+            f"Pattern: {pattern}\n"
+            f"Logged: {interception_id[:8]}\n"
+            f"\n"
+            f"Use proper flow. No exceptions.\n"
+        )
 
-        for pattern in pattern_list:
-            try:
-                if re.search(pattern, reasoning, re.IGNORECASE):
-                    # Log blocked attempt
-                    interception_id = log_attempt(
-                        tool=tool,
-                        reasoning=reasoning,
-                        result="blocked",
-                        session_id=session_id,
-                        task_id=task_id,
-                        phase=phase,
-                        category=category,
-                        pattern=pattern,
-                    )
-
-                    # Block with no appeal
-                    message = (
-                        f"BLOCKED by Ereshkigal\n"
-                        f"Category: {category}\n"
-                        f"Pattern: {pattern}\n"
-                        f"Logged: {interception_id[:8]}\n"
-                        f"\n"
-                        f"Use proper flow. No exceptions.\n"
-                    )
-
-                    return InterceptionResult(
-                        allowed=False,
-                        category=category,
-                        pattern=pattern,
-                        interception_id=interception_id,
-                        message=message,
-                    )
-
-            except re.error:
-                # Invalid regex pattern - skip it
-                continue
+        return InterceptionResult(
+            allowed=False,
+            category=category,
+            pattern=pattern,
+            interception_id=interception_id,
+            message=message,
+        )
 
     # No match - log allowed and permit
     interception_id = log_attempt(
@@ -385,6 +448,46 @@ def intercept(
         allowed=True,
         interception_id=interception_id,
     )
+
+
+def _match_first_pattern(
+    reasoning: str,
+    patterns: dict,
+) -> Optional[tuple[str, str]]:
+    """Shared pattern matching loop for intercept/would_block.
+
+    Iterates all pattern categories, returns first match.
+    Fail-closed: malformed regex or timeout = match.
+
+    Args:
+        reasoning: Text to check against patterns
+        patterns: Loaded patterns dict
+
+    Returns:
+        (category, pattern) if matched, None if no match
+    """
+    for category, pattern_list in patterns.items():
+        if category in {"version", "updated_at", "updated_by"}:
+            continue
+        if not isinstance(pattern_list, list):
+            continue
+        for pattern in pattern_list:
+            try:
+                if _safe_regex_search(pattern, reasoning):
+                    return (category, pattern)
+            except TimeoutError:
+                logger.error(
+                    "Ereshkigal: regex timeout in '%s': %r — fail closed",
+                    category, pattern
+                )
+                return (category, pattern)
+            except re.error as e:
+                logger.error(
+                    "Ereshkigal: malformed pattern in '%s': %r — %s",
+                    category, pattern, e
+                )
+                return (category, pattern)
+    return None
 
 
 def would_block(
@@ -403,22 +506,7 @@ def would_block(
         Tuple of (category, pattern) if would be blocked, None if allowed
     """
     patterns = load_patterns(patterns_file)
-
-    for category, pattern_list in patterns.items():
-        if category in {"version", "updated_at", "updated_by"}:
-            continue
-
-        if not isinstance(pattern_list, list):
-            continue
-
-        for pattern in pattern_list:
-            try:
-                if re.search(pattern, reasoning, re.IGNORECASE):
-                    return (category, pattern)
-            except re.error:
-                continue
-
-    return None
+    return _match_first_pattern(reasoning, patterns)
 
 
 def mark_false_positive(
@@ -446,7 +534,8 @@ def mark_false_positive(
         """, (outcome_note, interception_id))
         db.commit()
         return db.total_changes > 0
-    except Exception:
+    except Exception as e:
+        logger.warning("Non-fatal error in ereshkigal (mark_false_positive): %s", e)
         return False
 
 
@@ -475,7 +564,8 @@ def mark_legitimate(
         """, (outcome_note, interception_id))
         db.commit()
         return db.total_changes > 0
-    except Exception:
+    except Exception as e:
+        logger.warning("Non-fatal error in ereshkigal (mark_legitimate): %s", e)
         return False
 
 

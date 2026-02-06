@@ -82,23 +82,28 @@ def create_bead(
 
     db = get_db()
 
-    # Insert bead
-    db.execute(
-        """
-        INSERT INTO beads (id, content, type, summary, project, context, tags, starred)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (bead_id, content, bead_type, summary, project, context, tags_json, int(starred)),
-    )
+    # P1-09: Wrap bead + embedding insert in explicit transaction
+    try:
+        db.execute("BEGIN")
+        db.execute(
+            """
+            INSERT INTO beads (id, content, type, summary, project, context, tags, starred)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (bead_id, content, bead_type, summary, project, context, tags_json, int(starred)),
+        )
 
-    # Generate and store embedding
-    vector = embed(content)
-    db.execute(
-        "INSERT INTO embeddings (bead_id, vector) VALUES (?, ?)",
-        (bead_id, vector_to_blob(vector)),
-    )
+        # Generate and store embedding
+        vector = embed(content)
+        db.execute(
+            "INSERT INTO embeddings (bead_id, vector) VALUES (?, ?)",
+            (bead_id, vector_to_blob(vector)),
+        )
 
-    db.commit()
+        db.execute("COMMIT")
+    except Exception:
+        db.execute("ROLLBACK")
+        raise
 
     # Fetch and return
     return get_bead(bead_id)
@@ -240,6 +245,29 @@ def supersede_bead(old_id: str, new_id: str) -> Optional[Bead]:
         Updated old Bead if found, None otherwise
     """
     return update_bead(old_id, superseded_by=new_id)
+
+
+def get_bead_stats() -> dict:
+    """Get bead statistics (P2-11: service function replaces raw SQL in CLI).
+
+    Returns:
+        {"total": int, "active": int, "starred": int, "by_type": dict[str, int]}
+    """
+    db = get_db()
+    total = db.execute("SELECT COUNT(*) as count FROM beads").fetchone()["count"]
+    active = db.execute(
+        "SELECT COUNT(*) as count FROM beads WHERE superseded_by IS NULL"
+    ).fetchone()["count"]
+    starred = db.execute(
+        "SELECT COUNT(*) as count FROM beads WHERE starred = 1"
+    ).fetchone()["count"]
+    by_type = {
+        row["type"]: row["count"]
+        for row in db.execute(
+            "SELECT type, COUNT(*) as count FROM beads WHERE superseded_by IS NULL GROUP BY type"
+        ).fetchall()
+    }
+    return {"total": total, "active": active, "starred": starred, "by_type": by_type}
 
 
 def log_access(bead_id: str, session_id: Optional[str] = None, was_useful: Optional[bool] = None) -> None:

@@ -1,7 +1,10 @@
 """Hybrid search (FTS5 + semantic)."""
 
+import logging
 from typing import Optional
 from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
 
 from .db import get_db
 from .beads import Bead, log_access
@@ -59,9 +62,12 @@ def search(
             "weight": weight,
         }
 
-    # 2. Semantic search
+    # 2. Semantic search (scan up to 10x the requested limit for candidates)
     query_vector = embed(query)
-    semantic_results = _semantic_search(db, query_vector, project, bead_type)
+    semantic_results = _semantic_search(
+        db, query_vector, project, bead_type,
+        limit=max(limit * 10, 100),
+    )
     for row, similarity in semantic_results:
         weight = calculate_weight(dict(row))
         if weight < min_weight:
@@ -130,20 +136,37 @@ def _keyword_search(db, query: str, project: Optional[str], bead_type: Optional[
     try:
         rows = db.execute(sql, params).fetchall()
         return [(row, row["fts_score"]) for row in rows]
-    except Exception:
+    except Exception as e:
         # FTS query failed, return empty
+        logger.warning("Non-fatal error in search (FTS query): %s", e)
         return []
 
 
-def _semantic_search(db, query_vector, project: Optional[str], bead_type: Optional[str]) -> list:
-    """Perform semantic similarity search."""
+def _semantic_search(
+    db, query_vector, project: Optional[str], bead_type: Optional[str],
+    limit: int = 100, offset: int = 0, min_similarity: float = 0.3,
+) -> list:
+    """Perform semantic similarity search.
+
+    Args:
+        db: Database connection
+        query_vector: Query embedding vector
+        project: Optional project filter
+        bead_type: Optional type filter
+        limit: Maximum number of candidate rows to scan from DB (default 100)
+        offset: Number of candidate rows to skip in DB (default 0)
+        min_similarity: Minimum cosine similarity threshold (default 0.3)
+
+    Returns:
+        List of (row, similarity) tuples above the threshold
+    """
     sql = """
         SELECT b.*, e.vector
         FROM beads b
         JOIN embeddings e ON b.id = e.bead_id
         WHERE b.superseded_by IS NULL
     """
-    params = []
+    params: list = []
 
     if project:
         sql += " AND (b.project = ? OR b.project IS NULL)"
@@ -153,13 +176,16 @@ def _semantic_search(db, query_vector, project: Optional[str], bead_type: Option
         sql += " AND b.type = ?"
         params.append(bead_type)
 
+    sql += " LIMIT ? OFFSET ?"
+    params.extend([limit, offset])
+
     rows = db.execute(sql, params).fetchall()
 
     results = []
     for row in rows:
         vector = blob_to_vector(row["vector"])
         similarity = cosine_similarity(query_vector, vector)
-        if similarity > 0.3:  # Minimum similarity threshold
+        if similarity > min_similarity:
             results.append((row, similarity))
 
     return results
@@ -205,8 +231,11 @@ def search_similar(bead_id: str, limit: int = 5) -> list[SearchResult]:
 
     source_vector = blob_to_vector(row["vector"])
 
-    # Find similar beads
-    results = _semantic_search(db, source_vector, project=None, bead_type=None)
+    # Find similar beads (scan up to 10x the requested limit for candidates)
+    results = _semantic_search(
+        db, source_vector, project=None, bead_type=None,
+        limit=max(limit * 10, 100),
+    )
 
     # Filter out the source bead and build results
     output = []

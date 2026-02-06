@@ -1,9 +1,12 @@
 """Hook response generation for Claude Code integration."""
 
 import json
+import logging
 from pathlib import Path
 from typing import Optional, Any
 from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
 
 from .session import (
     get_phase, get_tier, set_tier, get_session_edits, add_session_edit,
@@ -162,7 +165,8 @@ def handle_session_start(
     try:
         context["enki_greeting"] = get_enki_greeting(project_path)
         context["enki_context"] = build_session_start_injection(project_path)
-    except Exception:
+    except Exception as e:
+        logger.warning("Non-fatal error in hooks (session_start greeting): %s", e)
         context["enki_greeting"] = "What shall we work on?"
         context["enki_context"] = ""
 
@@ -170,7 +174,8 @@ def handle_session_start(
     try:
         from .evolution import migrate_per_project_evolution
         migrate_per_project_evolution(project_path or Path.cwd())
-    except Exception:
+    except Exception as e:
+        logger.warning("Non-fatal error in hooks (evolution migration): %s", e)
         pass
 
     # Load evolution context (local + global merged)
@@ -179,7 +184,8 @@ def handle_session_start(
         evo_context = get_evolution_context_for_session(project_path or Path.cwd())
         if evo_context:
             context["evolution_context"] = evo_context
-    except Exception:
+    except Exception as e:
+        logger.warning("Non-fatal error in hooks (evolution context): %s", e)
         pass
 
     # Surface feedback loop alerts
@@ -188,7 +194,8 @@ def handle_session_start(
         alerts = get_session_start_alerts()
         if alerts:
             context["feedback_alerts"] = alerts
-    except Exception:
+    except Exception as e:
+        logger.warning("Non-fatal error in hooks (feedback alerts): %s", e)
         pass
 
     # Search for relevant beads if goal provided
@@ -203,8 +210,9 @@ def handle_session_start(
                 }
                 for r in results
             ]
-        except Exception:
+        except Exception as e:
             # Search might fail if embeddings not loaded
+            logger.warning("Non-fatal error in hooks (bead search): %s", e)
             pass
 
     return context

@@ -1,6 +1,7 @@
 # Enki Lightweight Server Dockerfile
 # No ML dependencies - clients compute embeddings
-FROM python:3.11-slim
+# P3-21: Pin base image to specific version for reproducibility
+FROM python:3.11.11-slim-bookworm
 
 WORKDIR /app
 
@@ -29,6 +30,10 @@ RUN mkdir -p /data
 ENV ENKI_DB_PATH=/data/wisdom.db
 ENV PYTHONPATH=/app/src
 ENV PYTHONUNBUFFERED=1
+
+# P1-16: Run as non-root user
+RUN useradd -m enki && chown -R enki:enki /data
+USER enki
 
 # Expose port
 EXPOSE 8002

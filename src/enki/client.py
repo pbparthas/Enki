@@ -11,12 +11,15 @@ locally and sent to the server.
 """
 
 import json
+import logging
 import os
 import threading
 import time
 from typing import Optional
 import urllib.request
 import urllib.error
+
+logger = logging.getLogger(__name__)
 
 from .offline import (
     ConnectionState,
@@ -87,6 +90,31 @@ def compute_embedding(text: str) -> list[float]:
     return embedding.tolist()
 
 
+def compute_embedding_async(text: str):
+    """Compute embedding in a thread pool to avoid blocking async loops (P3-10).
+
+    Returns:
+        Awaitable that resolves to list[float]
+    """
+    import asyncio
+    return asyncio.to_thread(compute_embedding, text)
+
+
+def preload_embedding_model() -> None:
+    """Background preload of embedding model to avoid cold start (P3-17).
+
+    Call early in session to warm the model cache. Safe to call multiple times.
+    """
+    def _load():
+        try:
+            get_embedding_model()
+        except Exception:
+            pass  # Non-fatal — will retry on first use
+
+    t = threading.Thread(target=_load, daemon=True)
+    t.start()
+
+
 # --- Connectivity ---
 
 def _check_connectivity(timeout: float = 5.0) -> bool:
@@ -106,7 +134,8 @@ def _check_connectivity(timeout: float = 5.0) -> bool:
         req = urllib.request.Request(url, method="GET")
         with urllib.request.urlopen(req, timeout=timeout) as response:
             return response.status == 200
-    except Exception:
+    except Exception as e:
+        logger.warning("Non-fatal error in client (connectivity check): %s", e)
         return False
 
 
@@ -203,7 +232,8 @@ def _refresh_tokens() -> Optional[str]:
                 store_tokens(new_tokens)
                 return new_tokens.access_token
 
-        except Exception:
+        except Exception as e:
+            logger.warning("Non-fatal error in client (token refresh): %s", e)
             return None
 
 
@@ -244,7 +274,8 @@ def login(api_key: Optional[str] = None) -> bool:
             _handle_online()
             return True
 
-    except Exception:
+    except Exception as e:
+        logger.warning("Non-fatal error in client (login): %s", e)
         return False
 
 
@@ -585,7 +616,8 @@ def _sync_pending_operations() -> dict:
             mark_operation_complete(op.id)
             synced += 1
 
-        except Exception:
+        except Exception as e:
+            logger.warning("Non-fatal error in client (sync operation %s): %s", op.operation, e)
             mark_operation_failed(op.id)
             failed += 1
 

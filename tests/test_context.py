@@ -4,7 +4,7 @@ import pytest
 from pathlib import Path
 import json
 
-from src.enki.context import (
+from enki.context import (
     ContextTier,
     LoadedContext,
     detect_tier,
@@ -77,8 +77,8 @@ def test_detect_tier_plan_phase(tmp_path):
 def test_detect_tier_implement_phase(enki_project):
     """Test tier detection for implement phase."""
     tier = detect_tier(enki_project)
-    # With implement phase and no large task graph, should be STANDARD
-    assert tier in [ContextTier.STANDARD, ContextTier.FULL]
+    # With implement phase and no STATE.md or SCOPE, should be STANDARD
+    assert tier == ContextTier.STANDARD
 
 
 def test_detect_tier_with_many_tasks(tmp_path):
@@ -121,8 +121,8 @@ def test_load_context_auto(enki_project):
     """Test auto tier detection and loading."""
     context = load_context(tier=ContextTier.AUTO, project_path=enki_project)
 
-    # Should detect and use appropriate tier
-    assert context.tier in [ContextTier.MINIMAL, ContextTier.STANDARD, ContextTier.FULL]
+    # Auto with implement phase and no STATE.md/SCOPE resolves to STANDARD
+    assert context.tier == ContextTier.STANDARD
     assert context.phase == "implement"
 
 

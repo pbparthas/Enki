@@ -1,21 +1,27 @@
 """Embedding operations using sentence-transformers."""
 
+import threading
+
 import numpy as np
 from typing import Optional
 from functools import lru_cache
 
 # Lazy load to avoid import time penalty
 _model = None
+_model_lock = threading.Lock()  # P2-18: Thread-safe model initialization
 MODEL_NAME = "all-MiniLM-L6-v2"
 EMBEDDING_DIM = 384
 
 
 def _get_model():
-    """Lazy load the sentence transformer model."""
+    """Lazy load the sentence transformer model (thread-safe)."""
     global _model
     if _model is None:
-        from sentence_transformers import SentenceTransformer
-        _model = SentenceTransformer(MODEL_NAME)
+        with _model_lock:
+            # Double-check after acquiring lock
+            if _model is None:
+                from sentence_transformers import SentenceTransformer
+                _model = SentenceTransformer(MODEL_NAME)
     return _model
 
 

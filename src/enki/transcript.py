@@ -183,7 +183,7 @@ def extract_modified_files(tool_uses: list[dict]) -> list[str]:
             if path and path not in seen:
                 seen.add(path)
                 # Shorten home paths
-                short = path.replace("/home/partha/", "~/")
+                short = path.replace(str(Path.home()) + "/", "~/")
                 files.append(short)
     return files[:MAX_FILES]
 

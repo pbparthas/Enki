@@ -5,9 +5,10 @@ from typing import Union
 
 from .beads import Bead
 from .db import get_db
+from .path_utils import normalize_timestamp
 
 
-def calculate_weight(bead: Union[Bead, dict]) -> float:
+def calculate_weight(bead: Union[Bead, dict], access_counts: dict[str, int] = None) -> float:
     """Calculate bead weight based on age and access patterns.
 
     Args:
@@ -24,7 +25,7 @@ def calculate_weight(bead: Union[Bead, dict]) -> float:
         last_accessed = bead.last_accessed
         bead_id = bead.id
     else:
-        starred = bool(bead.get("starred") or bead.get("starred") == 1)
+        starred = bead.get("starred") in (1, True, "1")
         superseded_by = bead.get("superseded_by")
         created_at = bead.get("created_at")
         last_accessed = bead.get("last_accessed")
@@ -38,25 +39,9 @@ def calculate_weight(bead: Union[Bead, dict]) -> float:
     if superseded_by:
         return 0.0
 
-    # Calculate age in days
+    # Calculate age in days (P3-08: shared timestamp normalization)
     now = datetime.now(timezone.utc)
-
-    if isinstance(created_at, str):
-        # Parse SQLite timestamp string
-        try:
-            created_at = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
-        except ValueError:
-            created_at = datetime.strptime(created_at, "%Y-%m-%d %H:%M:%S")
-            created_at = created_at.replace(tzinfo=timezone.utc)
-    elif isinstance(created_at, (int, float)):
-        # Handle Unix timestamp
-        created_at = datetime.fromtimestamp(created_at, tz=timezone.utc)
-
-    if created_at is None:
-        created_at = now
-    elif hasattr(created_at, 'tzinfo') and created_at.tzinfo is None:
-        created_at = created_at.replace(tzinfo=timezone.utc)
-
+    created_at = normalize_timestamp(created_at, default=now)
     age_days = (now - created_at).days
 
     # Base weight by age tier
@@ -71,19 +56,7 @@ def calculate_weight(bead: Union[Bead, dict]) -> float:
 
     # Boost for recent access
     if last_accessed:
-        if isinstance(last_accessed, str):
-            try:
-                last_accessed = datetime.fromisoformat(last_accessed.replace("Z", "+00:00"))
-            except ValueError:
-                last_accessed = datetime.strptime(last_accessed, "%Y-%m-%d %H:%M:%S")
-                last_accessed = last_accessed.replace(tzinfo=timezone.utc)
-        elif isinstance(last_accessed, (int, float)):
-            # Handle Unix timestamp
-            last_accessed = datetime.fromtimestamp(last_accessed, tz=timezone.utc)
-
-        if hasattr(last_accessed, 'tzinfo') and last_accessed.tzinfo is None:
-            last_accessed = last_accessed.replace(tzinfo=timezone.utc)
-
+        last_accessed = normalize_timestamp(last_accessed)
         days_since_access = (now - last_accessed).days
 
         if days_since_access < 7:
@@ -93,7 +66,10 @@ def calculate_weight(bead: Union[Bead, dict]) -> float:
 
     # Boost for frequent access (last 90 days)
     if bead_id:
-        access_count = count_accesses(bead_id, days=90)
+        if access_counts is not None:
+            access_count = access_counts.get(bead_id, 0)
+        else:
+            access_count = count_accesses(bead_id, days=90)
         if access_count > 10:
             base = min(base * 1.3, 1.0)
         elif access_count > 5:
@@ -125,6 +101,43 @@ def count_accesses(bead_id: str, days: int = 90) -> int:
     return row["count"] if row else 0
 
 
+def _batch_access_counts(bead_ids: list[str], days: int = 90) -> dict[str, int]:
+    """Batch fetch access counts for multiple beads (P3-26: avoid N+1 queries).
+
+    Args:
+        bead_ids: List of bead IDs to count
+        days: Number of days to look back
+
+    Returns:
+        Dict mapping bead_id -> access_count
+    """
+    if not bead_ids:
+        return {}
+
+    db = get_db()
+    # SQLite doesn't support parameterized IN with arbitrary length,
+    # so we batch in chunks of 500
+    counts: dict[str, int] = {}
+    chunk_size = 500
+
+    for i in range(0, len(bead_ids), chunk_size):
+        chunk = bead_ids[i:i + chunk_size]
+        placeholders = ",".join("?" * len(chunk))
+        rows = db.execute(
+            f"""
+            SELECT bead_id, COUNT(*) as count FROM access_log
+            WHERE bead_id IN ({placeholders})
+            AND accessed_at > datetime('now', ?)
+            GROUP BY bead_id
+            """,
+            (*chunk, f"-{days} days"),
+        ).fetchall()
+        for row in rows:
+            counts[row["bead_id"]] = row["count"]
+
+    return counts
+
+
 def update_all_weights() -> int:
     """Recalculate weights for all active beads.
 
@@ -137,9 +150,13 @@ def update_all_weights() -> int:
         "SELECT * FROM beads WHERE superseded_by IS NULL"
     ).fetchall()
 
+    # P3-26: Batch fetch access counts instead of N+1 queries
+    bead_ids = [row["id"] for row in rows if row["id"]]
+    access_counts = _batch_access_counts(bead_ids)
+
     updated = 0
     for row in rows:
-        new_weight = calculate_weight(dict(row))
+        new_weight = calculate_weight(dict(row), access_counts=access_counts)
         if abs(new_weight - row["weight"]) > 0.01:  # Only update if changed
             db.execute(
                 "UPDATE beads SET weight = ? WHERE id = ?",

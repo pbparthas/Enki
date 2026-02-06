@@ -7,10 +7,13 @@ Analyzes existing project documentation to bootstrap Enki's knowledge:
 - Any existing docs/ folder
 """
 
+import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 from .db import init_db
 from .beads import create_bead
@@ -123,7 +126,8 @@ def _extract_from_file(
 
     try:
         content = file_path.read_text(encoding="utf-8")
-    except Exception:
+    except Exception as e:
+        logger.warning("Non-fatal error in onboarding (read file %s): %s", file_path, e)
         return extracted
 
     relative_path = str(file_path.relative_to(project_path))
@@ -297,7 +301,8 @@ def _extract_from_code_comments(project_path: Path) -> list[ExtractedKnowledge]:
                                 confidence=0.6,
                             ))
 
-            except Exception:
+            except Exception as e:
+                logger.warning("Non-fatal error in onboarding (code comment extraction): %s", e)
                 continue
 
     return extracted

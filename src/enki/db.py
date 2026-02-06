@@ -283,6 +283,8 @@ def get_db(db_path: Optional[Path] = None) -> sqlite3.Connection:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
         conn.execute("PRAGMA journal_mode = WAL")
+        # P2-15: Prevent "database is locked" across processes
+        conn.execute("PRAGMA busy_timeout = 5000")
         _local.connections[path_str] = conn
 
     return _local.connections[path_str]
@@ -310,3 +312,14 @@ def close_db() -> None:
         for conn in _local.connections.values():
             conn.close()
         _local.connections = {}
+
+
+def reset_connection() -> None:
+    """Reset thread-local connections for test teardown (P3-09).
+
+    Call in test fixtures to ensure clean state between tests.
+    Closes existing connections and clears the thread-local cache.
+    """
+    close_db()
+    if hasattr(_local, 'connections'):
+        del _local.connections

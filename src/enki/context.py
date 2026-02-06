@@ -6,11 +6,14 @@ Load different amounts of context based on session needs:
 - FULL: Complex features, debugging
 """
 
+import logging
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Optional
 import json
+
+logger = logging.getLogger(__name__)
 
 
 class ContextTier(Enum):
@@ -261,7 +264,8 @@ def load_context(
                         "score": result.score,
                     })
                     context.token_estimate += bead_tokens
-        except Exception:
+        except Exception as e:
+            logger.warning("Non-fatal error in context (bead loading): %s", e)
             pass  # Beads are optional
 
     return context

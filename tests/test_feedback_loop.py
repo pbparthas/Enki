@@ -44,10 +44,15 @@ def test_db(tmp_path):
 
 
 def _insert_interception(db, **kwargs):
-    """Insert a test interception record."""
+    """Insert a test interception record.
+
+    Pass timestamp= to set a specific timestamp (e.g. for P2-14 24h cooldown tests).
+    Default: 2 days ago (so was_legitimate counts are not filtered by the 24h cooldown).
+    """
     defaults = {
         "id": f"int_{datetime.now().timestamp()}_{id(kwargs)}",
         "session_id": "test-session",
+        "timestamp": (datetime.now() - timedelta(days=2)).isoformat(),
         "tool": "Edit",
         "reasoning": "test reasoning",
         "category": "test_category",
@@ -57,8 +62,8 @@ def _insert_interception(db, **kwargs):
     }
     defaults.update(kwargs)
     db.execute("""
-        INSERT INTO interceptions (id, session_id, tool, reasoning, category, pattern, result, was_legitimate)
-        VALUES (:id, :session_id, :tool, :reasoning, :category, :pattern, :result, :was_legitimate)
+        INSERT INTO interceptions (id, session_id, timestamp, tool, reasoning, category, pattern, result, was_legitimate)
+        VALUES (:id, :session_id, :timestamp, :tool, :reasoning, :category, :pattern, :result, :was_legitimate)
     """, defaults)
     db.commit()
 
@@ -241,8 +246,8 @@ class TestGenerateProposals:
         proposals = generate_proposals()
         assert len(proposals) <= MAX_PROPOSALS_PER_CYCLE
 
-    def test_fp_rate_generates_pattern_remove(self, test_db):
-        """High FP rate generates a pattern_remove proposal."""
+    def test_fp_rate_generates_pattern_refine(self, test_db):
+        """High FP rate generates a pattern_refine proposal (not remove)."""
         for i in range(6):
             _insert_interception(
                 test_db,
@@ -253,7 +258,7 @@ class TestGenerateProposals:
             )
         proposals = generate_proposals()
         assert len(proposals) == 1
-        assert proposals[0]["proposal_type"] == "pattern_remove"
+        assert proposals[0]["proposal_type"] == "pattern_refine"
 
 
 # =============================================================================
@@ -502,11 +507,36 @@ class TestNeverLoosen:
                 was_legitimate=1,  # 100% FP
             )
         proposals = generate_proposals()
-        # Should not propose removing from certainty_patterns
-        pattern_removes = [p for p in proposals
-                          if p["proposal_type"] == "pattern_remove"
-                          and p["target"] == "certainty_patterns"]
-        assert len(pattern_removes) == 0
+        # Should not propose any changes to certainty_patterns
+        certainty_proposals = [p for p in proposals
+                              if p["target"] == "certainty_patterns"]
+        assert len(certainty_proposals) == 0
+
+    def test_min_pattern_floor_blocks_removal(self, test_db):
+        """Cannot propose removal when category is at minimum pattern floor."""
+        # Category with exactly MIN_PATTERNS_PER_CATEGORY patterns
+        from enki.feedback_loop import MIN_PATTERNS_PER_CATEGORY
+
+        for i in range(6):
+            _insert_interception(
+                test_db,
+                id=f"floor_{i}",
+                pattern="floor_pattern",
+                category="skip_patterns",
+                was_legitimate=1 if i < 4 else 0,  # 67% FP
+            )
+
+        # Mock load_patterns to return exactly MIN_PATTERNS_PER_CATEGORY patterns
+        with patch("enki.feedback_loop.load_patterns", return_value={
+            "skip_patterns": [f"pat_{i}" for i in range(MIN_PATTERNS_PER_CATEGORY)],
+        }):
+            proposals = generate_proposals()
+
+        # Should propose refine, never remove
+        assert len(proposals) >= 1
+        assert all(p["proposal_type"] == "pattern_refine" for p in proposals)
+        # Evidence should include the floor info
+        assert proposals[0]["evidence"].get("category_count") == MIN_PATTERNS_PER_CATEGORY
 
 
 # =============================================================================

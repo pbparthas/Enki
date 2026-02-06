@@ -17,11 +17,14 @@ The SkillManager distills reflections into atomic, reusable beads
 and deduplicates against existing knowledge.
 """
 
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 import json
+
+logger = logging.getLogger(__name__)
 
 from .db import get_db
 from .beads import create_bead, Bead
@@ -121,8 +124,8 @@ def gather_execution_trace(project_path: Path = None) -> ExecutionTrace:
             (session.session_id,),
         ).fetchall()
         trace.violations = [dict(v) for v in violations]
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("Non-fatal error in reflector: %s", e)
 
     # Get escalations for this session
     try:
@@ -136,8 +139,8 @@ def gather_execution_trace(project_path: Path = None) -> ExecutionTrace:
         if escalations:
             trace.tier_start = escalations[0]["initial_tier"]
             trace.tier_end = escalations[-1]["final_tier"]
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("Non-fatal error in reflector: %s", e)
 
     # Get interceptions for this session
     try:
@@ -146,8 +149,8 @@ def gather_execution_trace(project_path: Path = None) -> ExecutionTrace:
             (session.session_id,),
         ).fetchall()
         trace.interceptions = [dict(i) for i in interceptions]
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("Non-fatal error in reflector: %s", e)
 
     # Get beads that were accessed during this session
     try:
@@ -162,16 +165,16 @@ def gather_execution_trace(project_path: Path = None) -> ExecutionTrace:
             (session.session_id,),
         ).fetchall()
         trace.beads_accessed = [dict(a) for a in accessed]
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("Non-fatal error in reflector: %s", e)
 
     # Read RUNNING.md for activity log
     running_path = project_path / ".enki" / "RUNNING.md"
     if running_path.exists():
         try:
             trace.running_log = running_path.read_text()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Non-fatal error in reflector: %s", e)
 
     return trace
 
@@ -534,9 +537,9 @@ def distill_reflections(
                     skill.is_duplicate = True
                     skill.duplicate_of = result.bead.id
                     break
-        except Exception:
+        except Exception as e:
             # Search failed — store anyway, better to have duplicates than lose knowledge
-            pass
+            logger.warning("Non-fatal error in reflector: %s", e)
 
         skills.append(skill)
 
@@ -609,8 +612,8 @@ def store_skills(
                 tags=skill.tags,
             )
             stored_ids.append(bead.id)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Non-fatal error in reflector: %s", e)
 
     return stored_ids
 
@@ -719,8 +722,8 @@ def analyze_cross_session_patterns(
                 actionable=True,
                 suggested_bead_type="pattern",
             ))
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("Non-fatal error in reflector: %s", e)
 
     # Find sessions with high violation counts (problematic sessions)
     try:
@@ -747,8 +750,8 @@ def analyze_cross_session_patterns(
                 actionable=True,
                 suggested_bead_type="pattern",
             ))
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("Non-fatal error in reflector: %s", e)
 
     # Check for Ereshkigal effectiveness
     try:
@@ -791,8 +794,8 @@ def analyze_cross_session_patterns(
                     actionable=True,
                     suggested_bead_type="learning",
                 ))
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("Non-fatal error in reflector: %s", e)
 
     return reflections
 

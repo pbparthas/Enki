@@ -1,0 +1,15 @@
+# P1-17: Prevent sensitive files from being sent to Docker daemon
+.mcp.json
+.enki/
+.venv/
+*.zip
+__pycache__/
+.git/
+node_modules/
+*.pyc
+.env
+.envrc
+tests/
+docs/
+*.md
+!README.md

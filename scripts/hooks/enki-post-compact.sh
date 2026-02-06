@@ -1,4 +1,5 @@
 #!/bin/bash
+set -euo pipefail
 # Enki Post-Compact Hook
 # Called after context compaction in Claude Code
 #
@@ -10,9 +11,9 @@
 # Read input from stdin
 INPUT=$(cat)
 
-CWD=$(echo "$INPUT" | jq -r '.cwd // "."')
+CWD=$(echo "${INPUT}" | jq -r '.cwd // "."')
 
-ENKI_DIR="$CWD/.enki"
+ENKI_DIR="${CWD}/.enki"
 
 # =============================================================================
 # PERSONA IDENTITY (Always output first — non-negotiable)
@@ -40,7 +41,7 @@ PERSONA
 # SESSION STATE
 # =============================================================================
 
-if [[ ! -d "$ENKI_DIR" ]]; then
+if [[ ! -d "${ENKI_DIR}" ]]; then
     echo "## Session State"
     echo ""
     echo "No .enki/ directory found. Starting fresh."
@@ -61,15 +62,14 @@ fi
 # DIGEST INJECTION (primary path)
 # =============================================================================
 
-DIGEST_FILE="$ENKI_DIR/.compact-digest"
+DIGEST_FILE="${ENKI_DIR}/.compact-digest"
 
-if [[ -f "$DIGEST_FILE" ]] && [[ -s "$DIGEST_FILE" ]]; then
+if [[ -f "${DIGEST_FILE}" ]] && [[ -s "${DIGEST_FILE}" ]]; then
     echo "## Context Restored (Post-Compaction)"
     echo ""
 
     # Output the digest as-is — it was built mechanically by transcript.py
-    # Do not summarize, filter, or reinterpret the digest contents.
-    cat "$DIGEST_FILE"
+    cat "${DIGEST_FILE}"
     echo ""
 
 else
@@ -82,23 +82,23 @@ else
     echo "*No transcript digest available. Showing .enki/ state only.*"
     echo ""
 
-    PHASE=$(cat "$ENKI_DIR/PHASE" 2>/dev/null || echo 'intake')
-    GOAL=$(cat "$ENKI_DIR/GOAL" 2>/dev/null || echo '')
-    TIER=$(cat "$ENKI_DIR/TIER" 2>/dev/null || echo 'unknown')
+    PHASE=$(cat "${ENKI_DIR}/PHASE" 2>/dev/null || echo 'intake')
+    GOAL=$(cat "${ENKI_DIR}/GOAL" 2>/dev/null || echo '')
+    TIER=$(cat "${ENKI_DIR}/TIER" 2>/dev/null || echo 'unknown')
 
-    echo "**Phase**: $PHASE | **Tier**: $TIER"
-    if [[ -n "$GOAL" ]]; then
-        echo "**Goal**: $GOAL"
+    echo "**Phase**: ${PHASE} | **Tier**: ${TIER}"
+    if [[ -n "${GOAL}" ]]; then
+        echo "**Goal**: ${GOAL}"
     else
         echo "**Goal**: (not set)"
     fi
     echo ""
 
     # Recent activity
-    if [[ -f "$ENKI_DIR/RUNNING.md" ]]; then
+    if [[ -f "${ENKI_DIR}/RUNNING.md" ]]; then
         echo "### Recent Activity"
         echo '```'
-        tail -10 "$ENKI_DIR/RUNNING.md" 2>/dev/null | grep -v "^$" | head -8
+        tail -10 "${ENKI_DIR}/RUNNING.md" 2>/dev/null | grep -v "^$" | head -8
         echo '```'
         echo ""
     fi

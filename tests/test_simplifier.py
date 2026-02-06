@@ -4,7 +4,7 @@ import pytest
 from pathlib import Path
 import subprocess
 
-from src.enki.simplifier import (
+from enki.simplifier import (
     SimplificationResult,
     generate_simplifier_prompt,
     run_simplification,
@@ -16,7 +16,7 @@ from src.enki.simplifier import (
 
 def test_simplifier_in_agents():
     """Test Simplifier is in AGENTS dict."""
-    from src.enki.orchestrator import AGENTS
+    from enki.orchestrator import AGENTS
 
     assert "Simplifier" in AGENTS
     assert AGENTS["Simplifier"]["tier"] == "STANDARD"

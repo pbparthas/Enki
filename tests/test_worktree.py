@@ -6,7 +6,7 @@ import subprocess
 import tempfile
 import os
 
-from src.enki.worktree import (
+from enki.worktree import (
     create_worktree,
     list_worktrees,
     remove_worktree,
@@ -18,6 +18,8 @@ from src.enki.worktree import (
     get_worktree,
     copy_worktree_config,
     get_worktree_state,
+    validate_task_id,
+    validate_command,
 )
 
 
@@ -247,3 +249,91 @@ def test_is_in_worktree(git_repo):
 
     # Cleanup
     remove_worktree("task-012", force=True, project_path=git_repo)
+
+
+# =============================================================================
+# P0-12: Task ID validation (path traversal prevention)
+# =============================================================================
+
+class TestValidateTaskId:
+    def test_valid_task_ids(self):
+        """Valid task IDs are accepted."""
+        assert validate_task_id("task-001") == "task-001"
+        assert validate_task_id("my_task_123") == "my_task_123"
+        assert validate_task_id("ABC-def-456") == "ABC-def-456"
+
+    def test_path_traversal_rejected(self):
+        """Path traversal attempts are rejected."""
+        with pytest.raises(ValueError, match="Invalid task_id"):
+            validate_task_id("../../etc/passwd")
+
+    def test_slash_rejected(self):
+        """Forward slashes are rejected."""
+        with pytest.raises(ValueError, match="Invalid task_id"):
+            validate_task_id("task/evil")
+
+    def test_backslash_rejected(self):
+        """Backslashes are rejected."""
+        with pytest.raises(ValueError, match="Invalid task_id"):
+            validate_task_id("task\\evil")
+
+    def test_whitespace_rejected(self):
+        """Whitespace is rejected."""
+        with pytest.raises(ValueError, match="Invalid task_id"):
+            validate_task_id("task evil")
+
+    def test_empty_rejected(self):
+        """Empty task_id is rejected."""
+        with pytest.raises(ValueError, match="cannot be empty"):
+            validate_task_id("")
+
+    def test_dotdot_rejected(self):
+        """Double dot in task_id is rejected."""
+        with pytest.raises(ValueError):
+            validate_task_id("task..id")
+
+
+# =============================================================================
+# P0-11: Command validation (shell injection prevention)
+# =============================================================================
+
+class TestValidateCommand:
+    def test_valid_commands(self):
+        """Normal commands are accepted."""
+        assert validate_command(["git", "status"]) == ["git", "status"]
+        assert validate_command(["python", "-m", "pytest"]) == ["python", "-m", "pytest"]
+
+    def test_semicolon_rejected(self):
+        """Semicolons are rejected."""
+        with pytest.raises(ValueError, match="Shell metacharacters"):
+            validate_command(["echo", "hello; rm -rf /"])
+
+    def test_pipe_rejected(self):
+        """Pipes are rejected."""
+        with pytest.raises(ValueError, match="Shell metacharacters"):
+            validate_command(["cat", "file | evil"])
+
+    def test_ampersand_rejected(self):
+        """Ampersands are rejected."""
+        with pytest.raises(ValueError, match="Shell metacharacters"):
+            validate_command(["cmd", "arg & evil"])
+
+    def test_dollar_rejected(self):
+        """Dollar signs are rejected."""
+        with pytest.raises(ValueError, match="Shell metacharacters"):
+            validate_command(["echo", "$HOME"])
+
+    def test_backtick_rejected(self):
+        """Backticks are rejected."""
+        with pytest.raises(ValueError, match="Shell metacharacters"):
+            validate_command(["echo", "`whoami`"])
+
+    def test_empty_rejected(self):
+        """Empty command is rejected."""
+        with pytest.raises(ValueError, match="cannot be empty"):
+            validate_command([])
+
+    def test_create_worktree_rejects_bad_task_id(self, git_repo):
+        """create_worktree rejects path traversal task_id."""
+        with pytest.raises(ValueError, match="Invalid task_id"):
+            create_worktree("../../etc", project_path=git_repo)

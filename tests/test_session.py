@@ -59,9 +59,8 @@ class TestGetSession:
         """Test returns None if no session exists."""
         # Don't start a session
         session = get_session(temp_project)
-        # Should return None or session with no ID
-        # Since we init_db, we might have dir but no SESSION_ID
-        assert session is None or session.session_id is None
+        # No SESSION_ID file exists, so get_session should return None
+        assert session is None
 
     def test_returns_session_state(self, temp_project):
         """Test returns current session state."""

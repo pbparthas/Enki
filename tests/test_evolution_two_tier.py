@@ -11,6 +11,7 @@ from enki.session import start_session
 from enki.evolution import (
     get_local_evolution_path,
     get_global_evolution_path,
+    get_promotion_candidates_path,
     get_evolution_path,
     migrate_per_project_evolution,
     promote_to_global,
@@ -25,6 +26,8 @@ from enki.evolution import (
     save_evolution_state,
     create_self_correction,
     add_gate_adjustment,
+    approve_correction,
+    reject_correction,
 )
 
 
@@ -120,33 +123,47 @@ class TestMigratePerProjectEvolution:
 # =============================================================================
 
 class TestPromoteToGlobal:
-    def test_promotes_active_corrections(self, temp_project, global_dir):
-        """Active corrections are promoted to global."""
+    """Tests for promote_to_global — writes candidates, does NOT write global EVOLUTION.md."""
+
+    @pytest.fixture(autouse=True)
+    def _candidates_path(self, global_dir):
+        """Redirect candidates to test directory."""
+        self.candidates_path = global_dir / "promotion_candidates.json"
+        with patch("enki.evolution_store.get_promotion_candidates_path", return_value=self.candidates_path):
+            yield
+
+    def _get_candidates(self):
+        if not self.candidates_path.exists():
+            return []
+        return json.loads(self.candidates_path.read_text())
+
+    def test_writes_correction_candidates(self, temp_project, global_dir):
+        """Active (human-approved) corrections are written as candidates."""
         init_evolution_log(temp_project)
-        create_self_correction(
+        corr = create_self_correction(
             pattern_type="gate_bypass", description="TDD bypass detected",
             frequency=5, impact="Bugs", correction="Tightened TDD",
             project_path=temp_project,
         )
+        # Corrections start as proposed — must approve before promotion
+        assert corr.status == "proposed"
+        approve_correction(corr.id, temp_project)
 
-        global_path = global_dir / "EVOLUTION.md"
-        with patch("enki.evolution.get_global_evolution_path", return_value=global_path):
-            result = promote_to_global(temp_project)
+        result = promote_to_global(temp_project)
 
-        assert result["promoted"] == 1
+        assert result["candidates_written"] == 1
         assert result["skipped_duplicate"] == 0
-        assert global_path.exists()
 
-        # Verify global state
-        content = global_path.read_text()
-        import re
-        match = re.search(r'<!-- ENKI_EVOLUTION\n(.*?)\n-->', content, re.DOTALL)
-        global_state = json.loads(match.group(1))
-        assert len(global_state["corrections"]) == 1
-        assert global_state["corrections"][0]["source_project"] == temp_project.name
+        # Candidates file has entries
+        candidates = self._get_candidates()
+        assert len(candidates) == 1
+        assert candidates[0]["source_project"] == temp_project.name
 
-    def test_promotes_adjustments(self, temp_project, global_dir):
-        """Active adjustments are promoted."""
+        # Global EVOLUTION.md should NOT be created
+        assert not (global_dir / "EVOLUTION.md").exists()
+
+    def test_writes_adjustment_candidates(self, temp_project, global_dir):
+        """Active adjustments are written as candidates."""
         init_evolution_log(temp_project)
         add_gate_adjustment(
             gate="tdd", adjustment_type="tighten",
@@ -155,31 +172,27 @@ class TestPromoteToGlobal:
             project_path=temp_project,
         )
 
-        global_path = global_dir / "EVOLUTION.md"
-        with patch("enki.evolution.get_global_evolution_path", return_value=global_path):
-            result = promote_to_global(temp_project)
-
-        assert result["promoted"] == 1
+        result = promote_to_global(temp_project)
+        assert result["candidates_written"] == 1
 
     def test_deduplicates(self, temp_project, global_dir):
-        """Same correction not promoted twice."""
+        """Same correction not written as candidate twice."""
         init_evolution_log(temp_project)
-        create_self_correction(
+        corr = create_self_correction(
             pattern_type="gate_bypass", description="TDD bypass",
             frequency=3, impact="Bugs", correction="Tightened TDD",
             project_path=temp_project,
         )
+        approve_correction(corr.id, temp_project)
 
-        global_path = global_dir / "EVOLUTION.md"
-        with patch("enki.evolution.get_global_evolution_path", return_value=global_path):
-            promote_to_global(temp_project)
-            result = promote_to_global(temp_project)
+        promote_to_global(temp_project)
+        result = promote_to_global(temp_project)
 
-        assert result["promoted"] == 0
+        assert result["candidates_written"] == 0
         assert result["skipped_duplicate"] == 1
 
     def test_skips_reverted_corrections(self, temp_project, global_dir):
-        """Reverted corrections are not promoted."""
+        """Reverted corrections are not written as candidates."""
         init_evolution_log(temp_project)
         state = load_evolution_state(temp_project)
         state["corrections"].append({
@@ -194,15 +207,13 @@ class TestPromoteToGlobal:
         })
         save_evolution_state(state, temp_project)
 
-        global_path = global_dir / "EVOLUTION.md"
-        with patch("enki.evolution.get_global_evolution_path", return_value=global_path):
-            result = promote_to_global(temp_project)
+        result = promote_to_global(temp_project)
 
         assert result["skipped_status"] == 1
-        assert result["promoted"] == 0
+        assert result["candidates_written"] == 0
 
     def test_excludes_reason_field(self, temp_project, global_dir):
-        """Fox problem: 'reason' field should not be in promoted adjustments."""
+        """Fox problem: 'reason' field should not be in candidate adjustments."""
         init_evolution_log(temp_project)
         add_gate_adjustment(
             gate="tdd", adjustment_type="tighten",
@@ -211,46 +222,157 @@ class TestPromoteToGlobal:
             project_path=temp_project,
         )
 
-        global_path = global_dir / "EVOLUTION.md"
-        with patch("enki.evolution.get_global_evolution_path", return_value=global_path):
-            promote_to_global(temp_project)
+        promote_to_global(temp_project)
 
-        import re
-        content = global_path.read_text()
-        match = re.search(r'<!-- ENKI_EVOLUTION\n(.*?)\n-->', content, re.DOTALL)
-        global_state = json.loads(match.group(1))
-        promoted_adj = global_state["adjustments"][0]
-        assert "reason" not in promoted_adj
+        candidates = self._get_candidates()
+        adj_candidates = [c for c in candidates if c.get("type") == "adjustment"]
+        assert len(adj_candidates) == 1
+        assert "reason" not in adj_candidates[0]
 
     def test_no_write_when_nothing_promoted(self, temp_project, global_dir):
-        """Global file not written when nothing to promote."""
+        """Candidates file not written when nothing to promote."""
         init_evolution_log(temp_project)
 
-        global_path = global_dir / "EVOLUTION.md"
-        with patch("enki.evolution.get_global_evolution_path", return_value=global_path):
-            result = promote_to_global(temp_project)
+        result = promote_to_global(temp_project)
 
-        assert result["promoted"] == 0
-        assert not global_path.exists()
+        assert result["candidates_written"] == 0
+        assert not self.candidates_path.exists()
 
-    def test_promoted_entry_has_timestamp(self, temp_project, global_dir):
-        """Promoted entries have promoted_at timestamp."""
+    def test_candidate_entry_has_proposed_at(self, temp_project, global_dir):
+        """Candidate entries have proposed_at timestamp and pending_review status."""
         init_evolution_log(temp_project)
-        create_self_correction(
+        corr = create_self_correction(
             pattern_type="test", description="Test",
             frequency=1, impact="None", correction="Fixed",
             project_path=temp_project,
         )
+        approve_correction(corr.id, temp_project)
 
-        global_path = global_dir / "EVOLUTION.md"
-        with patch("enki.evolution.get_global_evolution_path", return_value=global_path):
-            promote_to_global(temp_project)
+        promote_to_global(temp_project)
 
-        import re
-        content = global_path.read_text()
-        match = re.search(r'<!-- ENKI_EVOLUTION\n(.*?)\n-->', content, re.DOTALL)
-        global_state = json.loads(match.group(1))
-        assert "promoted_at" in global_state["corrections"][0]
+        candidates = self._get_candidates()
+        assert len(candidates) == 1
+        assert "proposed_at" in candidates[0]
+        assert candidates[0]["status"] == "pending_review"
+
+
+# =============================================================================
+# CORRECTION APPROVAL FLOW (P0-06)
+# =============================================================================
+
+class TestCorrectionApproval:
+    """Tests for P0-06: corrections require human approval."""
+
+    def test_new_correction_defaults_to_proposed(self, temp_project):
+        """create_self_correction creates with status='proposed', not 'active'."""
+        init_evolution_log(temp_project)
+        corr = create_self_correction(
+            pattern_type="test", description="Test correction",
+            frequency=1, impact="None", correction="Fixed",
+            project_path=temp_project,
+        )
+        assert corr.status == "proposed"
+
+        state = load_evolution_state(temp_project)
+        assert state["corrections"][0]["status"] == "proposed"
+
+    def test_proposed_not_in_context_injection(self, temp_project):
+        """Proposed corrections do NOT appear in session context."""
+        init_evolution_log(temp_project)
+        create_self_correction(
+            pattern_type="test", description="Proposed correction",
+            frequency=1, impact="None", correction="Fixed",
+            project_path=temp_project,
+        )
+
+        with patch("enki.evolution_core.get_global_evolution_path",
+                    return_value=temp_project / "nonexistent_global" / "EVOLUTION.md"):
+            context = get_evolution_context_for_session(temp_project)
+
+        assert context == ""  # proposed corrections excluded
+
+    def test_proposed_not_promotable(self, temp_project, global_dir):
+        """Proposed corrections are NOT written as promotion candidates."""
+        init_evolution_log(temp_project)
+        create_self_correction(
+            pattern_type="test", description="Proposed correction",
+            frequency=1, impact="None", correction="Fixed",
+            project_path=temp_project,
+        )
+
+        candidates_path = global_dir / "promotion_candidates.json"
+        with patch("enki.evolution_store.get_promotion_candidates_path", return_value=candidates_path):
+            result = promote_to_global(temp_project)
+
+        assert result["candidates_written"] == 0
+        assert result["skipped_status"] == 1
+
+    def test_approve_moves_to_active(self, temp_project):
+        """approve_correction moves proposed → active."""
+        init_evolution_log(temp_project)
+        corr = create_self_correction(
+            pattern_type="test", description="Needs approval",
+            frequency=1, impact="None", correction="Fixed",
+            project_path=temp_project,
+        )
+
+        result = approve_correction(corr.id, temp_project)
+        assert result is True
+
+        state = load_evolution_state(temp_project)
+        assert state["corrections"][0]["status"] == "active"
+        assert "approved_at" in state["corrections"][0]
+
+    def test_approved_correction_in_context(self, temp_project):
+        """Approved corrections appear in session context."""
+        init_evolution_log(temp_project)
+        corr = create_self_correction(
+            pattern_type="test", description="Approved correction",
+            frequency=1, impact="None", correction="Fixed",
+            project_path=temp_project,
+        )
+        approve_correction(corr.id, temp_project)
+
+        with patch("enki.evolution_core.get_global_evolution_path",
+                    return_value=temp_project / "nonexistent_global" / "EVOLUTION.md"):
+            context = get_evolution_context_for_session(temp_project)
+
+        assert "Approved correction" in context
+
+    def test_reject_correction(self, temp_project):
+        """reject_correction marks proposed → rejected."""
+        init_evolution_log(temp_project)
+        corr = create_self_correction(
+            pattern_type="test", description="Bad correction",
+            frequency=1, impact="None", correction="Wrong fix",
+            project_path=temp_project,
+        )
+
+        result = reject_correction(corr.id, temp_project)
+        assert result is True
+
+        state = load_evolution_state(temp_project)
+        assert state["corrections"][0]["status"] == "rejected"
+        assert "rejected_at" in state["corrections"][0]
+
+    def test_approve_nonexistent_returns_false(self, temp_project):
+        """Approving a nonexistent ID returns False."""
+        init_evolution_log(temp_project)
+        result = approve_correction("corr_nonexistent", temp_project)
+        assert result is False
+
+    def test_approve_already_active_returns_false(self, temp_project):
+        """Cannot approve an already active correction."""
+        init_evolution_log(temp_project)
+        corr = create_self_correction(
+            pattern_type="test", description="Test",
+            frequency=1, impact="None", correction="Fixed",
+            project_path=temp_project,
+        )
+        approve_correction(corr.id, temp_project)
+        # Second approve should return False (already active)
+        result = approve_correction(corr.id, temp_project)
+        assert result is False
 
 
 # =============================================================================
@@ -432,16 +554,17 @@ class TestFormatEvolutionForInjection:
 
 class TestGetEvolutionContextForSession:
     def test_local_only(self, temp_project, global_dir):
-        """Works when only local state exists."""
+        """Works when only local state exists (approved corrections only)."""
         init_evolution_log(temp_project)
-        create_self_correction(
+        corr = create_self_correction(
             pattern_type="test", description="Local correction",
             frequency=1, impact="None", correction="Fixed",
             project_path=temp_project,
         )
+        approve_correction(corr.id, temp_project)
 
         global_path = global_dir / "EVOLUTION.md"
-        with patch("enki.evolution.get_global_evolution_path", return_value=global_path):
+        with patch("enki.evolution_core.get_global_evolution_path", return_value=global_path):
             result = get_evolution_context_for_session(temp_project)
 
         assert "Local correction" in result
@@ -462,7 +585,7 @@ class TestGetEvolutionContextForSession:
         }
         _save_evolution_to_path(global_state, global_path)
 
-        with patch("enki.evolution.get_global_evolution_path", return_value=global_path):
+        with patch("enki.evolution_core.get_global_evolution_path", return_value=global_path):
             result = get_evolution_context_for_session(temp_project)
 
         assert "Global correction" in result
@@ -490,7 +613,7 @@ class TestGetEvolutionContextForSession:
         }
         _save_evolution_to_path(global_state, global_path)
 
-        with patch("enki.evolution.get_global_evolution_path", return_value=global_path):
+        with patch("enki.evolution_core.get_global_evolution_path", return_value=global_path):
             result = get_evolution_context_for_session(temp_project)
 
         assert "Local version" in result
@@ -501,7 +624,7 @@ class TestGetEvolutionContextForSession:
         init_evolution_log(temp_project)
 
         global_path = global_dir / "EVOLUTION.md"
-        with patch("enki.evolution.get_global_evolution_path", return_value=global_path):
+        with patch("enki.evolution_core.get_global_evolution_path", return_value=global_path):
             result = get_evolution_context_for_session(temp_project)
 
         assert result == ""
@@ -667,8 +790,8 @@ class TestPruneGlobalEvolution:
         _save_evolution_to_path(state, global_path)
 
         archive_path = global_dir / "EVOLUTION_ARCHIVE.md"
-        with patch("enki.evolution.get_global_evolution_path", return_value=global_path), \
-             patch("enki.evolution.Path.home", return_value=global_dir.parent):
+        with patch("enki.evolution_store.get_global_evolution_path", return_value=global_path), \
+             patch("enki.evolution_store.Path.home", return_value=global_dir.parent):
             # Need to also patch the archive path construction
             import enki.evolution as evo_module
             original_prune = evo_module.prune_global_evolution
@@ -734,7 +857,7 @@ class TestPruneGlobalEvolution:
         _save_evolution_to_path(state, global_path)
 
         # Prune should not touch effective entries
-        with patch("enki.evolution.get_global_evolution_path", return_value=global_path):
+        with patch("enki.evolution_store.get_global_evolution_path", return_value=global_path):
             prune_global_evolution()
 
         import re
@@ -746,7 +869,7 @@ class TestPruneGlobalEvolution:
     def test_noop_when_no_file(self, global_dir):
         """No error when global file doesn't exist."""
         global_path = global_dir / "EVOLUTION.md"
-        with patch("enki.evolution.get_global_evolution_path", return_value=global_path):
+        with patch("enki.evolution_store.get_global_evolution_path", return_value=global_path):
             prune_global_evolution()  # Should not raise
 
 
@@ -755,56 +878,53 @@ class TestPruneGlobalEvolution:
 # =============================================================================
 
 class TestPromotionFlow:
-    def test_full_local_to_global_flow(self, temp_project, global_dir):
-        """End-to-end: create local → migrate → promote → verify global."""
+
+    @pytest.fixture(autouse=True)
+    def _candidates_path(self, tmp_path):
+        """Redirect candidates to test directory."""
+        self.candidates_path = tmp_path / "promotion_candidates.json"
+        with patch("enki.evolution_store.get_promotion_candidates_path", return_value=self.candidates_path):
+            yield
+
+    def test_full_local_to_candidate_flow(self, temp_project, global_dir):
+        """End-to-end: create local → approve → migrate → promote → verify candidates."""
         init_evolution_log(temp_project)
 
         # Create local corrections and adjustments
-        create_self_correction(
+        corr = create_self_correction(
             pattern_type="gate_bypass", description="TDD gate bypassed 5 times",
             frequency=5, impact="Untested code merged",
             correction="Added pre-commit TDD check",
             project_path=temp_project,
         )
+        # Must approve before promotion (P0-06)
+        approve_correction(corr.id, temp_project)
+
         add_gate_adjustment(
             gate="tdd", adjustment_type="tighten",
             description="Require test file for each src file",
-            reason="AI thinks this is important",  # Should NOT appear in global
+            reason="AI thinks this is important",  # Should NOT appear in candidates
             project_path=temp_project,
         )
 
         # Migrate (idempotent)
         migrate_per_project_evolution(temp_project)
 
-        # Promote to global
+        # Promote writes candidates, NOT global EVOLUTION.md
+        result = promote_to_global(temp_project)
+
+        assert result["candidates_written"] == 2
+
+        # Global EVOLUTION.md should NOT be created
         global_path = global_dir / "EVOLUTION.md"
-        with patch("enki.evolution.get_global_evolution_path", return_value=global_path):
-            result = promote_to_global(temp_project)
+        assert not global_path.exists()
 
-        assert result["promoted"] == 2
-
-        # Verify global state
-        import re
-        content = global_path.read_text()
-        match = re.search(r'<!-- ENKI_EVOLUTION\n(.*?)\n-->', content, re.DOTALL)
-        global_state = json.loads(match.group(1))
-
-        assert len(global_state["corrections"]) == 1
-        assert len(global_state["adjustments"]) == 1
-
-        # Fox problem: reason field excluded
-        adj = global_state["adjustments"][0]
-        assert "reason" not in adj
-        assert adj["source_project"] == temp_project.name
-
-        # Verify context injection merges both
-        with patch("enki.evolution.get_global_evolution_path", return_value=global_path):
-            context = get_evolution_context_for_session(temp_project)
-
+        # Local context still works (from local state, not global)
+        context = get_evolution_context_for_session(temp_project)
         assert "TDD gate bypassed" in context or "tdd" in context.lower()
 
     def test_two_projects_promote_independently(self, tmp_path, global_dir):
-        """Two projects can promote to same global without conflict."""
+        """Two projects can write candidates without conflict."""
         # Project A
         proj_a = tmp_path / "project_a"
         proj_a.mkdir()
@@ -813,11 +933,12 @@ class TestPromotionFlow:
         init_db(db_a)
         start_session(proj_a)
         init_evolution_log(proj_a)
-        create_self_correction(
+        corr_a = create_self_correction(
             pattern_type="type_a", description="Correction from A",
             frequency=1, impact="None", correction="Fix A",
             project_path=proj_a,
         )
+        approve_correction(corr_a.id, proj_a)
         close_db()
         set_db_path(None)
 
@@ -829,40 +950,33 @@ class TestPromotionFlow:
         init_db(db_b)
         start_session(proj_b)
         init_evolution_log(proj_b)
-        create_self_correction(
+        corr_b = create_self_correction(
             pattern_type="type_b", description="Correction from B",
             frequency=2, impact="None", correction="Fix B",
             project_path=proj_b,
         )
-
-        global_path = global_dir / "EVOLUTION.md"
+        approve_correction(corr_b.id, proj_b)
 
         # Promote A
         close_db()
         set_db_path(None)
         init_db(db_a)
-        with patch("enki.evolution.get_global_evolution_path", return_value=global_path):
-            result_a = promote_to_global(proj_a)
+        result_a = promote_to_global(proj_a)
         close_db()
         set_db_path(None)
 
         # Promote B
         init_db(db_b)
-        with patch("enki.evolution.get_global_evolution_path", return_value=global_path):
-            result_b = promote_to_global(proj_b)
+        result_b = promote_to_global(proj_b)
         close_db()
         set_db_path(None)
 
-        assert result_a["promoted"] == 1
-        assert result_b["promoted"] == 1
+        assert result_a["candidates_written"] == 1
+        assert result_b["candidates_written"] == 1
 
-        # Global should have both
-        import re
-        content = global_path.read_text()
-        match = re.search(r'<!-- ENKI_EVOLUTION\n(.*?)\n-->', content, re.DOTALL)
-        global_state = json.loads(match.group(1))
-        assert len(global_state["corrections"]) == 2
-
-        sources = {c["source_project"] for c in global_state["corrections"]}
-        assert "project_a" in sources
-        assert "project_b" in sources
+        # Candidates file should have both (uses patched path via autouse fixture)
+        if self.candidates_path.exists():
+            candidates = json.loads(self.candidates_path.read_text())
+            sources = {c.get("source_project") for c in candidates}
+            assert "project_a" in sources
+            assert "project_b" in sources

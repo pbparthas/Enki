@@ -8,8 +8,98 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Union
+import re
 import subprocess
 import shutil
+
+
+# Shell metacharacters that indicate injection attempts
+_SHELL_METACHAR_RE = re.compile(r'[;|&$`()\n]')
+
+# Valid task_id: alphanumeric, hyphens, underscores only
+_VALID_TASK_ID_RE = re.compile(r'^[a-zA-Z0-9_-]+$')
+
+
+def validate_task_id(task_id: str) -> str:
+    """Validate task_id for safe use in paths and branch names.
+
+    Args:
+        task_id: Task identifier to validate
+
+    Returns:
+        The validated task_id
+
+    Raises:
+        ValueError: If task_id contains unsafe characters
+    """
+    if not task_id:
+        raise ValueError("task_id cannot be empty")
+    if not _VALID_TASK_ID_RE.match(task_id):
+        raise ValueError(
+            f"Invalid task_id: {task_id!r}. "
+            f"Only alphanumeric characters, hyphens, and underscores are allowed."
+        )
+    if ".." in task_id:
+        raise ValueError(f"Invalid task_id: {task_id!r}. Path traversal not allowed.")
+    return task_id
+
+
+def validate_command(command: list[str]) -> list[str]:
+    """Validate command args for shell metacharacter injection.
+
+    Args:
+        command: Command as list of strings
+
+    Returns:
+        The validated command
+
+    Raises:
+        ValueError: If any argument contains shell metacharacters
+    """
+    if not command:
+        raise ValueError("Command cannot be empty")
+    for arg in command:
+        if _SHELL_METACHAR_RE.search(arg):
+            raise ValueError(
+                f"Shell metacharacters not allowed in command arguments: {arg!r}. "
+                f"Characters ;|&$`() and newlines are rejected."
+            )
+    return command
+
+
+# P3-24: Track background processes to prevent leaks
+_active_processes: dict[str, subprocess.Popen] = {}
+
+
+def _track_process(task_id: str, proc: subprocess.Popen) -> None:
+    """Register a background process for cleanup tracking."""
+    # Clean up any completed processes first
+    dead = [tid for tid, p in _active_processes.items() if p.poll() is not None]
+    for tid in dead:
+        del _active_processes[tid]
+    _active_processes[task_id] = proc
+
+
+def cleanup_processes(timeout: int = 10) -> int:
+    """Terminate and clean up tracked background processes (P3-24).
+
+    Args:
+        timeout: Seconds to wait for graceful termination
+
+    Returns:
+        Number of processes cleaned up
+    """
+    cleaned = 0
+    for task_id, proc in list(_active_processes.items()):
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+            cleaned += 1
+        del _active_processes[task_id]
+    return cleaned
 
 
 @dataclass
@@ -69,6 +159,7 @@ def create_worktree(
         subprocess.CalledProcessError: If git command fails
     """
     project_path = project_path or Path.cwd()
+    validate_task_id(task_id)
 
     if not is_git_repo(project_path):
         raise ValueError(f"Not a git repository: {project_path}")
@@ -105,14 +196,15 @@ def create_worktree(
     return worktree_path
 
 
-def copy_worktree_config(source: Path, target: Path) -> None:
-    """Copy config files that worktree needs.
+# P3-28: Files to symlink (contain secrets) vs copy (safe to duplicate)
+_SYMLINK_FILES = {".env", ".envrc"}
 
-    Copies:
-    - .env (environment variables)
-    - .envrc (direnv config)
-    - .enki/SPEC.md (current spec)
-    - .enki/PHASE (current phase)
+
+def copy_worktree_config(source: Path, target: Path) -> None:
+    """Copy or symlink config files that worktree needs.
+
+    P3-28: .env/.envrc are symlinked (contain secrets — avoid duplication).
+    Other config files are copied.
 
     Args:
         source: Source project directory
@@ -129,10 +221,14 @@ def copy_worktree_config(source: Path, target: Path) -> None:
 
     for f in files_to_copy:
         src = source / f
-        if src.exists():
+        if src.exists() and src.is_file():
             dst = target / f
             dst.parent.mkdir(parents=True, exist_ok=True)
-            if src.is_file():
+            if Path(f).name in _SYMLINK_FILES:
+                # Symlink secrets files to avoid copying sensitive data
+                if not dst.exists():
+                    dst.symlink_to(src.resolve())
+            else:
                 shutil.copy2(src, dst)
 
 
@@ -279,6 +375,23 @@ def merge_worktree(
     project_path = project_path or Path.cwd()
     branch_name = f"enki/{task_id}"
 
+    # P1-08: Check for uncommitted changes before switching branches
+    dirty_check = subprocess.run(
+        ["git", "diff", "--quiet"],
+        cwd=project_path,
+        capture_output=True,
+    )
+    cached_check = subprocess.run(
+        ["git", "diff", "--cached", "--quiet"],
+        cwd=project_path,
+        capture_output=True,
+    )
+    if dirty_check.returncode != 0 or cached_check.returncode != 0:
+        raise ValueError(
+            "Working tree has uncommitted changes. "
+            "Commit or stash changes before merging worktree."
+        )
+
     # Switch to target branch
     result = subprocess.run(
         ["git", "checkout", target_branch],
@@ -335,6 +448,8 @@ def exec_in_worktree(
         ValueError: If worktree doesn't exist
     """
     project_path = project_path or Path.cwd()
+    validate_task_id(task_id)
+    validate_command(command)
     worktree_root = get_worktree_root(project_path)
     worktree_path = worktree_root / task_id
 
@@ -347,15 +462,18 @@ def exec_in_worktree(
             cwd=worktree_path,
             capture_output=True,
             text=True,
+            timeout=300,  # P3-24: 5 minute timeout
         )
     else:
-        return subprocess.Popen(
+        proc = subprocess.Popen(
             command,
             cwd=worktree_path,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
         )
+        _track_process(task_id, proc)
+        return proc
 
 
 def is_in_worktree(path: Path = None) -> bool:

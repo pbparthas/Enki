@@ -63,7 +63,7 @@ class TestSelfCorrection:
         )
 
         assert correction.id == "corr_001"
-        assert correction.status == "active"
+        assert correction.status == "proposed"  # P0-06: defaults to proposed
         assert correction.effective is None
 
     def test_correction_serialization(self):
@@ -188,8 +188,8 @@ class TestCorrectionTriggers:
     def test_returns_empty_when_no_issues(self, temp_project):
         """Test returns empty when no trigger conditions met."""
         triggers = check_correction_triggers(temp_project)
-        # May or may not be empty depending on state
-        assert isinstance(triggers, list)
+        # No violations logged, so no triggers should fire
+        assert triggers == []
 
     def test_triggers_on_repeated_violations(self, temp_project):
         """Test triggers on repeated violations."""
@@ -227,11 +227,12 @@ class TestCreateSelfCorrection:
         )
 
         assert correction.id.startswith("corr_")
-        assert correction.status == "active"
+        assert correction.status == "proposed"  # P0-06: defaults to proposed
 
         # Should be in state
         state = load_evolution_state(temp_project)
         assert len(state["corrections"]) == 1
+        assert state["corrections"][0]["status"] == "proposed"
 
 
 class TestAddGateAdjustment:
@@ -254,6 +255,87 @@ class TestAddGateAdjustment:
         # Should be in state
         state = load_evolution_state(temp_project)
         assert len(state["adjustments"]) == 1
+
+
+class TestImmutableGateFloor:
+    """Tests for P0-07: immutable gates cannot be loosened."""
+
+    def test_loosen_phase_blocked(self, temp_project):
+        """Cannot loosen the phase gate."""
+        init_evolution_log(temp_project)
+        with pytest.raises(ValueError, match="Cannot loosen immutable gate 'phase'"):
+            add_gate_adjustment(
+                gate="phase", adjustment_type="loosen",
+                description="Skip phase", reason="Testing",
+                project_path=temp_project,
+            )
+
+    def test_loosen_spec_blocked(self, temp_project):
+        """Cannot loosen the spec gate."""
+        init_evolution_log(temp_project)
+        with pytest.raises(ValueError, match="Cannot loosen immutable gate 'spec'"):
+            add_gate_adjustment(
+                gate="spec", adjustment_type="loosen",
+                description="Skip spec", reason="Testing",
+                project_path=temp_project,
+            )
+
+    def test_loosen_scope_blocked(self, temp_project):
+        """Cannot loosen the scope gate."""
+        init_evolution_log(temp_project)
+        with pytest.raises(ValueError, match="Cannot loosen immutable gate 'scope'"):
+            add_gate_adjustment(
+                gate="scope", adjustment_type="loosen",
+                description="Skip scope", reason="Testing",
+                project_path=temp_project,
+            )
+
+    def test_loosen_enforcement_integrity_blocked(self, temp_project):
+        """Cannot loosen enforcement_integrity gate."""
+        init_evolution_log(temp_project)
+        with pytest.raises(ValueError, match="Cannot loosen immutable gate"):
+            add_gate_adjustment(
+                gate="enforcement_integrity", adjustment_type="loosen",
+                description="Bypass enforcement", reason="Testing",
+                project_path=temp_project,
+            )
+
+    def test_tighten_immutable_allowed(self, temp_project):
+        """Tightening immutable gates is allowed."""
+        init_evolution_log(temp_project)
+        adj = add_gate_adjustment(
+            gate="phase", adjustment_type="tighten",
+            description="Stricter phase checks", reason="More rigor",
+            project_path=temp_project,
+        )
+        assert adj.gate == "phase"
+        assert adj.adjustment_type == "tighten"
+
+    def test_loosen_non_immutable_allowed(self, temp_project):
+        """Loosening non-immutable gates is allowed."""
+        init_evolution_log(temp_project)
+        adj = add_gate_adjustment(
+            gate="tdd", adjustment_type="loosen",
+            description="Allow integration tests only", reason="Testing",
+            project_path=temp_project,
+        )
+        assert adj.gate == "tdd"
+        assert adj.adjustment_type == "loosen"
+
+    def test_no_state_change_on_blocked(self, temp_project):
+        """Blocked loosen does NOT modify evolution state."""
+        init_evolution_log(temp_project)
+        state_before = load_evolution_state(temp_project)
+
+        with pytest.raises(ValueError):
+            add_gate_adjustment(
+                gate="phase", adjustment_type="loosen",
+                description="Skip phase", reason="Testing",
+                project_path=temp_project,
+            )
+
+        state_after = load_evolution_state(temp_project)
+        assert len(state_after["adjustments"]) == len(state_before["adjustments"])
 
 
 class TestMarkCorrectionEffective:

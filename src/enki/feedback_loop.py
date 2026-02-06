@@ -9,12 +9,15 @@ No LLM anywhere — pure heuristic analysis.
 """
 
 import json
+import logging
 import re
 import uuid
 from collections import Counter
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 from .db import get_db
 from .ereshkigal import (
@@ -52,7 +55,21 @@ NEVER_LOOSEN = {
     "pattern_categories": {"certainty_patterns", "infra_integrity_patterns"},
 }
 
+# P3-19: Critical patterns that can never be removed regardless of FP rate.
+# These protect enforcement infrastructure integrity.
+CRITICAL_PATTERNS = {
+    r"(disable|remove|skip|bypass|delete).*(hook|gate|check|enforcement|ereshkigal|guard)",
+    r"(modify|edit|change|update|overwrite).*(hook|gate|enforcement|ereshkigal|patterns\.json)",
+}
+
 MAX_PROPOSALS_PER_CYCLE = 1
+
+# Minimum patterns per category — cannot propose removal below this floor
+MIN_PATTERNS_PER_CATEGORY = 3
+
+# P2-13: Upper bounds on gate adjustments — no gate can be loosened more than
+# this many times total. Prevents accumulated loosening from neutering a gate.
+MAX_LOOSEN_ADJUSTMENTS_PER_GATE = 3
 
 
 # =============================================================================
@@ -73,12 +90,17 @@ def analyze_pattern_fp_rates(days: int = 14) -> list[dict]:
     cutoff = f"-{days} days"
 
     try:
+        # P2-14: Only count was_legitimate from interceptions older than 24h.
+        # Defends against session-poisoning: marking blocks as "legitimate FPs"
+        # in the same session to trick the feedback loop into removing patterns.
         rows = db.execute("""
             SELECT
                 pattern,
                 category,
                 COUNT(*) as total_blocks,
-                SUM(CASE WHEN was_legitimate = 1 THEN 1 ELSE 0 END) as false_positives
+                SUM(CASE WHEN was_legitimate = 1
+                    AND timestamp <= datetime('now', '-1 day')
+                    THEN 1 ELSE 0 END) as false_positives
             FROM interceptions
             WHERE result = 'blocked'
             AND timestamp > datetime('now', ?)
@@ -104,13 +126,46 @@ def analyze_pattern_fp_rates(days: int = 14) -> list[dict]:
             })
 
         return results
-    except Exception:
+    except Exception as e:
+        logger.warning("Non-fatal error in feedback_loop: %s", e)
         return []
 
 
 # =============================================================================
 # ANALYSIS: EVASION PATTERNS
 # =============================================================================
+
+def _extract_ngrams(texts: list[str], min_n: int = 2, max_n: int = 4) -> tuple[Counter, dict[str, list[str]]]:
+    """Extract n-grams from text list (P3-14: pure utility, no DB).
+
+    Args:
+        texts: List of text strings to extract from
+        min_n: Minimum n-gram size
+        max_n: Maximum n-gram size
+
+    Returns:
+        Tuple of (ngram_counts, ngram_examples)
+    """
+    all_ngrams: Counter = Counter()
+    ngram_examples: dict[str, list[str]] = {}
+
+    for text in texts:
+        if not text:
+            continue
+        words = re.findall(r'[a-z]+', text.lower())
+        for n in range(min_n, max_n + 1):
+            for i in range(len(words) - n + 1):
+                ngram = " ".join(words[i:i + n])
+                if _is_stop_ngram(ngram):
+                    continue
+                all_ngrams[ngram] += 1
+                if ngram not in ngram_examples:
+                    ngram_examples[ngram] = []
+                if len(ngram_examples[ngram]) < 3:
+                    ngram_examples[ngram].append(text[:200])
+
+    return all_ngrams, ngram_examples
+
 
 def analyze_evasion_patterns(days: int = 30) -> list[dict]:
     """Find common phrases in evasion reasoning that could become patterns.
@@ -128,33 +183,8 @@ def analyze_evasion_patterns(days: int = 30) -> list[dict]:
     if len(evasions) < 2:
         return []  # not enough signal
 
-    # Extract 2-4 word ngrams from reasoning text
-    all_ngrams: Counter = Counter()
-    ngram_examples: dict[str, list[str]] = {}
-
-    for evasion in evasions:
-        reasoning = evasion.get("reasoning", "")
-        if not reasoning:
-            continue
-
-        # Clean and tokenize
-        words = re.findall(r'[a-z]+', reasoning.lower())
-
-        # Generate 2-4 word ngrams
-        for n in range(2, 5):
-            for i in range(len(words) - n + 1):
-                ngram = " ".join(words[i:i + n])
-
-                # Skip very common/boring ngrams
-                if _is_stop_ngram(ngram):
-                    continue
-
-                all_ngrams[ngram] += 1
-                if ngram not in ngram_examples:
-                    ngram_examples[ngram] = []
-                if len(ngram_examples[ngram]) < 3:
-                    # Store truncated reasoning as example
-                    ngram_examples[ngram].append(reasoning[:200])
+    reasoning_texts = [e.get("reasoning", "") for e in evasions]
+    all_ngrams, ngram_examples = _extract_ngrams(reasoning_texts)
 
     # Return phrases appearing in 2+ distinct evasions
     results = []
@@ -164,9 +194,28 @@ def analyze_evasion_patterns(days: int = 30) -> list[dict]:
                 "phrase": phrase,
                 "count": count,
                 "example_reasonings": ngram_examples.get(phrase, []),
+                "bypass_method": _classify_bypass_method(phrase),
             })
 
     return results
+
+
+def _classify_bypass_method(phrase: str) -> str:
+    """Classify the evasion bypass method from the phrase (P3-20).
+
+    Returns:
+        Category string describing the bypass method
+    """
+    phrase_lower = phrase.lower()
+    if any(w in phrase_lower for w in ("skip", "bypass", "ignore", "disable")):
+        return "direct_bypass"
+    if any(w in phrase_lower for w in ("trivial", "simple", "easy", "minor")):
+        return "minimization"
+    if any(w in phrase_lower for w in ("urgent", "asap", "emergency", "deadline")):
+        return "urgency"
+    if any(w in phrase_lower for w in ("sure", "certain", "guaranteed", "definitely")):
+        return "overconfidence"
+    return "unknown"
 
 
 def _is_stop_ngram(ngram: str) -> bool:
@@ -203,7 +252,7 @@ def generate_proposals(project_path: Optional[Path] = None) -> list[dict]:
     """
     proposals = []
 
-    # 1. Check FP rates — propose loosening if a pattern is too aggressive
+    # 1. Check FP rates — propose refinement if a pattern is too aggressive
     fp_data = analyze_pattern_fp_rates()
     for fp_info in fp_data:
         if fp_info["fp_rate"] >= FEEDBACK_THRESHOLDS["fp_rate_to_loosen"]:
@@ -213,21 +262,53 @@ def generate_proposals(project_path: Optional[Path] = None) -> list[dict]:
             if category in NEVER_LOOSEN["pattern_categories"]:
                 continue
 
-            proposals.append({
-                "proposal_type": "pattern_remove",
-                "target": category,
-                "description": f"Remove pattern '{fp_info['pattern']}' — {fp_info['fp_rate']:.0%} false positive rate",
-                "reason": f"{fp_info['false_positives']}/{fp_info['total_blocks']} blocks were legitimate actions",
-                "old_value": fp_info["pattern"],
-                "new_value": None,
-                "evidence": {
-                    "fp_rate": fp_info["fp_rate"],
-                    "total_blocks": fp_info["total_blocks"],
-                    "false_positives": fp_info["false_positives"],
-                    "days_analyzed": 14,
-                },
-                "priority": fp_info["fp_rate"],  # Higher FP = higher priority
-            })
+            # P3-19: Never remove/refine critical patterns
+            if fp_info["pattern"] in CRITICAL_PATTERNS:
+                continue
+
+            # Check minimum pattern count — cannot remove below floor
+            patterns = load_patterns()
+            category_count = len(patterns.get(category, []))
+            if category_count <= MIN_PATTERNS_PER_CATEGORY:
+                # At or below floor — propose refinement instead of removal
+                proposals.append({
+                    "proposal_type": "pattern_refine",
+                    "target": category,
+                    "description": (
+                        f"Refine pattern '{fp_info['pattern']}' — "
+                        f"{fp_info['fp_rate']:.0%} false positive rate "
+                        f"(removal blocked: {category_count} patterns at floor of {MIN_PATTERNS_PER_CATEGORY})"
+                    ),
+                    "reason": f"{fp_info['false_positives']}/{fp_info['total_blocks']} blocks were legitimate actions",
+                    "old_value": fp_info["pattern"],
+                    "new_value": None,  # Human provides refined pattern
+                    "evidence": {
+                        "fp_rate": fp_info["fp_rate"],
+                        "total_blocks": fp_info["total_blocks"],
+                        "false_positives": fp_info["false_positives"],
+                        "days_analyzed": 14,
+                        "category_count": category_count,
+                        "min_required": MIN_PATTERNS_PER_CATEGORY,
+                    },
+                    "priority": fp_info["fp_rate"],
+                })
+            else:
+                # Above floor — propose refinement (default) instead of removal
+                proposals.append({
+                    "proposal_type": "pattern_refine",
+                    "target": category,
+                    "description": f"Refine pattern '{fp_info['pattern']}' — {fp_info['fp_rate']:.0%} false positive rate",
+                    "reason": f"{fp_info['false_positives']}/{fp_info['total_blocks']} blocks were legitimate actions",
+                    "old_value": fp_info["pattern"],
+                    "new_value": None,  # Human provides refined pattern
+                    "evidence": {
+                        "fp_rate": fp_info["fp_rate"],
+                        "total_blocks": fp_info["total_blocks"],
+                        "false_positives": fp_info["false_positives"],
+                        "days_analyzed": 14,
+                    },
+                    "priority": fp_info["fp_rate"],
+                })
 
             if len(proposals) >= MAX_PROPOSALS_PER_CYCLE:
                 break
@@ -295,8 +376,8 @@ def generate_proposals(project_path: Optional[Path] = None) -> list[dict]:
 
             if len(proposals) >= MAX_PROPOSALS_PER_CYCLE:
                 break
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("Non-fatal error in feedback_loop: %s", e)
 
     return proposals[:MAX_PROPOSALS_PER_CYCLE]
 
@@ -377,7 +458,31 @@ def apply_proposal(proposal_id: str) -> dict:
     # Snapshot pre-apply state
     pre_snapshot = _take_snapshot(target, proposal_type)
 
-    # Execute the change
+    # P2-13: Upper bound check — reject gate_loosen if limit reached
+    if proposal_type == "gate_loosen":
+        try:
+            state = load_evolution_state()
+            existing_loosens = sum(
+                1 for adj in state.get("adjustments", [])
+                if adj.get("gate") == target
+                and adj.get("adjustment_type") == "loosen"
+                and adj.get("active", True)
+            )
+            if existing_loosens >= MAX_LOOSEN_ADJUSTMENTS_PER_GATE:
+                return {
+                    "error": (
+                        f"Gate '{target}' already has {existing_loosens} active loosen "
+                        f"adjustments (max {MAX_LOOSEN_ADJUSTMENTS_PER_GATE}). "
+                        f"Cannot loosen further."
+                    )
+                }
+        except Exception as e:
+            logger.warning("Non-fatal error checking loosen bounds: %s", e)
+            # Fail-closed: if we can't check, block the loosening
+            return {"error": f"Cannot verify loosen bounds: {e}"}
+
+    # P1-04: Wrap side effects + DB update in transaction so partial
+    # application can't leave pattern removed but proposal still 'pending'.
     try:
         if proposal_type == "pattern_add":
             if new_value:
@@ -402,24 +507,31 @@ def apply_proposal(proposal_id: str) -> dict:
                 reason=row["reason"],
             )
 
+        # Snapshot post-apply state
+        post_snapshot = _take_snapshot(target, proposal_type)
+
+        # Update proposal status (inside same try block — if this fails,
+        # the pattern change is still visible but won't be marked 'applied')
+        now = datetime.now().isoformat()
+        db.execute("""
+            UPDATE feedback_proposals
+            SET status = 'applied',
+                applied_at = ?,
+                pre_apply_snapshot = ?,
+                post_apply_snapshot = ?,
+                sessions_since_apply = 0
+            WHERE id = ?
+        """, (now, json.dumps(pre_snapshot), json.dumps(post_snapshot), proposal_id))
+        db.commit()
+
     except Exception as e:
+        # Rollback DB changes (pattern file changes are not rollback-able,
+        # but at least the proposal won't be marked 'applied')
+        try:
+            db.rollback()
+        except Exception as e:
+            logger.warning("Non-fatal error in feedback_loop: %s", e)
         return {"error": f"Failed to apply: {e}"}
-
-    # Snapshot post-apply state
-    post_snapshot = _take_snapshot(target, proposal_type)
-
-    # Update proposal status
-    now = datetime.now().isoformat()
-    db.execute("""
-        UPDATE feedback_proposals
-        SET status = 'applied',
-            applied_at = ?,
-            pre_apply_snapshot = ?,
-            post_apply_snapshot = ?,
-            sessions_since_apply = 0
-        WHERE id = ?
-    """, (now, json.dumps(pre_snapshot), json.dumps(post_snapshot), proposal_id))
-    db.commit()
 
     return {
         "proposal_id": proposal_id,
@@ -596,7 +708,8 @@ def check_for_regressions() -> list[dict]:
         applied_count = db.execute(
             "SELECT COUNT(*) FROM feedback_proposals WHERE status = 'applied'"
         ).fetchone()[0]
-    except Exception:
+    except Exception as e:
+        logger.warning("Non-fatal error in feedback_loop: %s", e)
         return []
 
     if applied_count == 0:
@@ -605,6 +718,33 @@ def check_for_regressions() -> list[dict]:
     regressions = []
     threshold = FEEDBACK_THRESHOLDS
 
+    # P2-07: Immediate single-session check — catch fast regressions
+    # If violations 2x in the very first session after a change, flag immediately
+    try:
+        immediate = db.execute("""
+            SELECT * FROM feedback_proposals
+            WHERE status = 'applied'
+            AND sessions_since_apply = 1
+        """).fetchall()
+
+        for proposal in immediate:
+            regression = _check_proposal_regression(proposal)
+            if regression:
+                regression["immediate"] = True
+                regression["message"] = f"[IMMEDIATE] {regression.get('message', '')}"
+                regressions.append(regression)
+
+                db.execute(
+                    "UPDATE feedback_proposals SET status = 'regressed' WHERE id = ?",
+                    (proposal["id"],)
+                )
+
+        if immediate:
+            db.commit()
+    except Exception as e:
+        logger.warning("Non-fatal error in feedback_loop (immediate check): %s", e)
+
+    # Standard 5-session window check
     try:
         # Get applied proposals with enough sessions elapsed
         applied = db.execute("""
@@ -614,13 +754,6 @@ def check_for_regressions() -> list[dict]:
         """, (threshold["regression_sessions_to_check"],)).fetchall()
 
         for proposal in applied:
-            # Increment session counter for all applied proposals
-            db.execute("""
-                UPDATE feedback_proposals
-                SET sessions_since_apply = sessions_since_apply + 1
-                WHERE status = 'applied'
-            """)
-
             # Check violation rate change
             regression = _check_proposal_regression(proposal)
             if regression:
@@ -633,20 +766,19 @@ def check_for_regressions() -> list[dict]:
                 )
 
         db.commit()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("Non-fatal error in feedback_loop: %s", e)
 
-    # Increment session counter for proposals not yet at threshold
+    # Increment session counter for ALL applied proposals (once per session, not per proposal)
     try:
         db.execute("""
             UPDATE feedback_proposals
             SET sessions_since_apply = sessions_since_apply + 1
             WHERE status = 'applied'
-            AND sessions_since_apply < ?
-        """, (threshold["regression_sessions_to_check"],))
+        """)
         db.commit()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("Non-fatal error in feedback_loop: %s", e)
 
     return regressions
 
@@ -681,7 +813,8 @@ def _check_proposal_regression(proposal) -> Optional[dict]:
             SELECT COUNT(*) FROM violations
             WHERE timestamp > ?
         """, (applied_at,)).fetchone()[0]
-    except Exception:
+    except Exception as e:
+        logger.warning("Non-fatal error in feedback_loop: %s", e)
         return None
 
     # Check both conditions
@@ -740,7 +873,8 @@ def _take_snapshot(target: str, proposal_type: str) -> dict:
         try:
             patterns = load_patterns()
             snapshot["patterns"] = patterns.get(target, [])
-        except Exception:
+        except Exception as e:
+            logger.warning("Non-fatal error in feedback_loop: %s", e)
             snapshot["patterns"] = []
 
     # Snapshot recent violation count (for regression baseline)
@@ -750,7 +884,8 @@ def _take_snapshot(target: str, proposal_type: str) -> dict:
             WHERE timestamp > datetime('now', '-14 days')
         """).fetchone()[0]
         snapshot["violation_count"] = count
-    except Exception:
+    except Exception as e:
+        logger.warning("Non-fatal error in feedback_loop: %s", e)
         snapshot["violation_count"] = 0
 
     return snapshot
@@ -816,7 +951,8 @@ def get_feedback_summary() -> str:
             FROM feedback_proposals
             GROUP BY status
         """).fetchall()
-    except Exception:
+    except Exception as e:
+        logger.warning("Non-fatal error in feedback_loop: %s", e)
         return "Feedback loop: No data available."
 
     status_counts = {row["status"]: row["count"] for row in counts}
@@ -839,8 +975,8 @@ def get_feedback_summary() -> str:
             ).fetchall()
             for row in pending_rows:
                 lines.append(f"  - `{row['id']}`: {row['description']}")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Non-fatal error in feedback_loop: %s", e)
 
     if regressed:
         lines.append(f"\n**Regressed (action needed):** {regressed}")
@@ -850,8 +986,8 @@ def get_feedback_summary() -> str:
             ).fetchall()
             for row in regressed_rows:
                 lines.append(f"  - `{row['id']}`: {row['description']}")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Non-fatal error in feedback_loop: %s", e)
 
     if applied:
         lines.append(f"\nApplied (monitoring): {applied}")
@@ -884,7 +1020,8 @@ def get_session_start_alerts() -> Optional[str]:
         regressed = db.execute(
             "SELECT COUNT(*) FROM feedback_proposals WHERE status = 'regressed'"
         ).fetchone()[0]
-    except Exception:
+    except Exception as e:
+        logger.warning("Non-fatal error in feedback_loop: %s", e)
         return None
 
     if pending == 0 and regressed == 0:
@@ -927,7 +1064,8 @@ def cleanup_old_proposals(days: int = 180) -> int:
         """, (cutoff,))
         db.commit()
         return result.rowcount
-    except Exception:
+    except Exception as e:
+        logger.warning("Non-fatal error in feedback_loop: %s", e)
         return 0
 
 

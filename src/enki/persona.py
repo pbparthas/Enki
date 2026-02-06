@@ -5,11 +5,16 @@ Enki is a collaborator, not a servant. Conversational tone with
 occasional mythological touches. Direct, opinionated, no fluff.
 """
 
+import json
+import logging
+import os
 import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 from .db import get_db
 from .session import get_session, get_phase, get_goal
@@ -107,19 +112,68 @@ class UserContext:
     notes: str = ""
 
 
-# Default context for Partha
-DEFAULT_USER = UserContext(
-    name="Partha",
-    relationship="peer",
-    projects=["QualityPilot", "Enki", "Orion", "SongKeeper", "Cortex"],
-    preferences={
+def _load_user_identity() -> UserContext:
+    """Load user identity from env vars, ~/.enki/user.json, or generic defaults.
+
+    Resolution order:
+      1. Environment variables: ENKI_USER_NAME, ENKI_USER_ROLE, ENKI_USER_PROJECTS
+      2. Config file: ~/.enki/user.json
+      3. Generic defaults (no PII)
+    """
+    # --- Defaults (no PII) ---
+    name = "Developer"
+    relationship = "peer"
+    projects: list[str] = []
+    preferences = {
         "format": "tables for comparisons",
         "verbosity": "direct, no fluff",
-        "explanation_depth": "understands concepts, skip basics",
-        "learning_style": "prefers understanding over quick fixes",
-    },
-    notes="QA Manager who learned to code through AI. Persistent — finishes projects now. Working toward CTO approval for org-wide QualityPilot deployment."
-)
+    }
+    notes = ""
+
+    # --- Try ~/.enki/user.json ---
+    config_path = Path.home() / ".enki" / "user.json"
+    if config_path.is_file():
+        try:
+            data = json.loads(config_path.read_text())
+            name = data.get("name", name)
+            relationship = data.get("relationship", relationship)
+            projects = data.get("projects", projects)
+            preferences = {**preferences, **data.get("preferences", {})}
+            notes = data.get("notes", notes)
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.debug("Failed to read %s: %s", config_path, exc)
+
+    # --- Env vars override everything ---
+    if os.environ.get("ENKI_USER_NAME"):
+        name = os.environ["ENKI_USER_NAME"]
+    if os.environ.get("ENKI_USER_ROLE"):
+        relationship = os.environ["ENKI_USER_ROLE"]
+    if os.environ.get("ENKI_USER_PROJECTS"):
+        projects = [p.strip() for p in os.environ["ENKI_USER_PROJECTS"].split(",") if p.strip()]
+
+    return UserContext(
+        name=name,
+        relationship=relationship,
+        projects=projects,
+        preferences=preferences,
+        notes=notes,
+    )
+
+
+# Lazy-loaded singleton — resolved once per process
+_default_user: Optional[UserContext] = None
+
+
+def get_default_user() -> UserContext:
+    """Get the default user context (loaded once, then cached)."""
+    global _default_user
+    if _default_user is None:
+        _default_user = _load_user_identity()
+    return _default_user
+
+
+# Backward-compatible alias
+DEFAULT_USER = None  # Use get_default_user() instead
 
 
 def build_user_context(user: UserContext) -> str:
@@ -197,7 +251,8 @@ def get_persona_context(project_path: Path = None) -> PersonaContext:
         try:
             results = search(query=goal, project=project_name, limit=5)
             context.relevant_beads = [r.bead for r in results]
-        except Exception:
+        except Exception as e:
+            logger.warning("Non-fatal error in persona (relevant_beads search): %s", e)
             pass
 
         # Cross-project beads
@@ -207,19 +262,22 @@ def get_persona_context(project_path: Path = None) -> PersonaContext:
                 r.bead for r in results
                 if r.bead.project != project_name
             ]
-        except Exception:
+        except Exception as e:
+            logger.warning("Non-fatal error in persona (cross_project_beads search): %s", e)
             pass
 
     # Recent violations
     try:
         context.recent_violations = get_violations(days=7, project_path=project_path)[:5]
-    except Exception:
+    except Exception as e:
+        logger.warning("Non-fatal error in persona (recent_violations): %s", e)
         pass
 
     # Recent escalations
     try:
         context.recent_escalations = get_escalations(days=30, project_path=project_path)[:3]
-    except Exception:
+    except Exception as e:
+        logger.warning("Non-fatal error in persona (recent_escalations): %s", e)
         pass
 
     # Working patterns (from beads tagged 'pattern' in this project)
@@ -238,7 +296,8 @@ def get_persona_context(project_path: Path = None) -> PersonaContext:
                 row['summary'] or row['content'][:50]: row['content']
                 for row in patterns
             }
-    except Exception:
+    except Exception as e:
+        logger.warning("Non-fatal error in persona (working_patterns): %s", e)
         pass
 
     return context
@@ -257,14 +316,14 @@ def build_session_persona(
     Build complete persona for session injection.
 
     Args:
-        user: User context for personalization (defaults to Partha)
+        user: User context for personalization (defaults to loaded identity)
         include_examples: Include example phrases
         compact: Shorter version for subagents
 
     Returns:
         Complete persona string for system prompt
     """
-    user = user or DEFAULT_USER
+    user = user or get_default_user()
 
     if compact:
         return f"""
@@ -300,7 +359,7 @@ def build_agent_persona(
 
     Subagents inherit Enki's voice but operate in specialized roles.
     """
-    user = user or DEFAULT_USER
+    user = user or get_default_user()
     compact_persona = build_session_persona(user, include_examples=False, compact=True)
 
     return f"""
@@ -473,7 +532,7 @@ def build_session_start_injection(
 
     Combines persona + project context + memory into coherent opening.
     """
-    user = user or DEFAULT_USER
+    user = user or get_default_user()
     project_path = project_path or Path.cwd()
 
     # Get project context
@@ -591,7 +650,8 @@ def build_error_context_injection(
                     project = bead.project or "global"
                     lines.append(f"- [{project}] {bead.summary or bead.content[:100]}")
 
-    except Exception:
+    except Exception as e:
+        logger.warning("Non-fatal error in persona (error_context search): %s", e)
         pass
 
     if not lines:
@@ -641,7 +701,8 @@ def build_decision_context(
                 bead = result.bead
                 lines.append(f"- {bead.summary or bead.content[:100]}")
 
-    except Exception:
+    except Exception as e:
+        logger.warning("Non-fatal error in persona (decision_context search): %s", e)
         pass
 
     return "\n".join(lines)
@@ -793,6 +854,7 @@ __all__ = [
     # User context
     "UserContext",
     "DEFAULT_USER",
+    "get_default_user",
     "build_user_context",
 
     # Persona context

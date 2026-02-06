@@ -32,12 +32,7 @@ services:
         reservations:
           cpus: '0.1'
           memory: 128M
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/health')"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 10s
+    # P3-22: Health check defined in Dockerfile — no duplication needed here
     logging:
       driver: "json-file"
       options:

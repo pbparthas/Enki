@@ -4,6 +4,7 @@ Phase 0: Migrate all existing data to the unified Enki system.
 """
 
 import json
+import logging
 import shutil
 import sqlite3
 from datetime import datetime
@@ -12,6 +13,8 @@ from typing import Optional
 from dataclasses import dataclass
 
 from .db import init_db, get_db, ENKI_DIR, DB_PATH
+
+logger = logging.getLogger(__name__)
 
 
 def _row_to_dict(row) -> dict:
@@ -147,7 +150,7 @@ def _migrate_odin(odin_db_path: Optional[Path] = None) -> dict:
                 if bead.get("metadata"):
                     try:
                         metadata = json.loads(bead["metadata"])
-                    except:
+                    except (json.JSONDecodeError, TypeError):
                         pass
 
                 project = metadata.get("project") or bead.get("project")
@@ -179,7 +182,7 @@ def _migrate_odin(odin_db_path: Optional[Path] = None) -> dict:
 
             except Exception as e:
                 # Log but continue
-                pass
+                logger.warning("Migration error (odin bead): %s", e)
 
     # Migrate sessions
     if "sessions" in table_names:
@@ -209,7 +212,7 @@ def _migrate_odin(odin_db_path: Optional[Path] = None) -> dict:
                     result["sessions"] += 1
 
             except Exception as e:
-                pass
+                logger.warning("Migration error (odin session): %s", e)
 
     # Migrate projects
     if "projects" in table_names:
@@ -236,7 +239,7 @@ def _migrate_odin(odin_db_path: Optional[Path] = None) -> dict:
                     result["projects"] += 1
 
             except Exception as e:
-                pass
+                logger.warning("Migration error (odin project): %s", e)
 
     enki_db.commit()
     odin_conn.close()
@@ -290,8 +293,8 @@ def _migrate_freyja() -> dict:
                         row.get("created_at"),
                     ))
                     result["beads"] += 1
-            except:
-                pass
+            except Exception as e:
+                logger.warning("Migration error (freyja decision): %s", e)
 
     # Migrate solutions
     if "solutions" in table_names:
@@ -322,8 +325,8 @@ def _migrate_freyja() -> dict:
                         row.get("created_at"),
                     ))
                     result["beads"] += 1
-            except:
-                pass
+            except Exception as e:
+                logger.warning("Migration error (freyja solution): %s", e)
 
     # Migrate learnings
     if "learnings" in table_names:
@@ -353,8 +356,8 @@ def _migrate_freyja() -> dict:
                         row.get("created_at"),
                     ))
                     result["beads"] += 1
-            except:
-                pass
+            except Exception as e:
+                logger.warning("Migration error (freyja learning): %s", e)
 
     # Migrate generic wisdom table if it exists
     if "wisdom" in table_names:
@@ -384,8 +387,8 @@ def _migrate_freyja() -> dict:
                         row.get("created_at"),
                     ))
                     result["beads"] += 1
-            except:
-                pass
+            except Exception as e:
+                logger.warning("Migration error (freyja wisdom): %s", e)
 
     enki_db.commit()
     freyja_conn.close()
@@ -412,8 +415,8 @@ def _migrate_all_projects() -> int:
                 if p["path"]:
                     potential_projects.add(Path(p["path"]))
             conn.close()
-        except:
-            pass
+        except Exception as e:
+            logger.warning("Odin project path extraction error: %s", e)
 
     if FREYJA_DB.exists():
         try:
@@ -429,8 +432,8 @@ def _migrate_all_projects() -> int:
                     if p.get("path"):
                         potential_projects.add(Path(p["path"]))
             conn.close()
-        except:
-            pass
+        except Exception as e:
+            logger.warning("Freyja project path extraction error: %s", e)
 
     # Migrate each project
     for project_path in potential_projects:
@@ -438,8 +441,8 @@ def _migrate_all_projects() -> int:
             try:
                 _migrate_project(project_path)
                 count += 1
-            except:
-                pass
+            except Exception as e:
+                logger.warning("Project migration error for %s: %s", project_path, e)
 
     return count
 
@@ -514,15 +517,14 @@ def _generate_all_embeddings() -> int:
         try:
             vector = generate_embedding(bead["content"])
             if vector is not None:
-                import struct
-                vector_bytes = struct.pack(f'{len(vector)}f', *vector)
+                from .embeddings import vector_to_blob
                 db.execute("""
                     INSERT OR REPLACE INTO embeddings (bead_id, vector)
                     VALUES (?, ?)
-                """, (bead["id"], vector_bytes))
+                """, (bead["id"], vector_to_blob(vector)))
                 count += 1
-        except:
-            pass
+        except Exception as e:
+            logger.warning("Embedding generation error for bead %s: %s", bead["id"], e)
 
     db.commit()
     return count
@@ -544,8 +546,8 @@ def _archive_old_hooks() -> int:
                 dest = archive_dir / f"{hook.name}.{datetime.now().strftime('%Y%m%d')}"
                 shutil.move(hook, dest)
                 count += 1
-            except:
-                pass
+            except Exception as e:
+                logger.warning("Hook archival error for %s: %s", hook, e)
 
     return count
 

@@ -6,6 +6,8 @@ from typing import Optional, Literal
 from dataclasses import dataclass
 from datetime import datetime
 
+from .path_utils import atomic_write
+
 Phase = Literal["intake", "debate", "plan", "implement", "review", "test", "ship"]
 Tier = Literal["trivial", "quick_fix", "feature", "major"]
 
@@ -48,14 +50,19 @@ def start_session(
     enki_dir = ensure_project_enki_dir(project_path)
     session_id = str(uuid.uuid4())
 
-    # Initialize state files
-    (enki_dir / "SESSION_ID").write_text(session_id)
-    (enki_dir / "PHASE").write_text("intake")
-    (enki_dir / "TIER").write_text("trivial")
-    (enki_dir / ".session_edits").write_text("")
+    # Initialize state files — P2-17: atomic writes to prevent corruption
+    with atomic_write(enki_dir / "SESSION_ID") as f:
+        f.write(session_id)
+    with atomic_write(enki_dir / "PHASE") as f:
+        f.write("intake")
+    with atomic_write(enki_dir / "TIER") as f:
+        f.write("trivial")
+    with atomic_write(enki_dir / ".session_edits") as f:
+        f.write("")
 
     if goal:
-        (enki_dir / "GOAL").write_text(goal)
+        with atomic_write(enki_dir / "GOAL") as f:
+            f.write(goal)
     elif (enki_dir / "GOAL").exists():
         (enki_dir / "GOAL").unlink()
 
@@ -115,7 +122,8 @@ def set_phase(phase: Phase, project_path: Optional[Path] = None) -> None:
         raise ValueError(f"Invalid phase: {phase}. Must be one of {PHASES}")
 
     enki_dir = ensure_project_enki_dir(project_path)
-    (enki_dir / "PHASE").write_text(phase)
+    with atomic_write(enki_dir / "PHASE") as f:
+        f.write(phase)
 
 
 def get_tier(project_path: Optional[Path] = None) -> Tier:
@@ -137,7 +145,8 @@ def set_tier(tier: Tier, project_path: Optional[Path] = None) -> None:
         raise ValueError(f"Invalid tier: {tier}. Must be one of {TIERS}")
 
     enki_dir = ensure_project_enki_dir(project_path)
-    (enki_dir / "TIER").write_text(tier)
+    with atomic_write(enki_dir / "TIER") as f:
+        f.write(tier)
 
 
 def get_goal(project_path: Optional[Path] = None) -> Optional[str]:
@@ -154,7 +163,8 @@ def get_goal(project_path: Optional[Path] = None) -> Optional[str]:
 def set_goal(goal: str, project_path: Optional[Path] = None) -> None:
     """Set session goal."""
     enki_dir = ensure_project_enki_dir(project_path)
-    (enki_dir / "GOAL").write_text(goal)
+    with atomic_write(enki_dir / "GOAL") as f:
+        f.write(goal)
 
 
 def get_session_edits(project_path: Optional[Path] = None) -> list[str]:
@@ -180,7 +190,8 @@ def add_session_edit(file_path: str, project_path: Optional[Path] = None) -> lis
     # Only add if not already tracked
     if file_path not in edits:
         edits.append(file_path)
-        edits_file.write_text("\n".join(edits))
+        with atomic_write(edits_file) as f:
+            f.write("\n".join(edits))
 
     return edits
 
@@ -224,7 +235,8 @@ def get_scope_files(project_path: Optional[Path] = None) -> list[str]:
 def set_scope_files(files: list[str], project_path: Optional[Path] = None) -> None:
     """Set files in scope for orchestration."""
     enki_dir = ensure_project_enki_dir(project_path)
-    (enki_dir / "SCOPE").write_text("\n".join(files))
+    with atomic_write(enki_dir / "SCOPE") as f:
+        f.write("\n".join(files))
 
 
 def tier_rank(tier: Tier) -> int:

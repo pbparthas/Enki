@@ -10,14 +10,19 @@ Supports:
 """
 
 import json
+import logging
 import os
+import re
 import secrets
 import struct
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Annotated
 
-from fastapi import FastAPI, HTTPException, Depends, Header, Query
+from fastapi import FastAPI, HTTPException, Depends, Header
+
+logger = logging.getLogger(__name__)
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import numpy as np
@@ -25,31 +30,51 @@ import jwt
 
 from .db import init_db, get_db
 
-# API Key from environment
+# API Key from environment — validated on startup
 API_KEY = os.environ.get("ENKI_API_KEY", "")
 
-# JWT configuration
+# JWT configuration — validated on startup
 JWT_SECRET = os.environ.get("ENKI_JWT_SECRET", "")
 JWT_ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
 REFRESH_TOKEN_EXPIRE_DAYS = 30
 
+# CORS origins from environment — never wildcard with credentials
+_cors_origins_raw = os.environ.get("ENKI_CORS_ORIGINS", "")
+CORS_ORIGINS = (
+    [o.strip() for o in _cors_origins_raw.split(",") if o.strip()]
+    if _cors_origins_raw
+    else ["http://localhost:3000", "http://localhost:8002"]
+)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """P3-01: Lifespan context manager replaces deprecated on_event('startup')."""
+    if not API_KEY:
+        raise RuntimeError(
+            "ENKI_API_KEY must be set and non-empty. "
+            "Server cannot start without authentication configured."
+        )
+    if not JWT_SECRET:
+        raise RuntimeError(
+            "ENKI_JWT_SECRET must be set and non-empty. "
+            "Server cannot start without JWT secret configured."
+        )
+    init_db()
+    yield
+
+
 app = FastAPI(
     title="Enki API",
     description="Second brain memory API for cross-machine sync",
     version="0.1.0",
+    lifespan=lifespan,
 )
-
-
-@app.on_event("startup")
-async def startup_event():
-    """Initialize database on startup."""
-    init_db()
 
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -117,19 +142,15 @@ def _verify_jwt_token(token: str, expected_type: str = "access") -> Optional[dic
 
 async def verify_api_key(
     authorization: Annotated[str | None, Header()] = None,
-    key: Annotated[str | None, Query()] = None,
 ) -> str:
-    """Verify API key or JWT from header or query param.
+    """Verify API key or JWT from Authorization header only.
 
-    Supports both:
-    - Legacy API key authentication
-    - JWT token authentication
+    P1-07: API key via query parameter removed — query params are logged,
+    cached by proxies, visible in referrer headers and browser history.
     """
     token = None
     if authorization and authorization.startswith("Bearer "):
         token = authorization[7:]
-    elif key:
-        token = key
 
     if not token:
         raise HTTPException(401, "Missing authentication")
@@ -244,6 +265,34 @@ class RefreshResponse(BaseModel):
     token_type: str = "bearer"
 
 
+# --- Error helpers ---
+
+# P1-13: FTS special characters that need escaping
+_FTS_SPECIAL_RE = re.compile(r'[*"()\-]')
+_FTS_OPERATORS_RE = re.compile(r'\b(OR|AND|NOT|NEAR)\b', re.IGNORECASE)
+
+
+def _escape_fts_query(query: str) -> str:
+    """Escape special FTS5 characters to prevent MATCH syntax injection."""
+    # Remove FTS operator keywords
+    escaped = _FTS_OPERATORS_RE.sub('', query)
+    # Remove special FTS characters
+    escaped = _FTS_SPECIAL_RE.sub(' ', escaped)
+    # Collapse whitespace
+    escaped = ' '.join(escaped.split())
+    return escaped.strip() or 'a'  # FTS needs non-empty query
+
+
+def _error_response(e: Exception) -> HTTPException:
+    """P1-01: Return generic error with correlation ID, log details server-side."""
+    correlation_id = str(uuid.uuid4())[:8]
+    logger.exception("Request error [%s]", correlation_id)
+    return HTTPException(
+        status_code=500,
+        detail={"error": "Internal server error", "correlation_id": correlation_id},
+    )
+
+
 # --- Database helpers ---
 
 def create_bead_with_embedding(
@@ -258,7 +307,7 @@ def create_bead_with_embedding(
 ) -> str:
     """Create a bead and optionally store its embedding."""
     conn = get_db()
-    bead_id = str(uuid.uuid4())[:8]
+    bead_id = str(uuid.uuid4())
 
     conn.execute(
         """
@@ -301,15 +350,17 @@ def search_beads(
     # If we have a query embedding, do vector search
     if query_embedding:
         query_vec = np.array(query_embedding)
+        min_similarity = 0.3  # Minimum cosine similarity threshold
+        scan_limit = max(limit * 10, 100)  # Scan more candidates than needed
 
-        # Get all beads with embeddings
+        # Get beads with embeddings (paginated to avoid OOM)
         sql = """
             SELECT b.*, e.vector
             FROM beads b
             JOIN embeddings e ON b.id = e.bead_id
             WHERE b.superseded_by IS NULL
         """
-        params = []
+        params: list = []
 
         if project:
             sql += " AND b.project = ?"
@@ -318,13 +369,18 @@ def search_beads(
             sql += " AND b.type = ?"
             params.append(bead_type)
 
+        sql += " LIMIT ?"
+        params.append(scan_limit)
+
         rows = conn.execute(sql, params).fetchall()
 
-        # Compute similarities
+        # Compute similarities with early filtering
         results = []
         for row in rows:
             vec = bytes_to_vector(row["vector"])
             score = cosine_similarity(query_vec, vec)
+            if score < min_similarity:
+                continue
             results.append({
                 "id": row["id"],
                 "content": row["content"],
@@ -340,13 +396,15 @@ def search_beads(
         return results[:limit]
 
     # Fall back to FTS search
+    # P1-13: Escape FTS special characters to prevent MATCH syntax injection
+    safe_query = _escape_fts_query(query)
     sql = """
         SELECT b.*, bfs.rank as score
         FROM beads b
         JOIN beads_fts bfs ON b.rowid = bfs.rowid
         WHERE beads_fts MATCH ? AND b.superseded_by IS NULL
     """
-    params = [query]
+    params = [safe_query]
 
     if project:
         sql += " AND b.project = ?"
@@ -372,8 +430,9 @@ def search_beads(
             }
             for row in rows
         ]
-    except Exception:
-        # FTS query syntax error - return empty
+    except Exception as e:
+        # FTS query syntax error — return empty, log for diagnostics
+        logger.warning("FTS search error: %s", e)
         return []
 
 
@@ -521,7 +580,7 @@ async def api_remember(
         )
         return {"id": bead_id, "status": "remembered"}
     except Exception as e:
-        raise HTTPException(500, str(e))
+        raise _error_response(e)
 
 
 @app.post("/recall")
@@ -540,7 +599,7 @@ async def api_recall(
         )
         return {"results": results}
     except Exception as e:
-        raise HTTPException(500, str(e))
+        raise _error_response(e)
 
 
 @app.post("/star")
@@ -556,7 +615,7 @@ async def api_star(
             unstar_bead(req.bead_id)
         return {"status": "ok", "bead_id": req.bead_id, "starred": req.starred}
     except Exception as e:
-        raise HTTPException(500, str(e))
+        raise _error_response(e)
 
 
 @app.post("/supersede")
@@ -569,7 +628,7 @@ async def api_supersede(
         supersede_bead(req.old_id, req.new_id)
         return {"status": "ok", "old_id": req.old_id, "new_id": req.new_id}
     except Exception as e:
-        raise HTTPException(500, str(e))
+        raise _error_response(e)
 
 
 @app.get("/status")
@@ -600,7 +659,7 @@ async def api_status(
             starred_beads=starred,
         )
     except Exception as e:
-        raise HTTPException(500, str(e))
+        raise _error_response(e)
 
 
 @app.post("/goal")
@@ -613,7 +672,7 @@ async def api_goal(
         set_goal(req.goal, req.project)
         return {"status": "ok", "goal": req.goal}
     except Exception as e:
-        raise HTTPException(500, str(e))
+        raise _error_response(e)
 
 
 @app.post("/phase")
@@ -628,7 +687,7 @@ async def api_phase(
         phase = get_phase(req.project)
         return {"phase": phase or "intake"}
     except Exception as e:
-        raise HTTPException(500, str(e))
+        raise _error_response(e)
 
 
 @app.get("/bead/{bead_id}")
@@ -645,7 +704,7 @@ async def api_get_bead(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, str(e))
+        raise _error_response(e)
 
 
 if __name__ == "__main__":
