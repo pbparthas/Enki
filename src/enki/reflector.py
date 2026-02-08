@@ -17,6 +17,7 @@ The SkillManager distills reflections into atomic, reusable beads
 and deduplicates against existing knowledge.
 """
 
+import hashlib
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -408,16 +409,9 @@ def _reflect_process(trace: ExecutionTrace) -> list[Reflection]:
     """Analyze overall process compliance."""
     reflections = []
 
-    # No goal set
+    # No goal set — nothing to evaluate, skip entirely
     if not trace.goal:
-        reflections.append(Reflection(
-            category="failed",
-            description="No goal set for session — can't measure success without a target",
-            evidence="session.goal is None",
-            confidence=0.9,
-            actionable=True,
-            suggested_bead_type="learning",
-        ))
+        return reflections
 
     # Phase progression
     if trace.phase_start != trace.phase_end:
@@ -528,17 +522,30 @@ def distill_reflections(
             source_reflections=[reflection.description],
         )
 
-        # Check for duplicates against existing beads
+        # Exact-content dedup via SHA-256 hash
+        content_hash = hashlib.sha256(content.encode()).hexdigest()
+        try:
+            db = get_db()
+            existing_hash = db.execute(
+                "SELECT id FROM beads WHERE content_hash = ?", (content_hash,)
+            ).fetchone()
+            if existing_hash:
+                skill.is_duplicate = True
+                skill.duplicate_of = existing_hash[0]
+                skills.append(skill)
+                continue
+        except Exception as e:
+            logger.warning("Non-fatal error in reflector: %s", e)
+
+        # Fallback: embedding similarity check
         try:
             existing = search(content, limit=3, log_accesses=False)
             for result in existing:
                 if result.score > 0.85:
-                    # High similarity — likely duplicate
                     skill.is_duplicate = True
                     skill.duplicate_of = result.bead.id
                     break
         except Exception as e:
-            # Search failed — store anyway, better to have duplicates than lose knowledge
             logger.warning("Non-fatal error in reflector: %s", e)
 
         skills.append(skill)
@@ -648,6 +655,10 @@ def close_feedback_loop(project_path: Path = None) -> dict:
     # Step 1: Gather
     trace = gather_execution_trace(project_path)
     report["session_id"] = trace.session_id
+
+    # Short-circuit: nothing to reflect on
+    if trace.goal is None and len(trace.files_edited) == 0:
+        return report
 
     # Step 2: Reflect
     reflections = reflect_on_session(trace)

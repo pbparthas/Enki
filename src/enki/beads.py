@@ -1,5 +1,6 @@
 """Bead CRUD operations."""
 
+import hashlib
 import json
 import uuid
 from datetime import datetime
@@ -79,18 +80,26 @@ def create_bead(
     """
     bead_id = str(uuid.uuid4())
     tags_json = json.dumps(tags or [])
+    content_hash = hashlib.sha256(content.encode()).hexdigest()
 
     db = get_db()
+
+    # Exact-content dedup: skip if identical bead already exists
+    existing = db.execute(
+        "SELECT id FROM beads WHERE content_hash = ?", (content_hash,)
+    ).fetchone()
+    if existing:
+        return get_bead(existing[0])
 
     # P1-09: Wrap bead + embedding insert in explicit transaction
     try:
         db.execute("BEGIN")
         db.execute(
             """
-            INSERT INTO beads (id, content, type, summary, project, context, tags, starred)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO beads (id, content, type, summary, project, context, tags, starred, content_hash)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (bead_id, content, bead_type, summary, project, context, tags_json, int(starred)),
+            (bead_id, content, bead_type, summary, project, context, tags_json, int(starred), content_hash),
         )
 
         # Generate and store embedding

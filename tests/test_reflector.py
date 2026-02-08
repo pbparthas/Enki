@@ -231,12 +231,11 @@ class TestReflectKnowledgeUsage:
 # =============================================================================
 
 class TestReflectProcess:
-    def test_no_goal(self):
+    def test_no_goal_returns_empty(self):
+        """No goal = nothing to evaluate, no reflections created."""
         trace = _make_trace(goal=None)
         reflections = _reflect_process(trace)
-        failed = [r for r in reflections if r.category == "failed"]
-        assert len(failed) >= 1
-        assert "no goal" in failed[0].description.lower()
+        assert len(reflections) == 0
 
     def test_full_flow(self):
         trace = _make_trace(
@@ -344,3 +343,28 @@ class TestHelpers:
         r = Reflection("warning", "Scope escalation detected", "evidence", 0.9, True, "pattern")
         tags = _derive_tags(r)
         assert "scope" in tags
+
+
+# =============================================================================
+# PIPELINE GUARD TESTS
+# =============================================================================
+
+class TestPipelineGuard:
+    def test_no_goal_no_edits_short_circuits(self):
+        """No goal + no edits = pipeline returns empty report immediately."""
+        trace = _make_trace(goal=None, files_edited=[])
+        # Simulate what close_feedback_loop checks
+        assert trace.goal is None
+        assert len(trace.files_edited) == 0
+
+    def test_no_goal_with_edits_still_reflects(self):
+        """No goal but edits happened = still worth reflecting."""
+        trace = _make_trace(goal=None, files_edited=["auth.py"])
+        assert trace.goal is None
+        assert len(trace.files_edited) > 0
+
+    def test_goal_set_no_edits_still_reflects(self):
+        """Goal set but no edits = still worth reflecting."""
+        trace = _make_trace(goal="Add auth", files_edited=[])
+        assert trace.goal is not None
+        assert len(trace.files_edited) == 0

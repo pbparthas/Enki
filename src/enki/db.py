@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS beads (
     -- Context
     context TEXT,
     tags TEXT,  -- JSON array
+    content_hash TEXT,  -- SHA-256 of content for exact dedup
 
     -- Timestamps
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -180,6 +181,7 @@ CREATE INDEX IF NOT EXISTS idx_beads_project ON beads(project);
 CREATE INDEX IF NOT EXISTS idx_beads_type ON beads(type);
 CREATE INDEX IF NOT EXISTS idx_beads_created ON beads(created_at);
 CREATE INDEX IF NOT EXISTS idx_beads_weight ON beads(weight);
+-- idx_beads_content_hash created in _migrate_content_hash()
 CREATE INDEX IF NOT EXISTS idx_access_log_bead ON access_log(bead_id);
 CREATE INDEX IF NOT EXISTS idx_interceptions_session ON interceptions(session_id);
 CREATE INDEX IF NOT EXISTS idx_interceptions_result ON interceptions(result);
@@ -303,6 +305,34 @@ def init_db(db_path: Optional[Path] = None) -> None:
 
     conn = get_db(path)
     conn.executescript(SCHEMA)
+    conn.commit()
+
+    # Migration: add content_hash column if missing, backfill existing rows
+    _migrate_content_hash(conn)
+
+
+def _migrate_content_hash(conn: sqlite3.Connection) -> None:
+    """Add content_hash column and backfill existing beads."""
+    import hashlib
+
+    # Check if column exists
+    columns = [row[1] for row in conn.execute("PRAGMA table_info(beads)").fetchall()]
+    if "content_hash" in columns:
+        # Check if backfill needed (any NULL content_hash)
+        null_count = conn.execute(
+            "SELECT COUNT(*) FROM beads WHERE content_hash IS NULL"
+        ).fetchone()[0]
+        if null_count == 0:
+            return
+    else:
+        conn.execute("ALTER TABLE beads ADD COLUMN content_hash TEXT")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_beads_content_hash ON beads(content_hash)")
+
+    # Backfill SHA-256 hashes
+    rows = conn.execute("SELECT id, content FROM beads WHERE content_hash IS NULL").fetchall()
+    for row in rows:
+        content_hash = hashlib.sha256(row[1].encode()).hexdigest()
+        conn.execute("UPDATE beads SET content_hash = ? WHERE id = ?", (content_hash, row[0]))
     conn.commit()
 
 
