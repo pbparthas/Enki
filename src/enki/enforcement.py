@@ -542,26 +542,185 @@ def register_gate(name: str, check_fn, needs_file_path: bool = True) -> None:
     _GATE_REGISTRY.append(_GateEntry(name, check_fn, needs_file_path))
 
 
-def _gate_enforcement_integrity(tool, file_path, agent_type, project_path):
+def _gate_enforcement_integrity(tool, file_path, agent_type, project_path, **kw):
     return check_enforcement_integrity(tool, file_path, agent_type, project_path)
 
-def _gate_phase(tool, file_path, agent_type, project_path):
+def _gate_phase(tool, file_path, agent_type, project_path, **kw):
     return check_gate_1_phase(tool, file_path, project_path)
 
-def _gate_spec(tool, file_path, agent_type, project_path):
+def _gate_spec(tool, file_path, agent_type, project_path, **kw):
     return check_gate_2_spec(tool, agent_type, project_path)
 
-def _gate_tdd(tool, file_path, agent_type, project_path):
+def _gate_tdd(tool, file_path, agent_type, project_path, **kw):
     return check_gate_3_tdd(tool, file_path, project_path)
 
-def _gate_scope(tool, file_path, agent_type, project_path):
+def _gate_scope(tool, file_path, agent_type, project_path, **kw):
     return check_gate_4_scope(tool, file_path, project_path)
+
+
+# === Gate 2.5: TaskGraph Binding (Hardening Spec v2, Step 4 / GAP-01) ===
+
+WORD_OVERLAP_THRESHOLD = 0.3
+
+
+def _tokenize(text: str) -> set[str]:
+    """Tokenize text into lowercase words for overlap scoring."""
+    return set(re.findall(r'[a-z0-9]+', text.lower()))
+
+
+def _word_overlap_score(text_a: str, text_b: str) -> float:
+    """Compute word overlap score between two strings.
+
+    Deterministic. No LLM. No semantic similarity.
+    Score = |shared tokens| / |total unique tokens|
+    """
+    tokens_a = _tokenize(text_a)
+    tokens_b = _tokenize(text_b)
+    if not tokens_a or not tokens_b:
+        return 0.0
+    total = tokens_a | tokens_b
+    if not total:
+        return 0.0
+    shared = tokens_a & tokens_b
+    return len(shared) / len(total)
+
+
+def check_gate_2_5_taskgraph(
+    tool: str,
+    agent_type: Optional[str] = None,
+    task_description: Optional[str] = None,
+    project_path: Optional[Path] = None,
+) -> GateResult:
+    """Gate 2.5: TaskGraph binding for Task tool during orchestration.
+
+    When an orchestration is active, Task tool calls must match a ready
+    task in the TaskGraph. The gate performs the match — CC does not
+    self-declare task_id.
+
+    Matching rules (deterministic, no LLM):
+    1. Exact agent type match against ready tasks
+    2. Single candidate: allow immediately
+    3. Multiple candidates: word-overlap scoring, 0.3 threshold
+    4. Zero candidates or below threshold: block
+
+    Explore/Plan agents exempt. No active orchestration = pass.
+    Fail-closed: TaskGraph can't load = block all except Explore/Plan.
+    """
+    try:
+        # Only check Task tool
+        if tool != "Task":
+            return GateResult(allowed=True, gate="taskgraph")
+
+        # Explore/Plan exempt
+        if agent_type in RESEARCH_AGENTS:
+            return GateResult(allowed=True, gate="taskgraph")
+
+        # Check if there's an active orchestration
+        from .orchestrator import load_orchestration
+        orch = load_orchestration(project_path)
+        if orch is None:
+            # No active orchestration — gate passes
+            return GateResult(allowed=True, gate="taskgraph")
+
+        # Get task graph from orchestration (embedded in ENKI_ORCHESTRATION state)
+        graph = orch.task_graph
+        if graph is None:
+            # TaskGraph can't load during active orchestration — fail closed
+            return GateResult(
+                allowed=False,
+                gate="taskgraph",
+                reason=(
+                    "GATE 2.5: TaskGraph cannot be loaded during active orchestration.\n"
+                    "Fail-closed. Only Explore/Plan agents are allowed."
+                ),
+            )
+
+        # Get ready tasks
+        ready = graph.get_ready_tasks()
+        if not ready:
+            return GateResult(
+                allowed=False,
+                gate="taskgraph",
+                reason=(
+                    "GATE 2.5: No ready tasks in TaskGraph.\n"
+                    "All tasks are either complete, blocked, or in progress."
+                ),
+            )
+
+        # Filter by exact agent type match
+        candidates = [t for t in ready if t.agent == agent_type]
+
+        if not candidates:
+            ready_summary = ", ".join(f"{t.id} ({t.agent})" for t in ready)
+            return GateResult(
+                allowed=False,
+                gate="taskgraph",
+                reason=(
+                    f"GATE 2.5: No ready task for agent type '{agent_type}'.\n"
+                    f"Ready tasks: {ready_summary}"
+                ),
+            )
+
+        # Single candidate — allow immediately
+        if len(candidates) == 1:
+            matched = candidates[0]
+            score = _word_overlap_score(task_description or "", matched.description) if task_description else 1.0
+            logger.info("Gate 2.5: bound to task %s (single candidate, score=%.2f)", matched.id, score)
+            matched.status = "active"
+            return GateResult(allowed=True, gate="taskgraph")
+
+        # Multiple candidates — score by word overlap
+        if not task_description:
+            ready_summary = ", ".join(f"{t.id}: {t.description[:50]}" for t in candidates)
+            return GateResult(
+                allowed=False,
+                gate="taskgraph",
+                reason=(
+                    f"GATE 2.5: Multiple ready tasks for agent '{agent_type}' "
+                    f"but no description to match against.\n"
+                    f"Candidates: {ready_summary}"
+                ),
+            )
+
+        scored = [(t, _word_overlap_score(task_description, t.description)) for t in candidates]
+        scored.sort(key=lambda x: x[1], reverse=True)
+        best_task, best_score = scored[0]
+
+        if best_score < WORD_OVERLAP_THRESHOLD:
+            ready_summary = ", ".join(
+                f"{t.id}: {t.description[:50]} (score={s:.2f})" for t, s in scored
+            )
+            return GateResult(
+                allowed=False,
+                gate="taskgraph",
+                reason=(
+                    f"GATE 2.5: No task matched above threshold ({WORD_OVERLAP_THRESHOLD}).\n"
+                    f"Candidates: {ready_summary}"
+                ),
+            )
+
+        logger.info("Gate 2.5: bound to task %s (score=%.2f)", best_task.id, best_score)
+        best_task.status = "active"
+        return GateResult(allowed=True, gate="taskgraph")
+
+    except Exception as e:
+        if agent_type in RESEARCH_AGENTS:
+            return GateResult(allowed=True, gate="taskgraph")
+        logger.error("Gate 2.5 (taskgraph) error — fail closed: %s", e)
+        return GateResult(allowed=False, gate="taskgraph",
+                          reason=f"Gate error — fail closed: {e}")
+
+
+def _gate_taskgraph(tool, file_path, agent_type, project_path, **kw):
+    task_description = kw.get("task_description")
+    return check_gate_2_5_taskgraph(tool, agent_type, task_description, project_path)
 
 
 # Register built-in gates in order of priority
 register_gate("enforcement_integrity", _gate_enforcement_integrity, needs_file_path=True)
 register_gate("phase", _gate_phase, needs_file_path=True)
 register_gate("spec", _gate_spec, needs_file_path=False)
+register_gate("taskgraph", _gate_taskgraph, needs_file_path=False)
 register_gate("tdd", _gate_tdd, needs_file_path=True)
 register_gate("scope", _gate_scope, needs_file_path=True)
 
@@ -572,6 +731,7 @@ def check_all_gates(
     agent_type: Optional[str] = None,
     project_path: Optional[Path] = None,
     bash_command: Optional[str] = None,
+    task_description: Optional[str] = None,
 ) -> GateResult:
     """Check all registered gates.
 
@@ -584,6 +744,7 @@ def check_all_gates(
         agent_type: Agent type (None = most restrictive)
         project_path: Project directory path
         bash_command: Raw bash command string (for Bash tool interception)
+        task_description: Task tool description (for Gate 2.5 matching)
     """
     try:
         # For Bash tool: extract target file from command and check gates
@@ -592,11 +753,14 @@ def check_all_gates(
             if extracted:
                 file_path = extracted
 
+        # Extra kwargs for gates that need them (e.g., Gate 2.5)
+        extra = {"task_description": task_description}
+
         # Iterate registered gates in order
         for gate in _GATE_REGISTRY:
             if gate.needs_file_path and not file_path:
                 continue
-            result = gate.check_fn(tool, file_path, agent_type, project_path)
+            result = gate.check_fn(tool, file_path, agent_type, project_path, **extra)
             if not result.allowed:
                 return result
 

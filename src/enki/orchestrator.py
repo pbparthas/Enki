@@ -4,6 +4,7 @@ Handles task execution, bug tracking, and HITL escalation.
 """
 
 import logging
+import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -89,6 +90,7 @@ class Orchestration:
     current_wave: int = 1
     hitl_required: bool = False
     hitl_reason: Optional[str] = None
+    validation_commands: list = field(default_factory=list)  # Gate 5: commands to run before completion
 
     def to_dict(self) -> dict:
         return {
@@ -103,6 +105,7 @@ class Orchestration:
             "current_wave": self.current_wave,
             "hitl_required": self.hitl_required,
             "hitl_reason": self.hitl_reason,
+            "validation_commands": self.validation_commands,
         }
 
     @classmethod
@@ -116,6 +119,7 @@ class Orchestration:
             current_wave=data.get("current_wave", 1),
             hitl_required=data.get("hitl_required", False),
             hitl_reason=data.get("hitl_reason"),
+            validation_commands=data.get("validation_commands", []),
         )
 
         if data.get("task_graph"):
@@ -326,6 +330,169 @@ def log_to_running(message: str, project_path: Path = None):
         f.write(f"\n[{timestamp}] {message}\n")
 
 
+# === Gate 4.5: Validation Enforcement (Hardening Spec v2, Step 5 / GAP-03) ===
+
+
+def check_gate_4_5_validation(
+    task_id: str,
+    project_path: Path = None,
+) -> tuple[bool, str]:
+    """Gate 4.5: Validation enforcement on task completion.
+
+    Before a task can be marked complete, its validators must have
+    passed. Workers with mapped validators cannot bypass validation.
+
+    No active orchestration = pass.
+    No validators for agent type = pass.
+    Validators passed = pass.
+    Otherwise = block.
+
+    Args:
+        task_id: Task to check
+        project_path: Project directory path
+
+    Returns:
+        (allowed, reason) tuple
+    """
+    project_path = project_path or Path.cwd()
+
+    orch = load_orchestration(project_path)
+    if orch is None:
+        return True, "No active orchestration"
+
+    if not orch.task_graph or task_id not in orch.task_graph.tasks:
+        return False, f"Task not found: {task_id}"
+
+    task = orch.task_graph.tasks[task_id]
+
+    # Check if this agent type has validators
+    validators = WORKER_VALIDATORS.get(task.agent, [])
+    if not validators:
+        return True, f"No validators for agent type '{task.agent}'"
+
+    # Task has validators — check if they've passed
+    if task.validation_status == "passed":
+        return True, "Validators passed"
+
+    # Validators required but haven't passed
+    return False, (
+        f"GATE 4.5: Validation Required\n\n"
+        f"Task {task_id} (agent: {task.agent}) requires validation by: {', '.join(validators)}\n"
+        f"Current validation_status: {task.validation_status}\n\n"
+        f"Task must be submitted for validation and approved before completion."
+    )
+
+
+# === Gate 5: Orchestration Completion (Hardening Spec v2, Step 6 / GAP-05) ===
+
+
+def check_gate_5_completion(
+    project_path: Path = None,
+) -> tuple[bool, str]:
+    """Gate 5: Run validation_commands before orchestration completion.
+
+    All configured validation_commands must exit with code 0.
+    Fail-closed: commands configured but can't execute = block.
+    No validation_commands = pass (backwards-compatible).
+
+    Args:
+        project_path: Project directory path
+
+    Returns:
+        (allowed, reason) tuple
+    """
+    project_path = project_path or Path.cwd()
+
+    orch = load_orchestration(project_path)
+    if orch is None:
+        return True, "No active orchestration"
+
+    if not orch.validation_commands:
+        return True, "No validation_commands configured"
+
+    failures = []
+    for cmd in orch.validation_commands:
+        if not isinstance(cmd, str) or not cmd.strip():
+            failures.append(f"Invalid command: {cmd!r}")
+            continue
+
+        try:
+            result = subprocess.run(
+                cmd,
+                shell=True,
+                capture_output=True,
+                text=True,
+                cwd=str(project_path),
+                timeout=300,  # 5 minute timeout per command
+            )
+            if result.returncode != 0:
+                stderr_preview = (result.stderr or "").strip()[:200]
+                failures.append(
+                    f"Command failed (exit {result.returncode}): {cmd}\n"
+                    f"  stderr: {stderr_preview}"
+                )
+        except subprocess.TimeoutExpired:
+            failures.append(f"Command timed out (300s): {cmd}")
+        except Exception as e:
+            failures.append(f"Command error: {cmd} — {e}")
+
+    if failures:
+        return False, (
+            f"GATE 5: Validation Commands Failed\n\n"
+            + "\n".join(f"- {f}" for f in failures)
+            + "\n\nAll validation_commands must pass before orchestration completion."
+        )
+
+    return True, "All validation_commands passed"
+
+
+def complete_orchestration(
+    project_path: Path = None,
+) -> Orchestration:
+    """Complete an orchestration after Gate 5 validation.
+
+    Gate 5: Runs validation_commands, requires all pass.
+    No bypass flag. Only path: pass checks or HITL override.
+
+    Args:
+        project_path: Project directory path
+
+    Returns:
+        The completed orchestration
+
+    Raises:
+        ValueError: If Gate 5 fails or orchestration not ready
+    """
+    project_path = project_path or Path.cwd()
+
+    orch = load_orchestration(project_path)
+    if not orch:
+        raise ValueError("No active orchestration")
+
+    # Check all tasks are complete
+    if orch.task_graph:
+        incomplete = [
+            t for t in orch.task_graph.tasks.values()
+            if t.status != "complete"
+        ]
+        if incomplete:
+            raise ValueError(
+                f"Cannot complete orchestration: {len(incomplete)} tasks not complete: "
+                + ", ".join(t.id for t in incomplete[:5])
+            )
+
+    # Gate 5: Run validation commands
+    allowed, reason = check_gate_5_completion(project_path)
+    if not allowed:
+        raise ValueError(reason)
+
+    orch.status = "completed"
+    save_orchestration(orch, project_path)
+    log_to_running(f"ORCHESTRATION COMPLETED (Gate 5 passed): {orch.spec_name}", project_path)
+
+    return orch
+
+
 # === Task Execution ===
 
 def start_task(
@@ -375,11 +542,15 @@ def complete_task(
     For worker tasks that need validation, this submits them
     for validation instead of marking complete directly.
 
+    Gate 4.5 (Hardening Spec v2): skip_validation only works for
+    agent types with no mapped validators. Workers with validators
+    MUST go through the validation flow.
+
     Args:
         task_id: Task ID to complete
         output: Task output/result
         project_path: Project directory path
-        skip_validation: If True, skip validation (use for validator tasks)
+        skip_validation: If True, skip validation (only for validator/non-validated tasks)
 
     Returns:
         The task (in validating or complete state)
@@ -396,12 +567,24 @@ def complete_task(
     task = orch.task_graph.tasks[task_id]
     task.output = output
 
+    # Gate 4.5: Enforce validation for tasks with mapped validators
+    if skip_validation and needs_validation(task):
+        # Gate 4.5: Cannot skip validation for tasks with validators
+        allowed, reason = check_gate_4_5_validation(task_id, project_path)
+        if not allowed:
+            raise ValueError(
+                f"GATE 4.5: Cannot skip validation for agent '{task.agent}'. "
+                f"Validators required: {', '.join(WORKER_VALIDATORS.get(task.agent, []))}. "
+                f"Use submit_for_validation() instead."
+            )
+        # If gate passes (validators already passed), allow completion
+
     # Check if this task needs validation
     if not skip_validation and needs_validation(task):
         # Don't complete yet - submit for validation
         return submit_for_validation(task_id, output, project_path)
 
-    # No validation needed (or skipped) - mark complete directly
+    # No validation needed (or validators already passed) - mark complete directly
     task.status = "complete"
     task.validation_status = "passed"  # Implicitly passed
 
@@ -413,10 +596,14 @@ def complete_task(
     if all(t.status == "complete" for t in current_wave_tasks):
         orch.current_wave += 1
 
-    # Check if orchestration is complete
+    # Check if orchestration is complete — Gate 5 validates
     if all(t.status == "complete" for t in orch.task_graph.tasks.values()):
-        orch.status = "completed"
-        log_to_running(f"ORCHESTRATION COMPLETED: {orch.spec_name}", project_path)
+        allowed, reason = check_gate_5_completion(project_path)
+        if allowed:
+            orch.status = "completed"
+            log_to_running(f"ORCHESTRATION COMPLETED (Gate 5 passed): {orch.spec_name}", project_path)
+        else:
+            log_to_running(f"GATE 5 BLOCKED COMPLETION: {reason[:100]}", project_path)
 
     save_orchestration(orch, project_path)
     log_to_running(f"TASK COMPLETED: {task_id}", project_path)
@@ -681,17 +868,106 @@ def get_open_bugs(project_path: Path = None) -> list:
 
 # === HITL Escalation ===
 
+# Escalation evidence validation (Hardening Spec v2, Step 3 / GAP-07)
+MIN_ATTEMPTS = 3
+MIN_DESCRIPTION_LEN = 20
+MIN_RESULT_LEN = 20
+MIN_WHY_FAILED_LEN = 30
+MIN_HYPOTHESIS_LEN = 30
+MIN_RESOLUTION_OPTIONS = 2
+
+
+def validate_escalation_evidence(evidence: dict) -> tuple[bool, str]:
+    """Validate structured escalation evidence before allowing HITL.
+
+    Requires 3+ meaningfully distinct attempts, a hypothesis, and
+    resolution options. No empty fields. No lazy escalation.
+
+    Args:
+        evidence: Dict with attempts, hypothesis, resolution_options
+
+    Returns:
+        (valid, reason) — True if valid, False with explanation if not
+    """
+    if not isinstance(evidence, dict):
+        return False, "Evidence must be a dict"
+
+    # Check attempts
+    attempts = evidence.get("attempts")
+    if not isinstance(attempts, list) or len(attempts) < MIN_ATTEMPTS:
+        return False, f"Minimum {MIN_ATTEMPTS} distinct attempts required, got {len(attempts) if isinstance(attempts, list) else 0}"
+
+    seen_descriptions = set()
+    for i, attempt in enumerate(attempts):
+        if not isinstance(attempt, dict):
+            return False, f"Attempt {i+1} must be a dict"
+
+        desc = attempt.get("description", "")
+        result = attempt.get("result", "")
+        why_failed = attempt.get("why_failed", "")
+
+        if not isinstance(desc, str) or len(desc.strip()) < MIN_DESCRIPTION_LEN:
+            return False, f"Attempt {i+1}: description must be >= {MIN_DESCRIPTION_LEN} chars, got {len(desc.strip()) if isinstance(desc, str) else 0}"
+
+        if not isinstance(result, str) or len(result.strip()) < MIN_RESULT_LEN:
+            return False, f"Attempt {i+1}: result must be >= {MIN_RESULT_LEN} chars, got {len(result.strip()) if isinstance(result, str) else 0}"
+
+        if not isinstance(why_failed, str) or len(why_failed.strip()) < MIN_WHY_FAILED_LEN:
+            return False, f"Attempt {i+1}: why_failed must be >= {MIN_WHY_FAILED_LEN} chars, got {len(why_failed.strip()) if isinstance(why_failed, str) else 0}"
+
+        # Check distinctness — descriptions must not be identical
+        normalized = desc.strip().lower()
+        if normalized in seen_descriptions:
+            return False, f"Attempt {i+1}: description is identical to a previous attempt. Attempts must be meaningfully distinct."
+        seen_descriptions.add(normalized)
+
+    # Check hypothesis
+    hypothesis = evidence.get("hypothesis", "")
+    if not isinstance(hypothesis, str) or len(hypothesis.strip()) < MIN_HYPOTHESIS_LEN:
+        return False, f"Hypothesis must be >= {MIN_HYPOTHESIS_LEN} chars, got {len(hypothesis.strip()) if isinstance(hypothesis, str) else 0}"
+
+    # Check resolution options
+    options = evidence.get("resolution_options")
+    if not isinstance(options, list) or len(options) < MIN_RESOLUTION_OPTIONS:
+        return False, f"Minimum {MIN_RESOLUTION_OPTIONS} resolution options required, got {len(options) if isinstance(options, list) else 0}"
+
+    for i, opt in enumerate(options):
+        if not isinstance(opt, str) or not opt.strip():
+            return False, f"Resolution option {i+1} must be a non-empty string"
+
+    return True, "Evidence validated"
+
+
 def escalate_to_hitl(
     reason: str,
     project_path: Path = None,
+    evidence: dict = None,
 ):
-    """Escalate to human-in-the-loop.
+    """Escalate to human-in-the-loop. Requires structured evidence.
+
+    Hardening Spec v2, GAP-07: Escalation requires 3+ attempted
+    approaches with structured evidence before HITL is accepted.
 
     Args:
         reason: Reason for escalation
         project_path: Project directory path
+        evidence: Structured escalation evidence (required)
+
+    Raises:
+        ValueError: If evidence is missing or invalid
     """
     project_path = project_path or Path.cwd()
+
+    # Gate: require evidence
+    if evidence is None:
+        raise ValueError(
+            "ESCALATION EVIDENCE REQUIRED: Cannot escalate without structured evidence. "
+            "Provide attempts (min 3), hypothesis, and resolution_options."
+        )
+
+    valid, msg = validate_escalation_evidence(evidence)
+    if not valid:
+        raise ValueError(f"ESCALATION EVIDENCE INVALID: {msg}")
 
     orch = load_orchestration(project_path)
     if not orch:
@@ -1235,10 +1511,14 @@ def record_validation_result(
             if all(t.status == "complete" for t in current_wave_tasks):
                 orch.current_wave += 1
 
-            # Check if orchestration is complete
+            # Check if orchestration is complete — Gate 5 validates
             if all(t.status == "complete" for t in orch.task_graph.tasks.values()):
-                orch.status = "completed"
-                log_to_running(f"ORCHESTRATION COMPLETED: {orch.spec_name}", project_path)
+                allowed, reason = check_gate_5_completion(project_path)
+                if allowed:
+                    orch.status = "completed"
+                    log_to_running(f"ORCHESTRATION COMPLETED (Gate 5 passed): {orch.spec_name}", project_path)
+                else:
+                    log_to_running(f"GATE 5 BLOCKED COMPLETION: {reason[:100]}", project_path)
 
             log_to_running(f"TASK COMPLETED (validated): {task_id}", project_path)
         else:
@@ -1420,6 +1700,149 @@ def get_rejected_tasks(project_path: Path = None) -> list[Task]:
         return []
 
     return [t for t in orch.task_graph.tasks.values() if t.status == "rejected"]
+
+
+# === Validation Hierarchy (Hardening Spec v2, Step 7) ===
+#
+# Tier 1: deterministic checks (tests, linters, type-checkers) — MANDATORY, gate completion
+# Tier 2: LLM review (sentinel agents) — ADVISORY, findings surfaced but don't gate
+# Tier 3: human override — ONLY path to override Tier 1 failure
+#
+# INVARIANT: No code path allows Tier 2 to override a Tier 1 failure.
+
+from .agents_config import VALIDATION_TIERS, VALIDATOR_TIERS
+
+
+@dataclass
+class ValidationResult:
+    """Result from running validation hierarchy."""
+    tier1_passed: bool  # All deterministic checks passed
+    tier1_failures: list  # List of (command, error) tuples
+    tier2_findings: list  # Advisory findings from LLM review (don't gate)
+    can_complete: bool  # True only if tier1_passed
+    override_required: bool = False  # True if tier1 failed (needs HITL)
+
+    @property
+    def summary(self) -> str:
+        parts = []
+        if self.tier1_passed:
+            parts.append("Tier 1 (deterministic): PASSED")
+        else:
+            parts.append(f"Tier 1 (deterministic): FAILED ({len(self.tier1_failures)} failures)")
+        if self.tier2_findings:
+            parts.append(f"Tier 2 (advisory): {len(self.tier2_findings)} findings")
+        else:
+            parts.append("Tier 2 (advisory): clean")
+        return " | ".join(parts)
+
+
+def get_validator_tier(validator: str) -> int:
+    """Get the validation tier for a validator agent.
+
+    Returns 1 for deterministic (mandatory), 2 for LLM (advisory).
+    Unknown validators default to Tier 1 (fail-closed / mandatory).
+    """
+    return VALIDATOR_TIERS.get(validator, 1)
+
+
+def run_validation_hierarchy(
+    deterministic_commands: list[str] = None,
+    tier2_findings: list[str] = None,
+    project_path: Path = None,
+) -> ValidationResult:
+    """Run the validation hierarchy.
+
+    Step 1: Run Tier 1 (deterministic) commands — all must pass.
+    Step 2: Collect Tier 2 (LLM review) findings — advisory only.
+    Step 3: Determine outcome:
+      - Tier 1 passed → can_complete=True
+      - Tier 1 failed → can_complete=False, override_required=True (HITL only)
+      - Tier 2 findings never gate completion.
+
+    INVARIANT: Tier 2 cannot override Tier 1 failure.
+
+    Args:
+        deterministic_commands: Shell commands for Tier 1
+        tier2_findings: Pre-collected advisory findings (from sentinel agents)
+        project_path: Project directory path
+
+    Returns:
+        ValidationResult
+    """
+    project_path = project_path or Path.cwd()
+    tier2_findings = tier2_findings or []
+
+    # === Tier 1: Deterministic checks ===
+    tier1_failures = []
+    for cmd in (deterministic_commands or []):
+        if not isinstance(cmd, str) or not cmd.strip():
+            tier1_failures.append((cmd, "Invalid command"))
+            continue
+
+        try:
+            result = subprocess.run(
+                cmd,
+                shell=True,
+                capture_output=True,
+                text=True,
+                cwd=str(project_path),
+                timeout=300,
+            )
+            if result.returncode != 0:
+                stderr = (result.stderr or "").strip()[:200]
+                tier1_failures.append((cmd, f"exit {result.returncode}: {stderr}"))
+        except subprocess.TimeoutExpired:
+            tier1_failures.append((cmd, "timed out (300s)"))
+        except Exception as e:
+            tier1_failures.append((cmd, str(e)))
+
+    tier1_passed = len(tier1_failures) == 0
+
+    # === Tier 2: LLM advisory (collected externally) ===
+    # tier2_findings are surfaced but NEVER gate completion.
+    # This is enforced structurally: can_complete depends ONLY on tier1_passed.
+
+    # === Outcome ===
+    # INVARIANT: can_complete = tier1_passed (Tier 2 has no influence)
+    return ValidationResult(
+        tier1_passed=tier1_passed,
+        tier1_failures=tier1_failures,
+        tier2_findings=tier2_findings,
+        can_complete=tier1_passed,
+        override_required=not tier1_passed,
+    )
+
+
+def classify_validation_verdict(
+    validator: str,
+    passed: bool,
+    feedback: str = None,
+) -> dict:
+    """Classify a validation verdict by tier.
+
+    Tier 1 verdicts gate completion (mandatory).
+    Tier 2 verdicts are advisory (surfaced but don't gate).
+
+    Args:
+        validator: Validator agent name
+        passed: Whether validation passed
+        feedback: Feedback if failed
+
+    Returns:
+        Dict with tier, mandatory, and impact fields
+    """
+    tier = get_validator_tier(validator)
+    is_mandatory = VALIDATION_TIERS.get(tier, {}).get("mandatory", True)
+
+    return {
+        "validator": validator,
+        "tier": tier,
+        "tier_name": VALIDATION_TIERS.get(tier, {}).get("name", "unknown"),
+        "passed": passed,
+        "mandatory": is_mandatory,
+        "gates_completion": is_mandatory and not passed,
+        "feedback": feedback,
+    }
 
 
 # === Agent Spawning ===

@@ -26,8 +26,30 @@ AGENT_TYPE=$(echo "${INPUT}" | jq -r '.tool_input.subagent_type // ""')
 CWD=$(echo "${INPUT}" | jq -r '.cwd // "."')
 SESSION_ID=$(echo "${INPUT}" | jq -r '.session_id // ""')
 
-# Extract reasoning from the conversation context (if available)
-REASONING=$(echo "${INPUT}" | jq -r '.tool_input.description // .reasoning // ""')
+# === Reasoning extraction per tool type (Table 9, Hardening Spec v2) ===
+# Each tool type has a primary and fallback reasoning source.
+REASONING=""
+case "${TOOL}" in
+    Bash)
+        REASONING=$(echo "${INPUT}" | jq -r '.tool_input.description // .reasoning // ""')
+        ;;
+    Edit)
+        REASONING=$(echo "${INPUT}" | jq -r '.tool_input.description // (.tool_input.old_string // "" | .[0:100]) // ""')
+        ;;
+    Write)
+        REASONING=$(echo "${INPUT}" | jq -r '.tool_input.description // .tool_input.file_path // ""')
+        ;;
+    MultiEdit)
+        REASONING=$(echo "${INPUT}" | jq -r '.tool_input.description // .tool_input.file_path // ""')
+        ;;
+    Task)
+        REASONING=$(echo "${INPUT}" | jq -r '.tool_input.description // (.tool_input.prompt // "" | .[0:200]) // ""')
+        ;;
+    *)
+        # Non-Table-9 tools: no reasoning extraction needed
+        REASONING=""
+        ;;
+esac
 
 # Skip if no tool name
 if [[ -z "${TOOL}" ]]; then
@@ -50,6 +72,21 @@ fi
 if [[ -z "${ENKI_BIN}" ]] || [[ ! -x "${ENKI_BIN}" ]]; then
     echo '{"decision": "block", "reason": "Enki CLI not found. Cannot verify gates — fail closed."}'
     exit 0
+fi
+
+# === Layer 0: Infrastructure Blocklist (Hardening Spec v2, Step 1.5) ===
+# Shell-layer hard stop. No exceptions. No scope override. No phase override.
+# These files are NEVER writable by any tool, regardless of context.
+INFRA_BLOCKLIST="enforcement.py ereshkigal.py hooks.py enki-pre-tool-use.sh enki-post-tool-use.sh patterns.json"
+
+if [[ "${TOOL}" =~ ^(Edit|Write|MultiEdit)$ ]] && [[ -n "${FILE_PATH}" ]]; then
+    BASENAME=$(basename "${FILE_PATH}")
+    for BLOCKED in ${INFRA_BLOCKLIST}; do
+        if [[ "${BASENAME}" == "${BLOCKED}" ]]; then
+            echo "{\"decision\": \"block\", \"reason\": \"INFRASTRUCTURE BLOCKLIST: ${BASENAME} is never writable. This is a shell-layer hard stop — no exceptions.\"}"
+            exit 0
+        fi
+    done
 fi
 
 # === Layer 1: Gate Checks ===
@@ -75,22 +112,18 @@ else
 fi
 
 # === Layer 2: Ereshkigal Pattern Interception ===
+# Table 9 (Hardening Spec v2): Ereshkigal intercepts ALL state-modifying tools.
+# Bash, Edit, Write, MultiEdit, Task — no exceptions.
 NEEDS_ERESHKIGAL=false
 
-if [[ "${TOOL}" == "Bash" ]]; then
+if [[ "${TOOL}" =~ ^(Bash|Edit|Write|MultiEdit|Task)$ ]]; then
     NEEDS_ERESHKIGAL=true
 fi
 
-# Edit/Write to enforcement infrastructure paths
-if [[ "${TOOL}" =~ ^(Edit|Write|MultiEdit)$ ]] && [[ -n "${FILE_PATH}" ]]; then
-    if echo "${FILE_PATH}" | grep -qiE "(enki|enforcement|ereshkigal|evolution|hooks|patterns\.json|\.claude/hooks)"; then
-        NEEDS_ERESHKIGAL=true
-    fi
-fi
-
 if [[ "${NEEDS_ERESHKIGAL}" == "true" ]]; then
+    # Fail-closed: Table 9 tools MUST provide reasoning for Ereshkigal analysis
     if [[ -z "${REASONING}" ]]; then
-        echo '{"decision": "block", "reason": "No reasoning provided. Ereshkigal requires justification."}'
+        echo '{"decision": "block", "reason": "No reasoning provided. Ereshkigal requires justification for all state-modifying tools (Table 9)."}'
         exit 0
     fi
 

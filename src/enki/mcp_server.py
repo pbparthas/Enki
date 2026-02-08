@@ -47,6 +47,7 @@ from .pm import (
     generate_perspectives, check_perspectives_complete,
     create_spec, approve_spec, is_spec_approved, list_specs,
     decompose_spec, save_task_graph, get_orchestration_status,
+    generate_approval_token,
 )
 from .orchestrator import (
     start_orchestration, load_orchestration,
@@ -821,13 +822,24 @@ def _handle_plan(arguments: dict, remote: bool) -> list[TextContent]:
 
 
 def _handle_approve(arguments: dict, remote: bool) -> list[TextContent]:
+    """Atomic HITL approval flow (Gate 6, Hardening Spec v2).
+
+    Generates token, approves spec, consumes token — all in one handler call.
+    CC never gets a turn where the token file exists on disk.
+    """
     project_path = _get_project_path(arguments)
     try:
-        approve_spec(arguments["name"], project_path)
+        # Atomic flow: generate → approve (which consumes) → done
+        token = generate_approval_token(project_path)
+        approve_spec(arguments["name"], project_path, approval_token=token)
         return [TextContent(type="text",
             text=f"Spec approved: {arguments['name']}\n\nGate 2 (Spec Approval) is now satisfied.\nYou can now spawn implementation agents.",
         )]
     except ValueError as e:
+        # Clean up token file if approval failed
+        token_path = project_path / ".enki" / "approval_token"
+        if token_path.exists():
+            token_path.unlink(missing_ok=True)
         return [TextContent(type="text", text=f"Error: {e}")]
 
 

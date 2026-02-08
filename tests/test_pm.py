@@ -11,7 +11,14 @@ from enki.pm import (
     decompose_spec, Task, TaskGraph,
     save_task_graph, load_task_graph, get_orchestration_status,
     PERSPECTIVES, get_perspectives_path, get_specs_dir,
+    generate_approval_token, consume_approval_token,
 )
+
+
+def _approve_with_token(name: str, project_path: Path) -> bool:
+    """Helper: generate token and approve spec (simulates atomic HITL flow)."""
+    token = generate_approval_token(project_path)
+    return approve_spec(name, project_path, approval_token=token)
 
 
 @pytest.fixture
@@ -227,8 +234,9 @@ class TestApproveSpec:
 
     def test_approve_nonexistent_raises(self, temp_project):
         """Test approving nonexistent spec raises error."""
+        token = generate_approval_token(temp_project)
         with pytest.raises(ValueError) as exc:
-            approve_spec("nonexistent", temp_project)
+            approve_spec("nonexistent", temp_project, approval_token=token)
 
         assert "not found" in str(exc.value)
 
@@ -244,7 +252,7 @@ class TestApproveSpec:
         path.write_text(content)
         create_spec(name="my-feature", project_path=temp_project)
 
-        approve_spec("my-feature", temp_project)
+        _approve_with_token("my-feature", temp_project)
 
         running = (temp_project / ".enki" / "RUNNING.md").read_text()
         assert "SPEC APPROVED: my-feature" in running
@@ -263,7 +271,7 @@ class TestApproveSpec:
 
         assert not is_spec_approved("approved-feature", temp_project)
 
-        approve_spec("approved-feature", temp_project)
+        _approve_with_token("approved-feature", temp_project)
 
         assert is_spec_approved("approved-feature", temp_project)
 
@@ -279,9 +287,99 @@ class TestApproveSpec:
         path.write_text(content)
         create_spec(name="test", project_path=temp_project)
 
-        approve_spec("test", temp_project)
+        _approve_with_token("test", temp_project)
 
         assert get_phase(temp_project) == "implement"
+
+
+class TestGate6ApprovalToken:
+    """Tests for Gate 6: Human-origin approval token mechanics."""
+
+    def _create_spec(self, temp_project, name="gate6-test"):
+        """Helper to create a spec ready for approval."""
+        generate_perspectives(goal="Test", project_path=temp_project)
+        path = get_perspectives_path(temp_project)
+        content = path.read_text().replace(
+            "(Fill in your analysis here)", "Analysis complete."
+        )
+        path.write_text(content)
+        create_spec(name=name, project_path=temp_project)
+
+    def test_approve_with_valid_token(self, temp_project):
+        """approve_spec() with valid token succeeds, token consumed."""
+        self._create_spec(temp_project)
+        token = generate_approval_token(temp_project)
+        assert approve_spec("gate6-test", temp_project, approval_token=token)
+
+        # Token file should be consumed (deleted)
+        token_path = temp_project / ".enki" / "approval_token"
+        assert not token_path.exists()
+
+    def test_approve_without_token_raises(self, temp_project):
+        """approve_spec() with no token raises ValueError."""
+        self._create_spec(temp_project)
+        with pytest.raises(ValueError, match="GATE 6.*No approval token"):
+            approve_spec("gate6-test", temp_project)
+
+    def test_approve_with_wrong_token_raises(self, temp_project):
+        """approve_spec() with wrong token raises ValueError."""
+        self._create_spec(temp_project)
+        generate_approval_token(temp_project)  # create real token
+        with pytest.raises(ValueError, match="GATE 6.*Invalid or expired"):
+            approve_spec("gate6-test", temp_project, approval_token="wrong-token-value")
+
+    def test_approve_with_expired_token_raises(self, temp_project):
+        """approve_spec() with expired token (>5 min) raises ValueError."""
+        import json
+        from datetime import datetime, timedelta
+
+        self._create_spec(temp_project)
+        token = generate_approval_token(temp_project)
+
+        # Manually backdate the token
+        token_path = temp_project / ".enki" / "approval_token"
+        token_data = json.loads(token_path.read_text())
+        old_time = datetime.now() - timedelta(seconds=301)
+        token_data["created_at"] = old_time.isoformat()
+        token_path.write_text(json.dumps(token_data))
+
+        with pytest.raises(ValueError, match="GATE 6.*Invalid or expired"):
+            approve_spec("gate6-test", temp_project, approval_token=token)
+
+    def test_approve_with_consumed_token_raises(self, temp_project):
+        """approve_spec() with already-consumed token raises ValueError."""
+        self._create_spec(temp_project, name="gate6-consumed")
+        token = generate_approval_token(temp_project)
+
+        # First use succeeds
+        assert approve_spec("gate6-consumed", temp_project, approval_token=token)
+
+        # Create another spec to try reuse — token file is gone, so it's "Invalid or expired"
+        self._create_spec(temp_project, name="gate6-reuse")
+        with pytest.raises(ValueError, match="GATE 6.*Invalid or expired"):
+            approve_spec("gate6-reuse", temp_project, approval_token=token)
+
+    def test_token_is_single_use(self, temp_project):
+        """Token file is deleted after consumption."""
+        token = generate_approval_token(temp_project)
+        token_path = temp_project / ".enki" / "approval_token"
+
+        assert token_path.exists()
+        assert consume_approval_token(token, temp_project)
+        assert not token_path.exists()
+
+        # Second consume fails
+        assert not consume_approval_token(token, temp_project)
+
+    def test_generate_token_creates_file(self, temp_project):
+        """generate_approval_token creates the token file."""
+        token = generate_approval_token(temp_project)
+        token_path = temp_project / ".enki" / "approval_token"
+        assert token_path.exists()
+        import json
+        data = json.loads(token_path.read_text())
+        assert data["token"] == token
+        assert "created_at" in data
 
 
 class TestTaskGraph:
@@ -401,7 +499,7 @@ class TestDecomposeSpec:
         )
         path.write_text(content)
         create_spec(name="test-feature", project_path=temp_project)
-        approve_spec("test-feature", temp_project)
+        _approve_with_token("test-feature", temp_project)
 
         graph = decompose_spec("test-feature", temp_project)
 

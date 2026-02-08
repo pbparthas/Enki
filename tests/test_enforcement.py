@@ -8,8 +8,16 @@ from enki.session import start_session, set_phase, set_tier, set_goal, add_sessi
 from enki.enforcement import (
     detect_tier, is_impl_file, is_test_file, is_enki_file,
     check_gate_1_phase, check_gate_2_spec, check_gate_3_tdd, check_gate_4_scope,
-    check_all_gates,
+    check_gate_2_5_taskgraph, check_all_gates,
+    _word_overlap_score, _tokenize,
 )
+from enki.pm import (
+    generate_perspectives, get_perspectives_path,
+    create_spec, approve_spec, decompose_spec,
+    TaskGraph, Task, save_task_graph, load_task_graph,
+    generate_approval_token,
+)
+from enki.orchestrator import start_orchestration
 
 
 @pytest.fixture
@@ -236,3 +244,130 @@ class TestCheckAllGates:
         result = check_all_gates("Edit", "src/main.py", None, temp_project)
         assert not result.allowed
         assert result.gate == "phase"
+
+
+class TestWordOverlap:
+    """Tests for word overlap scoring."""
+
+    def test_identical_strings(self):
+        assert _word_overlap_score("hello world", "hello world") == 1.0
+
+    def test_no_overlap(self):
+        assert _word_overlap_score("hello world", "foo bar") == 0.0
+
+    def test_partial_overlap(self):
+        score = _word_overlap_score("implement database migration", "run database backup")
+        assert 0.0 < score < 1.0  # "database" shared
+
+    def test_empty_string(self):
+        assert _word_overlap_score("", "hello") == 0.0
+        assert _word_overlap_score("hello", "") == 0.0
+
+    def test_tokenize(self):
+        tokens = _tokenize("Hello World 123 foo-bar")
+        assert "hello" in tokens
+        assert "world" in tokens
+        assert "123" in tokens
+        assert "foo" in tokens
+        assert "bar" in tokens
+
+
+class TestGate25TaskGraph:
+    """Tests for Gate 2.5: TaskGraph binding (GAP-01, Hardening Spec v2)."""
+
+    @pytest.fixture
+    def orch_project(self, temp_project):
+        """Create a project with active orchestration and task graph."""
+        # Set up perspectives + spec + approval
+        generate_perspectives(goal="Test", project_path=temp_project)
+        path = get_perspectives_path(temp_project)
+        content = path.read_text().replace(
+            "(Fill in your analysis here)", "Analysis complete."
+        )
+        path.write_text(content)
+        create_spec(name="test-gate25", project_path=temp_project)
+        token = generate_approval_token(temp_project)
+        approve_spec("test-gate25", temp_project, approval_token=token)
+
+        # Create task graph with ready tasks
+        graph = TaskGraph(spec_name="test-gate25", spec_path="specs/test-gate25.md")
+        graph.add_task(Task(
+            id="task-1", description="Implement user authentication module",
+            agent="Dev", status="pending", wave=1,
+            files_in_scope=["src/auth.py"],
+        ))
+        graph.add_task(Task(
+            id="task-2", description="Write unit tests for authentication",
+            agent="QA", status="pending", wave=2,
+            dependencies=["task-1"],
+        ))
+        graph.add_task(Task(
+            id="task-3", description="Implement database migration scripts",
+            agent="Dev", status="pending", wave=1,
+            files_in_scope=["src/migrations.py"],
+        ))
+        save_task_graph(graph, temp_project)
+
+        # Start orchestration
+        start_orchestration("test-gate25", graph, temp_project)
+        return temp_project
+
+    def test_no_orchestration_passes(self, temp_project):
+        """Gate passes when no active orchestration."""
+        result = check_gate_2_5_taskgraph("Task", "Dev", "some desc", temp_project)
+        assert result.allowed
+
+    def test_explore_agent_exempt(self, orch_project):
+        """Explore agents always pass."""
+        result = check_gate_2_5_taskgraph("Task", "Explore", None, orch_project)
+        assert result.allowed
+
+    def test_plan_agent_exempt(self, orch_project):
+        """Plan agents always pass."""
+        result = check_gate_2_5_taskgraph("Task", "Plan", None, orch_project)
+        assert result.allowed
+
+    def test_non_task_tool_passes(self, orch_project):
+        """Non-Task tools always pass Gate 2.5."""
+        result = check_gate_2_5_taskgraph("Edit", "Dev", None, orch_project)
+        assert result.allowed
+
+    def test_single_candidate_allowed(self, orch_project):
+        """Single matching agent type allows immediately."""
+        result = check_gate_2_5_taskgraph(
+            "Task", "QA", "Write tests for authentication", orch_project
+        )
+        # QA has only task-2, but it's blocked by task-1 (pending dep)
+        # So QA should have zero ready tasks
+        assert not result.allowed
+        assert "No ready task for agent type" in result.reason
+
+    def test_matching_agent_with_ready_task(self, orch_project):
+        """Dev has 2 ready tasks — word overlap picks the right one."""
+        result = check_gate_2_5_taskgraph(
+            "Task", "Dev", "Implement the user authentication module", orch_project
+        )
+        assert result.allowed
+
+    def test_wrong_agent_type_blocked(self, orch_project):
+        """Agent type with no ready tasks is blocked."""
+        result = check_gate_2_5_taskgraph(
+            "Task", "DBA", "Run database operations", orch_project
+        )
+        assert not result.allowed
+        assert "No ready task for agent type" in result.reason
+
+    def test_below_threshold_blocked(self, orch_project):
+        """Description with no word overlap below threshold is blocked."""
+        result = check_gate_2_5_taskgraph(
+            "Task", "Dev", "xyz completely unrelated gibberish qqq", orch_project
+        )
+        assert not result.allowed
+        assert "threshold" in result.reason.lower() or "No task matched" in result.reason
+
+    def test_multiple_candidates_best_match(self, orch_project):
+        """Multiple Dev tasks — best word overlap wins."""
+        result = check_gate_2_5_taskgraph(
+            "Task", "Dev", "database migration scripts implementation", orch_project
+        )
+        assert result.allowed

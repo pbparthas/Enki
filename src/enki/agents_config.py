@@ -93,6 +93,42 @@ AGENTS = {
         "writes_to": [],  # Read-only analysis
         "skill": "/performance-analyzer",
     },
+    # Sentinel agents (Hardening Spec v2, Step 7 — decomposed from monolithic validator)
+    "Sentinel-Bugs": {
+        "role": "Detect potential bugs via static analysis patterns",
+        "tier": "STANDARD",
+        "tools": ["Read", "Grep", "Glob"],
+        "writes_to": [],
+        "validation_tier": 2,  # LLM review, advisory only
+    },
+    "Sentinel-Maintainability": {
+        "role": "Flag complexity, duplication, coupling issues",
+        "tier": "STANDARD",
+        "tools": ["Read", "Grep", "Glob"],
+        "writes_to": [],
+        "validation_tier": 2,
+    },
+    "Sentinel-TypeSafety": {
+        "role": "Verify type annotations and type correctness",
+        "tier": "STANDARD",
+        "tools": ["Read", "Grep", "Glob"],
+        "writes_to": [],
+        "validation_tier": 2,
+    },
+    "Sentinel-Simplicity": {
+        "role": "Identify over-engineering and unnecessary abstraction",
+        "tier": "STANDARD",
+        "tools": ["Read", "Grep", "Glob"],
+        "writes_to": [],
+        "validation_tier": 2,
+    },
+    "Sentinel-Governance": {
+        "role": "Verify enforcement gates, hook integrity, config compliance",
+        "tier": "STANDARD",
+        "tools": ["Read", "Grep", "Glob"],
+        "writes_to": [],
+        "validation_tier": 2,
+    },
 }
 
 # Map workers to their validators (two-stage where applicable)
@@ -107,4 +143,51 @@ WORKER_VALIDATORS = {
     "DevOps": ["Validator-Code", "Validator-Security"],  # Security validates CI/CD changes
     "UI-UX": ["Validator-Code"],  # Code validates frontend changes
     "Performance": [],  # Analysis-only, no validation needed
+}
+
+
+# === Validation Hierarchy (Hardening Spec v2, Step 7) ===
+#
+# Tier 1 (deterministic, mandatory): shell commands — tests, linters, type-checkers.
+#         MUST pass. Gate completion. No override except HITL (Tier 3).
+# Tier 2 (LLM review, advisory): sentinel agents. Findings surfaced but don't gate.
+#         No code path allows Tier 2 to override a Tier 1 failure.
+# Tier 3 (human override): only a human can override Tier 1 failure via HITL.
+
+VALIDATION_TIERS = {
+    1: {
+        "name": "deterministic",
+        "description": "Shell commands, test suites, linters, type-checkers",
+        "mandatory": True,   # MUST pass to proceed
+        "override": "hitl",  # Only human can override
+    },
+    2: {
+        "name": "llm_review",
+        "description": "Agent-based review — sentinel agents, findings advisory only",
+        "mandatory": False,  # Findings surfaced but don't gate
+        "override": None,    # No override needed since not mandatory
+    },
+    3: {
+        "name": "human",
+        "description": "Human-in-the-loop — only path to override Tier 1 failure",
+        "mandatory": True,
+        "override": None,    # Human IS the override
+    },
+}
+
+# Which validators are deterministic (Tier 1) vs LLM advisory (Tier 2)
+VALIDATOR_TIERS = {
+    # Tier 1: Deterministic — these GATE completion
+    "Validator-Tests": 1,
+    "Validator-Code": 1,
+    "Validator-Security": 1,
+    # Tier 2: LLM advisory — findings surfaced, don't gate
+    "Sentinel-Bugs": 2,
+    "Sentinel-Maintainability": 2,
+    "Sentinel-TypeSafety": 2,
+    "Sentinel-Simplicity": 2,
+    "Sentinel-Governance": 2,
+    # Tier 1: General review has deterministic checks
+    "Reviewer": 2,
+    "Security": 2,
 }

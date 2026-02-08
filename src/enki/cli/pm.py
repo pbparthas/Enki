@@ -68,12 +68,14 @@ def cmd_plan(args):
 
 @requires_db
 def cmd_approve(args):
-    """Approve a spec."""
-    from ..pm import approve_spec
+    """Approve a spec. Atomic HITL flow: generate token + approve + consume."""
+    from ..pm import approve_spec, generate_approval_token
 
     project_path = Path(args.project) if args.project else None
     try:
-        approve_spec(args.name, project_path)
+        # Gate 6: Atomic token flow — CLI is human-invoked, so generate + consume here
+        token = generate_approval_token(project_path)
+        approve_spec(args.name, project_path, approval_token=token)
         print(f"Spec approved: {args.name}")
         print("Phase transitioned to: implement")
         print()
