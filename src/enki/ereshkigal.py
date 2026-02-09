@@ -220,7 +220,37 @@ DEFAULT_PATTERNS = {
         r"override.*mode.*restriction",
         r"skip.*mode.*check",
     ],
-}
+
+    # === Post-audit additions (Gemini review) ===
+
+    "engineering_euphemisms": [
+        r"dev(eloper)?\s*velocity",
+        r"signal-to-noise",
+        r"friction",
+        r"downstream\s*(dependencies|blockers?)",
+        r"critical\s*path",
+        r"non-breaking",
+        r"idempotent",
+        r"standardizing",
+        r"soft\s*landing",
+        r"fault[- ]tolerant",
+        r"resilien(ce|t)",
+        r"parity",
+        r"alignment",
+        r"uninterrupted.*execution",
+        r"cascading.*failure",
+    ],
+
+    "verification_faking": [
+        r"functionally equivalent",
+        r"proven.*inspection",
+        r"static analysis",
+        r"behavioral.*alignment",
+        r"verified.*locally",
+        r"matches.*expected.*output",
+        r"logic.*equivalent",
+    ],
+}   
 
 
 def get_patterns_path(patterns_file: Optional[Path] = None) -> Path:

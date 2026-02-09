@@ -89,6 +89,27 @@ if [[ "${TOOL}" =~ ^(Edit|Write|MultiEdit)$ ]] && [[ -n "${FILE_PATH}" ]]; then
     done
 fi
 
+# === Layer 0b: Bash Command Inspection (Protected File Guard) ===
+# Bash can modify files via sed, tee, echo>, etc. — bypassing Edit/Write gates.
+# Inspect the actual command content against the same infrastructure blocklist.
+if [[ "${TOOL}" == "Bash" ]]; then
+    COMMAND=$(echo "${INPUT}" | jq -r '.tool_input.command // ""')
+
+    for BLOCKED in ${INFRA_BLOCKLIST}; do
+        if echo "${COMMAND}" | grep -q "${BLOCKED}"; then
+            if echo "${COMMAND}" | grep -qE "sed -i|tee |> |>> |cat >|echo >|cp |mv |rm |chmod |perl -pi|awk.*>|python.*open|dd |truncate|install "; then
+                echo "{\"decision\": \"block\", \"reason\": \"INFRASTRUCTURE BLOCKLIST: Bash command targets protected file ${BLOCKED}. Shell-layer hard stop — no exceptions.\"}"
+                exit 0
+            fi
+        fi
+    done
+
+    if echo "${COMMAND}" | grep -qE "base64.*-d|eval |source /tmp|bash /tmp|\\\$\(.*\).*>.*\.(py|sh|json)"; then
+        echo '{"decision": "block", "reason": "Indirect file modification pattern detected — fail closed."}'
+        exit 0
+    fi
+fi
+
 # === Layer 1: Gate Checks ===
 # Check phase, spec, TDD, scope gates
 GATE_RESULT=$("${ENKI_BIN}" gate check \
@@ -179,6 +200,13 @@ if [[ "${NEEDS_ERESHKIGAL}" == "true" ]]; then
         --session "${SESSION_ID}" \
         --phase "$(cat "${CWD}/.enki/PHASE" 2>/dev/null || echo 'unknown')" \
         --json 2>/dev/null) || true
+# === Ereshkigal fail-closed guard ===
+    # If Ereshkigal crashes/OOMs/times out, result is empty.
+    # Gate check blocks on empty (line 109); Ereshkigal must do the same.
+    if [[ -z "${ERESHKIGAL_RESULT}" ]]; then
+        echo '{"decision": "block", "reason": "Ereshkigal returned empty — fail closed. No state-modifying tools without interception check."}'
+        exit 0
+    fi
 
     if [[ -n "${ERESHKIGAL_RESULT}" ]]; then
         ERESHKIGAL_DECISION=$(echo "${ERESHKIGAL_RESULT}" | jq -r '.allowed // true')
