@@ -769,6 +769,13 @@ def check_all_gates(
         if file_path or tool in {"Task", "Read", "Glob", "Grep"}:
             return GateResult(allowed=True)
 
+        # Bash with no extracted file target: non-file-modifying command
+        # Shell hook Layer 0b + Ereshkigal already vetted dangerous commands
+        if tool == "Bash":
+            return GateResult(allowed=True)
+
+        return GateResult(allowed=False, reason="No explicit allow condition met")
+
     except Exception as e:
         # Gate error — fail closed, never allow on exception
         logger.error(f"Gate check error — fail closed: {e}")
