@@ -111,6 +111,52 @@ else
     exit 0
 fi
 
+# === Layer 1.5: File Claim Check (Spec 3: Agent Messaging) ===
+# Block Edit/Write/MultiEdit on files claimed by another agent.
+# No bypass flag (AM-2). Uses Python to query the DB directly.
+ENKI_DIR="${CWD}/.enki"
+
+if [[ "${TOOL}" =~ ^(Edit|Write|MultiEdit)$ ]] && [[ -n "${FILE_PATH}" ]]; then
+    PYTHON=""
+    for candidate in \
+        "${CWD}/.venv/bin/python" \
+        "${CWD}/.venv/bin/python3" \
+        "$(which python3 2>/dev/null || true)" \
+        "$(which python 2>/dev/null || true)"; do
+        if [[ -n "${candidate}" ]] && [[ -x "${candidate}" ]]; then
+            PYTHON="${candidate}"
+            break
+        fi
+    done
+
+    if [[ -n "${PYTHON}" ]]; then
+        CURRENT_AGENT=$(cat "${ENKI_DIR}/.current_agent" 2>/dev/null || echo "")
+        CLAIM_OWNER=$( ENKI_CWD="${CWD}" ENKI_FILE="${FILE_PATH}" ENKI_SESSION="${SESSION_ID}" \
+            timeout 2 "${PYTHON}" -c "
+import os, sys, sqlite3
+cwd = os.environ.get('ENKI_CWD', '.')
+db_path = os.path.join(cwd, '.enki', 'wisdom.db')
+if not os.path.exists(db_path):
+    sys.exit(0)
+conn = sqlite3.connect(db_path)
+conn.row_factory = sqlite3.Row
+row = conn.execute(
+    'SELECT agent_id FROM file_claims WHERE file_path = ? AND session_id = ? AND released_at IS NULL',
+    (os.environ['ENKI_FILE'], os.environ['ENKI_SESSION'])
+).fetchone()
+if row:
+    print(row['agent_id'])
+conn.close()
+" 2>/dev/null ) || true
+
+        if [[ -n "${CLAIM_OWNER}" ]] && [[ "${CLAIM_OWNER}" != "${CURRENT_AGENT}" ]]; then
+            BLOCK_REASON="FILE CLAIM CONFLICT: ${FILE_PATH} is claimed by ${CLAIM_OWNER}. Wait for release or send a message requesting access."
+            echo "{\"decision\": \"block\", \"reason\": $(echo "${BLOCK_REASON}" | jq -Rs .)}"
+            exit 0
+        fi
+    fi
+fi
+
 # === Layer 2: Ereshkigal Pattern Interception ===
 # Table 9 (Hardening Spec v2): Ereshkigal intercepts ALL state-modifying tools.
 # Bash, Edit, Write, MultiEdit, Task — no exceptions.

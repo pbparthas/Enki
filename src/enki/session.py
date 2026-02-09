@@ -10,6 +10,7 @@ from .path_utils import atomic_write
 
 Phase = Literal["intake", "debate", "plan", "implement", "review", "test", "ship"]
 Tier = Literal["trivial", "quick_fix", "feature", "major"]
+Mode = Literal["pm", "em", "none"]
 
 PHASES: list[Phase] = ["intake", "debate", "plan", "implement", "review", "test", "ship"]
 TIERS: list[Tier] = ["trivial", "quick_fix", "feature", "major"]
@@ -247,3 +248,24 @@ def tier_rank(tier: Tier) -> int:
 def tier_escalated(old_tier: Tier, new_tier: Tier) -> bool:
     """Check if tier has escalated."""
     return tier_rank(new_tier) > tier_rank(old_tier)
+
+
+# === Mode Tracking (Spec 4: PM-EM Orchestration) ===
+
+
+def get_mode(project_path: Optional[Path] = None) -> Mode:
+    """Get current mode (pm/em/none)."""
+    enki_dir = get_project_enki_dir(project_path)
+    mode_file = enki_dir / "MODE"
+    if mode_file.exists():
+        mode = mode_file.read_text().strip()
+        if mode in ("pm", "em"):
+            return mode
+    return "none"
+
+
+def set_mode(mode: Mode, project_path: Optional[Path] = None) -> None:
+    """Set current mode (pm/em/none)."""
+    enki_dir = ensure_project_enki_dir(project_path)
+    with atomic_write(enki_dir / "MODE") as f:
+        f.write(mode)

@@ -98,7 +98,8 @@ async def list_tools() -> list[Tool]:
                     },
                     "type": {
                         "type": "string",
-                        "enum": ["decision", "solution", "learning", "violation", "pattern"],
+                        "enum": ["decision", "solution", "learning", "violation", "pattern",
+                                 "style", "approach", "rejection"],
                         "description": "Type of knowledge",
                     },
                     "summary": {
@@ -143,7 +144,8 @@ async def list_tools() -> list[Tool]:
                     },
                     "type": {
                         "type": "string",
-                        "enum": ["decision", "solution", "learning", "violation", "pattern"],
+                        "enum": ["decision", "solution", "learning", "violation", "pattern",
+                                 "style", "approach", "rejection"],
                         "description": "Optional type filter",
                     },
                     "limit": {
@@ -598,6 +600,104 @@ async def list_tools() -> list[Tool]:
                 "required": ["task_id"],
             },
         ),
+        # Messaging tools (Spec 3: Agent Messaging)
+        Tool(
+            name="enki_send_message",
+            description="Send a message to another agent",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "from_agent": {"type": "string"},
+                    "to_agent": {"type": "string"},
+                    "subject": {"type": "string"},
+                    "body": {"type": "string"},
+                    "importance": {
+                        "type": "string",
+                        "enum": ["low", "normal", "high", "critical"],
+                        "default": "normal",
+                    },
+                    "thread_id": {"type": "string", "description": "Optional thread ID for replies"},
+                },
+                "required": ["from_agent", "to_agent", "subject", "body"],
+            },
+        ),
+        Tool(
+            name="enki_get_messages",
+            description="Get messages for an agent",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "agent_id": {"type": "string"},
+                    "unread_only": {"type": "boolean", "default": False},
+                    "limit": {"type": "integer", "default": 20},
+                },
+                "required": ["agent_id"],
+            },
+        ),
+        Tool(
+            name="enki_claim_file",
+            description="Claim exclusive edit access to a file",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "agent_id": {"type": "string"},
+                    "file_path": {"type": "string"},
+                },
+                "required": ["agent_id", "file_path"],
+            },
+        ),
+        Tool(
+            name="enki_release_file",
+            description="Release edit claim on a file",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "agent_id": {"type": "string"},
+                    "file_path": {"type": "string"},
+                },
+                "required": ["agent_id", "file_path"],
+            },
+        ),
+        # PM-EM Orchestration tools (Spec 4)
+        Tool(
+            name="enki_triage",
+            description="Classify incoming work into tiers and activate appropriate gates",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "goal": {"type": "string", "description": "What we're working on"},
+                },
+                "required": ["goal"],
+            },
+        ),
+        Tool(
+            name="enki_handover",
+            description="Hand over from PM to EM (requires approved spec) or EM back to PM",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "to": {"type": "string", "enum": ["pm", "em"],
+                           "description": "Target mode"},
+                    "spec": {"type": "string",
+                             "description": "Spec name (required for PM→EM)"},
+                    "reason": {"type": "string",
+                               "description": "Reason (required for EM→PM escalation)"},
+                },
+                "required": ["to"],
+            },
+        ),
+        Tool(
+            name="enki_escalate",
+            description="EM escalates to PM when stuck",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "reason": {"type": "string",
+                               "description": "Why escalation is needed"},
+                },
+                "required": ["reason"],
+            },
+        ),
         # Reflector tool
         Tool(
             name="enki_reflect",
@@ -680,18 +780,91 @@ def _status_label(result: dict) -> str:
 
 
 def _handle_remember(arguments: dict, remote: bool) -> list[TextContent]:
+    import hashlib
+    from .beads import assign_kind
+    from .keywords import extract_keywords
+
+    content = arguments["content"]
+    bead_type = arguments["type"]
+
+    # 1. Compute content_hash for dedup (G-7: SHA-256)
+    content_hash = hashlib.sha256(content.encode()).hexdigest()
+    db = get_db()
+    existing = db.execute(
+        "SELECT id FROM beads WHERE content_hash = ?", (content_hash,)
+    ).fetchone()
+    if existing:
+        return [TextContent(
+            type="text",
+            text=f"Already stored (duplicate): {existing['id']}"
+        )]
+
+    # 2. Assign kind (G-6: deterministic, hardcoded)
+    kind = assign_kind(bead_type, content)
+
+    # 3. Create the bead via store
     from .store import get_store
     store = get_store(remote)
     result = store.remember(
-        content=arguments["content"], bead_type=arguments["type"],
+        content=content, bead_type=bead_type,
         summary=arguments.get("summary"), project=arguments.get("project"),
         context=arguments.get("context"), tags=arguments.get("tags"),
         starred=arguments.get("starred", False),
     )
     label = _status_label(result)
-    content = arguments["content"]
-    preview = f"{content[:200]}{'...' if len(content) > 200 else ''}"
-    return [TextContent(type="text", text=f"Remembered [{result['type']}] {result['id']}{label}\n\n{preview}")]
+    bead_id = result["id"]
+
+    # 4. Supersession check (ONLY for kind='preference')
+    superseded = []
+    if kind == "preference":
+        keywords = extract_keywords(content)
+        if keywords:
+            similar = search(query=" ".join(keywords), project=None, limit=5, log_accesses=False)
+            for r in similar:
+                if (getattr(r.bead, 'kind', 'fact') == "preference"
+                        and r.bead.id != bead_id
+                        and r.score > 0.6
+                        and getattr(r.bead, 'archived_at', None) is None):
+                    db.execute(
+                        "UPDATE beads SET superseded_by = ?, archived_at = CURRENT_TIMESTAMP WHERE id = ?",
+                        (bead_id, r.bead.id)
+                    )
+                    superseded.append(r.bead)
+            if superseded:
+                db.commit()
+
+    # 5. Echo: find similar existing beads (always present section — C7)
+    echo_beads = []
+    try:
+        echo_results = search(query=content[:200], project=None, limit=3, log_accesses=False)
+        echo_beads = [r for r in echo_results if r.bead.id != bead_id]
+    except Exception:
+        pass  # Echo is best-effort
+
+    # 6. Build response (sections always present — G-4)
+    response_parts = [
+        f"Remembered [{bead_type}] ({kind}) {bead_id}{label}",
+        "",
+        "--- Similar Knowledge ---",
+    ]
+    if echo_beads:
+        for eb in echo_beads[:3]:
+            eb_kind = getattr(eb.bead, 'kind', 'fact')
+            response_parts.append(
+                f"- [{eb.bead.type}] ({eb_kind}) {eb.bead.summary or eb.bead.content[:100]}"
+            )
+    else:
+        response_parts.append("(none found)")
+
+    if superseded:
+        response_parts.append("")
+        response_parts.append("--- Superseded ---")
+        for s in superseded:
+            response_parts.append(
+                f"- Archived: [{s.type}] {s.summary or s.content[:100]} (was {s.id})"
+            )
+
+    return [TextContent(type="text", text="\n".join(response_parts))]
 
 
 def _handle_recall(arguments: dict, remote: bool) -> list[TextContent]:
@@ -778,10 +951,65 @@ def _handle_status(arguments: dict, remote: bool) -> list[TextContent]:
 
 def _handle_goal(arguments: dict, remote: bool) -> list[TextContent]:
     from .store import get_store
+    from .keywords import extract_keywords
+
+    goal = arguments["goal"]
     store = get_store(remote)
-    result = store.set_goal(arguments["goal"], arguments.get("project"))
+    result = store.set_goal(goal, arguments.get("project"))
     label = _status_label(result)
-    return [TextContent(type="text", text=f"Goal set: {arguments['goal']}{label}\n\nGate 1 (Goal Required) is now satisfied.")]
+
+    # 1. Extract keywords (no LLM — C3)
+    keywords = extract_keywords(goal)
+
+    # 2. Cross-project search (C1: project=None)
+    results = []
+    if keywords:
+        try:
+            results = search(
+                query=" ".join(keywords),
+                project=None,
+                limit=8,
+                log_accesses=True,
+            )
+        except Exception:
+            pass  # Search is best-effort for goal piggyback
+
+    # 3. Build response
+    response_parts = [
+        f"Goal set: {goal}{label}",
+        "",
+    ]
+
+    # 4. B1: Assertive repetition detection (C12: 0.7 threshold hardcoded)
+    solution_beads = [r for r in results if r.bead.type == "solution" and r.score > 0.7]
+    if solution_beads:
+        top = solution_beads[0]
+        response_parts.append("⚠️ EXISTING SOLUTION DETECTED:")
+        response_parts.append(
+            f"[{top.bead.type}] ({top.bead.project or 'global'}) "
+            f"{top.bead.summary or top.bead.content[:200]}"
+        )
+        response_parts.append(f"Bead ID: {top.bead.id}")
+        # C13: exact string
+        response_parts.append("Review before reimplementing.")
+        response_parts.append("")
+
+    # 5. Relevant knowledge section (always present — C4)
+    response_parts.append("--- Relevant Knowledge ---")
+    if results:
+        for r in results[:8]:
+            prefix = "⚠️ " if r.bead.type == "solution" and r.score > 0.7 else ""
+            response_parts.append(
+                f"- {prefix}[{r.bead.type}] ({r.bead.project or 'global'}) "
+                f"{r.bead.summary or r.bead.content[:150]}"
+            )
+    else:
+        response_parts.append("(no relevant knowledge found)")
+
+    response_parts.append("")
+    response_parts.append("Gate 1 (Goal Required) is now satisfied.")
+
+    return [TextContent(type="text", text="\n".join(response_parts))]
 
 
 def _handle_phase(arguments: dict, remote: bool) -> list[TextContent]:
@@ -1131,6 +1359,147 @@ def _handle_feedback_loop(arguments: dict, remote: bool) -> list[TextContent]:
         return [TextContent(type="text", text=f"Feedback loop error: {e}")]
 
 
+def _handle_send_message(arguments: dict, remote: bool) -> list[TextContent]:
+    from .messaging import send_message, register_agent
+    from .session import get_session_id
+    session_id = get_session_id(_get_project_path(arguments)) or "unknown"
+    # Auto-register agents
+    register_agent(arguments["from_agent"], arguments["from_agent"], session_id)
+    register_agent(arguments["to_agent"], arguments["to_agent"], session_id)
+    msg = send_message(
+        from_agent=arguments["from_agent"],
+        to_agent=arguments["to_agent"],
+        subject=arguments["subject"],
+        body=arguments["body"],
+        session_id=session_id,
+        importance=arguments.get("importance", "normal"),
+        thread_id=arguments.get("thread_id"),
+    )
+    return [TextContent(type="text",
+        text=f"Message sent: {msg.from_agent} → {msg.to_agent}\n"
+             f"Subject: {msg.subject}\nImportance: {msg.importance}\nID: {msg.id}")]
+
+
+def _handle_get_messages(arguments: dict, remote: bool) -> list[TextContent]:
+    from .messaging import get_messages
+    from .session import get_session_id
+    session_id = get_session_id(_get_project_path(arguments)) or "unknown"
+    messages = get_messages(
+        agent_id=arguments["agent_id"],
+        session_id=session_id,
+        unread_only=arguments.get("unread_only", False),
+        limit=arguments.get("limit", 20),
+    )
+    if not messages:
+        return [TextContent(type="text", text=f"No messages for {arguments['agent_id']}")]
+    lines = [f"Messages for {arguments['agent_id']} ({len(messages)}):"]
+    for msg in messages:
+        read_marker = "" if msg.read_at else " [UNREAD]"
+        lines.append(f"\n[{msg.importance}]{read_marker} From: {msg.from_agent}")
+        lines.append(f"Subject: {msg.subject}")
+        lines.append(f"{msg.body[:500]}")
+        lines.append(f"ID: {msg.id}")
+    return [TextContent(type="text", text="\n".join(lines))]
+
+
+def _handle_claim_file(arguments: dict, remote: bool) -> list[TextContent]:
+    from .messaging import claim_file
+    from .session import get_session_id
+    session_id = get_session_id(_get_project_path(arguments)) or "unknown"
+    success = claim_file(
+        agent_id=arguments["agent_id"],
+        file_path=arguments["file_path"],
+        session_id=session_id,
+    )
+    if success:
+        return [TextContent(type="text",
+            text=f"File claimed: {arguments['file_path']} → {arguments['agent_id']}")]
+    return [TextContent(type="text",
+        text=f"CLAIM DENIED: {arguments['file_path']} is already claimed by another agent")]
+
+
+def _handle_release_file(arguments: dict, remote: bool) -> list[TextContent]:
+    from .messaging import release_file
+    from .session import get_session_id
+    session_id = get_session_id(_get_project_path(arguments)) or "unknown"
+    release_file(
+        agent_id=arguments["agent_id"],
+        file_path=arguments["file_path"],
+        session_id=session_id,
+    )
+    return [TextContent(type="text",
+        text=f"File released: {arguments['file_path']} (was {arguments['agent_id']})")]
+
+
+# =============================================================================
+# Spec 4: PM-EM Handlers
+# =============================================================================
+
+
+def _handle_triage(arguments: dict, remote: bool) -> list[TextContent]:
+    from .pm import triage, activate_gates
+    from .session import set_tier
+    project_path = _get_project_path(arguments)
+    result = triage(arguments["goal"], project_path)
+    activate_gates(result, project_path)
+    set_tier(result.tier, project_path)
+    lines = [
+        f"Triage: **{result.tier}**",
+        f"Estimated files: {result.estimated_files}",
+        f"Active gates: {', '.join(result.gate_set)}",
+        f"Requires spec: {result.requires_spec}",
+        f"Requires debate: {result.requires_debate}",
+    ]
+    if result.suggested_agents:
+        lines.append(f"Suggested agents: {', '.join(result.suggested_agents)}")
+    return [TextContent(type="text", text="\n".join(lines))]
+
+
+def _handle_handover(arguments: dict, remote: bool) -> list[TextContent]:
+    from .pm import handover_pm_to_em, escalate_em_to_pm
+    from .session import get_session_id
+    project_path = _get_project_path(arguments)
+    session_id = get_session_id(project_path) or "unknown"
+    target = arguments["to"]
+
+    if target == "em":
+        spec = arguments.get("spec")
+        if not spec:
+            return [TextContent(type="text",
+                text="ERROR: PM→EM handover requires a spec name.")]
+        try:
+            result = handover_pm_to_em(spec, project_path, session_id)
+            return [TextContent(type="text",
+                text=f"Handover complete: PM → EM\n"
+                     f"Spec: {result['spec']}\n"
+                     f"Tasks: {result['tasks']}\n"
+                     f"Mode: {result['mode']}")]
+        except ValueError as e:
+            return [TextContent(type="text", text=f"ERROR: {e}")]
+
+    elif target == "pm":
+        reason = arguments.get("reason", "No reason provided")
+        result = escalate_em_to_pm(reason, project_path, session_id)
+        return [TextContent(type="text",
+            text=f"Escalation complete: EM → PM\n"
+                 f"Reason: {result['reason']}\n"
+                 f"Mode: {result['mode']}")]
+
+    return [TextContent(type="text", text=f"ERROR: Unknown target mode '{target}'")]
+
+
+def _handle_escalate(arguments: dict, remote: bool) -> list[TextContent]:
+    from .pm import escalate_em_to_pm
+    from .session import get_session_id
+    project_path = _get_project_path(arguments)
+    session_id = get_session_id(project_path) or "unknown"
+    result = escalate_em_to_pm(arguments["reason"], project_path, session_id)
+    return [TextContent(type="text",
+        text=f"Escalation complete: EM → PM\n"
+             f"Reason: {result['reason']}\n"
+             f"Mode: {result['mode']}")]
+
+
 def _handle_simplify(arguments: dict, remote: bool) -> list[TextContent]:
     params = run_simplification(files=arguments.get("files"), all_modified=arguments.get("all_modified", False))
     return [TextContent(type="text",
@@ -1171,6 +1540,13 @@ TOOL_HANDLERS: dict[str, object] = {
     "enki_worktree_list": _handle_worktree_list,
     "enki_worktree_merge": _handle_worktree_merge,
     "enki_worktree_remove": _handle_worktree_remove,
+    "enki_send_message": _handle_send_message,
+    "enki_get_messages": _handle_get_messages,
+    "enki_claim_file": _handle_claim_file,
+    "enki_release_file": _handle_release_file,
+    "enki_triage": _handle_triage,
+    "enki_handover": _handle_handover,
+    "enki_escalate": _handle_escalate,
     "enki_reflect": _handle_reflect,
     "enki_feedback_loop": _handle_feedback_loop,
     "enki_simplify": _handle_simplify,

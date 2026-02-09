@@ -59,27 +59,48 @@ if [[ ! -d "${ENKI_DIR}" ]]; then
 fi
 
 # =============================================================================
-# DIGEST INJECTION (primary path)
+# CONTEXT.MD RE-INJECTION (v2: regenerated, not cached)
 # =============================================================================
 
-DIGEST_FILE="${ENKI_DIR}/.compact-digest"
+PYTHON=""
+for candidate in \
+    "${CWD}/.venv/bin/python" \
+    "${CWD}/.venv/bin/python3" \
+    "$(which python3 2>/dev/null || true)" \
+    "$(which python 2>/dev/null || true)"; do
+    if [[ -n "${candidate}" ]] && [[ -x "${candidate}" ]]; then
+        PYTHON="${candidate}"
+        break
+    fi
+done
 
-if [[ -f "${DIGEST_FILE}" ]] && [[ -s "${DIGEST_FILE}" ]]; then
-    echo "## Context Restored (Post-Compaction)"
-    echo ""
+if [[ -n "${PYTHON}" ]]; then
+    CONTEXT=$( ENKI_CWD="${CWD}" timeout 3 "${PYTHON}" -c "
+import os, sys
+cwd = os.environ.get('ENKI_CWD', '.')
+sys.path.insert(0, os.path.join(cwd, 'src'))
+try:
+    from pathlib import Path
+    from enki.db import init_db
+    from enki.context import generate_context_md
+    init_db()
+    print(generate_context_md(Path(cwd)))
+except Exception as e:
+    print(f'## Context', file=sys.stdout)
+    print(f'(CONTEXT.md generation failed: {e})', file=sys.stdout)
+" 2>/dev/null ) || true
 
-    # Output the digest as-is — it was built mechanically by transcript.py
-    cat "${DIGEST_FILE}"
-    echo ""
-
+    if [[ -n "${CONTEXT}" ]]; then
+        echo "${CONTEXT}"
+        echo ""
+    else
+        echo "## Context Restored (Post-Compaction)"
+        echo "(CONTEXT.md generation failed)"
+        echo ""
+    fi
 else
-    # =============================================================================
-    # FALLBACK: .enki/ file state only (no digest available)
-    # =============================================================================
-
+    # Fallback: .enki/ file state only (no Python available)
     echo "## Context Restored (Post-Compaction) — Limited"
-    echo ""
-    echo "*No transcript digest available. Showing .enki/ state only.*"
     echo ""
 
     PHASE=$(cat "${ENKI_DIR}/PHASE" 2>/dev/null || echo 'intake')
@@ -93,15 +114,18 @@ else
         echo "**Goal**: (not set)"
     fi
     echo ""
+fi
 
-    # Recent activity
-    if [[ -f "${ENKI_DIR}/RUNNING.md" ]]; then
-        echo "### Recent Activity"
-        echo '```'
-        tail -10 "${ENKI_DIR}/RUNNING.md" 2>/dev/null | grep -v "^$" | head -8
-        echo '```'
-        echo ""
-    fi
+# =============================================================================
+# DIGEST INJECTION (legacy, kept for additional context)
+# =============================================================================
+
+DIGEST_FILE="${ENKI_DIR}/.compact-digest"
+
+if [[ -f "${DIGEST_FILE}" ]] && [[ -s "${DIGEST_FILE}" ]]; then
+    echo "### Session Digest"
+    cat "${DIGEST_FILE}"
+    echo ""
 fi
 
 # =============================================================================

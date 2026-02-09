@@ -56,6 +56,57 @@ for candidate in \
 done
 
 # =============================================================================
+# TTL CLEANUP (Proactive C10: unconditional, no if guard)
+# =============================================================================
+
+if [[ -n "${PYTHON}" ]]; then
+    ENKI_CWD="${CWD}" timeout 2 "${PYTHON}" -c "
+import os, sys
+cwd = os.environ.get('ENKI_CWD', '.')
+sys.path.insert(0, os.path.join(cwd, 'src'))
+try:
+    from enki.db import init_db
+    from enki.retention import cleanup_archived_preferences
+    init_db()
+    deleted = cleanup_archived_preferences()
+    if deleted:
+        print(f'Cleaned {deleted} expired preferences', file=sys.stderr)
+except Exception as e:
+    print(f'WARNING: Cleanup failed: {e}', file=sys.stderr)
+" 2>/dev/null || echo "WARNING: Cleanup failed" >&2
+fi
+
+# =============================================================================
+# CONTEXT.MD GENERATION (v2: single injection point)
+# =============================================================================
+
+if [[ -n "${PYTHON}" ]]; then
+    CONTEXT=$( ENKI_CWD="${CWD}" timeout 3 "${PYTHON}" -c "
+import os, sys
+cwd = os.environ.get('ENKI_CWD', '.')
+sys.path.insert(0, os.path.join(cwd, 'src'))
+try:
+    from pathlib import Path
+    from enki.db import init_db
+    from enki.context import generate_context_md
+    init_db()
+    print(generate_context_md(Path(cwd)))
+except Exception as e:
+    print(f'## Context', file=sys.stdout)
+    print(f'(CONTEXT.md generation failed: {e})', file=sys.stdout)
+" 2>/dev/null ) || true
+
+    if [[ -n "${CONTEXT}" ]]; then
+        echo "${CONTEXT}"
+        echo ""
+    else
+        echo "## Context"
+        echo "(CONTEXT.md generation failed — check enki CLI)"
+        echo ""
+    fi
+fi
+
+# =============================================================================
 # SESSION STATE (from .enki/ files — no CLI needed)
 # =============================================================================
 

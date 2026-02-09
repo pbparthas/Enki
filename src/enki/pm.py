@@ -1,6 +1,6 @@
 """PM (Project Management) module for Enki.
 
-Handles the debate, plan, approve, and decompose phases.
+Handles the debate, plan, approve, decompose, triage, and handover phases.
 """
 
 from dataclasses import dataclass, field
@@ -11,7 +11,7 @@ import json
 import re
 import uuid
 
-from .session import ensure_project_enki_dir, get_phase, set_phase
+from .session import ensure_project_enki_dir, get_phase, set_phase, set_mode, get_mode, Tier
 
 
 # === Gate 6: Human-Origin Approval (Hardening Spec v2) ===
@@ -937,3 +937,176 @@ def get_orchestration_status(project_path: Path = None) -> dict:
         "progress": completed / total if total > 0 else 0.0,
         "ready_tasks": [t.id for t in graph.get_ready_tasks()],
     }
+
+
+# =============================================================================
+# Spec 4: Triage System — Deterministic, No LLM
+# =============================================================================
+
+
+TIER_GATES = {
+    "trivial":   ["gate_1"],
+    "quick_fix": ["gate_1", "gate_3"],
+    "feature":   ["gate_1", "gate_2", "gate_3", "gate_4"],
+    "major":     ["gate_1", "gate_2", "gate_3", "gate_4"],
+}
+
+SCOPE_SIGNALS: dict[str, list[str]] = {
+    "trivial":   ["typo", "rename", "comment", "formatting", "lint"],
+    "quick_fix": ["fix", "bug", "patch", "hotfix", "small"],
+    "feature":   ["implement", "add", "feature", "integrate", "endpoint"],
+    "major":     ["refactor", "migrate", "architecture", "redesign", "rewrite"],
+}
+
+TIER_FILE_ESTIMATES: dict[str, int] = {
+    "trivial": 1,
+    "quick_fix": 2,
+    "feature": 5,
+    "major": 15,
+}
+
+TIER_AGENTS: dict[str, list[str]] = {
+    "trivial": [],
+    "quick_fix": ["Dev"],
+    "feature": ["Dev", "QA"],
+    "major": ["Dev", "QA", "Architect"],
+}
+
+
+@dataclass
+class TriageResult:
+    """Result of triaging incoming work."""
+    tier: Tier
+    estimated_files: int
+    gate_set: list[str]
+    requires_spec: bool
+    requires_debate: bool
+    suggested_agents: list[str]
+
+
+def triage(goal: str, project_path: Path = None) -> TriageResult:
+    """Classify work into tiers. Deterministic. No LLM.
+
+    Uses heuristics: keyword analysis, scope detection.
+    """
+    from .keywords import extract_keywords
+    keywords = extract_keywords(goal)
+
+    scores: dict[str, int] = {tier: 0 for tier in TIER_GATES}
+    for keyword in keywords:
+        for tier, signals in SCOPE_SIGNALS.items():
+            if keyword in signals:
+                scores[tier] += 2
+            for signal in signals:
+                if signal in keyword or keyword in signal:
+                    scores[tier] += 1
+
+    best_tier = max(scores, key=scores.get)
+    if scores[best_tier] == 0:
+        best_tier = "quick_fix"
+
+    return TriageResult(
+        tier=best_tier,
+        estimated_files=TIER_FILE_ESTIMATES.get(best_tier, 2),
+        gate_set=TIER_GATES[best_tier],
+        requires_spec=best_tier in ("feature", "major"),
+        requires_debate=best_tier == "major",
+        suggested_agents=TIER_AGENTS.get(best_tier, []),
+    )
+
+
+def activate_gates(triage_result: TriageResult, project_path: Path = None) -> None:
+    """Write active gate set to .enki/GATES based on triage result."""
+    enki_dir = ensure_project_enki_dir(project_path)
+    from .path_utils import atomic_write
+    with atomic_write(enki_dir / "GATES") as f:
+        f.write(json.dumps(triage_result.gate_set))
+
+
+# =============================================================================
+# Spec 4: Handover Protocol
+# =============================================================================
+
+
+def handover_pm_to_em(spec_name: str, project_path: Path, session_id: str) -> dict:
+    """PM -> EM handover. Requires approved spec.
+
+    1. Validate spec is approved
+    2. Decompose spec into tasks
+    3. Register EM agent
+    4. Send spec summary via messaging
+    5. Switch mode to 'em'
+    6. Record handover as bead (G-10)
+    """
+    if not is_spec_approved(spec_name, project_path):
+        raise ValueError(f"Spec '{spec_name}' not approved. PM cannot hand over unapproved specs.")
+
+    tasks = decompose_spec(spec_name, project_path)
+
+    from .messaging import register_agent, send_message
+    register_agent("pm", "pm", session_id)
+    register_agent("em", "em", session_id)
+
+    spec_content = get_spec(spec_name, project_path) or ""
+    task_summary = "\n".join(
+        f"- {t.id}: {t.description}" for t in tasks.tasks.values()
+    )
+    send_message(
+        from_agent="pm",
+        to_agent="em",
+        subject=f"Handover: {spec_name}",
+        body=f"Approved spec ready for implementation.\n\nTasks:\n{task_summary}",
+        session_id=session_id,
+        importance="critical",
+    )
+
+    set_mode("em", project_path)
+
+    from .beads import create_bead
+    files_in_scope = []
+    for t in tasks.tasks.values():
+        files_in_scope.extend(t.files_in_scope)
+    create_bead(
+        content=f"PM→EM handover. Spec: {spec_name}. Tasks: {len(tasks.tasks)}. "
+                f"Files in scope: {', '.join(set(files_in_scope))}",
+        bead_type="decision",
+        kind="decision",
+        project=str(project_path),
+        tags=["handover", "pm-to-em", spec_name],
+    )
+
+    return {"mode": "em", "tasks": len(tasks.tasks), "spec": spec_name}
+
+
+def escalate_em_to_pm(reason: str, project_path: Path, session_id: str) -> dict:
+    """EM -> PM escalation. EM hit a blocker.
+
+    1. Send escalation message
+    2. Switch mode to 'pm'
+    3. Record escalation as bead (G-10)
+    """
+    from .messaging import register_agent, send_message
+    register_agent("pm", "pm", session_id)
+    register_agent("em", "em", session_id)
+
+    send_message(
+        from_agent="em",
+        to_agent="pm",
+        subject="Escalation: Blocker Hit",
+        body=reason,
+        session_id=session_id,
+        importance="high",
+    )
+
+    set_mode("pm", project_path)
+
+    from .beads import create_bead
+    create_bead(
+        content=f"EM→PM escalation. Reason: {reason}",
+        bead_type="learning",
+        kind="fact",
+        project=str(project_path),
+        tags=["escalation", "em-to-pm"],
+    )
+
+    return {"mode": "pm", "reason": reason}

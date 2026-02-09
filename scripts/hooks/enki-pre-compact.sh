@@ -86,5 +86,33 @@ else
     echo "[${TIMESTAMP}] COMPACT: No transcript_path provided or file missing" >> "${ENKI_DIR}/RUNNING.md"
 fi
 
+# =============================================================================
+# SNAPSHOT EXTRACTION (Enki v2)
+# =============================================================================
+# Extract structured snapshot from CC transcript before compaction.
+# This captures thinking blocks, user messages, and tool calls.
+# Beads are NOT created here — distillation happens at session end.
+
+if [[ -n "${SESSION_ID}" ]]; then
+    if [[ -n "${PYTHON}" ]]; then
+        "${PYTHON}" -c "
+import sys
+sys.path.insert(0, '${CWD}/src')
+try:
+    from enki.hooks import extract_pre_compact_snapshot
+    from pathlib import Path
+    result = extract_pre_compact_snapshot(Path('${CWD}'), '${SESSION_ID}')
+    entries = len(result.get('entries', []))
+    error = result.get('error', '')
+    if error:
+        print(f'SNAPSHOT: {error}', file=sys.stderr)
+    else:
+        print(f'SNAPSHOT: {entries} entries extracted', file=sys.stderr)
+except Exception as e:
+    print(f'SNAPSHOT: error: {e}', file=sys.stderr)
+" 2>>"${ENKI_DIR}/RUNNING.md" || true
+    fi
+fi
+
 # Pre-compact hooks don't output to stdout
 exit 0

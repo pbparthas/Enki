@@ -13,6 +13,7 @@ from .session import (
     Phase, Tier, TIERS,
     get_phase, get_tier, get_goal, get_session_edits,
     has_approved_spec, get_scope_files, tier_rank,
+    get_mode,
 )
 
 # Enforcement integrity: These paths must NEVER be writable by any agent.
@@ -778,3 +779,66 @@ def check_all_gates(
 
     # Fail-closed: no explicit allow condition met
     return GateResult(allowed=False, reason="No explicit allow condition met")
+
+
+# =============================================================================
+# Spec 4: Mode Restrictions (PM cannot edit impl, EM cannot edit specs)
+# =============================================================================
+
+
+def check_mode_restrictions(tool: str, file_path: str, project_path: Path) -> GateResult:
+    """Enforce PM/EM mode restrictions.
+
+    PM mode: Can read, search, write specs. Cannot Edit/Write impl files.
+    EM mode: Can read, edit, write impl files. Cannot modify specs.
+    """
+    mode = get_mode(project_path)
+    if mode == "none":
+        return GateResult(allowed=True)
+
+    if mode == "pm" and tool in ("Edit", "Write", "MultiEdit"):
+        if is_impl_file(file_path) and not is_enki_file(file_path):
+            return GateResult(
+                allowed=False,
+                gate="mode",
+                reason="PM MODE: Cannot edit implementation files.\n"
+                       "Hand over to EM first: enki_handover(to='em', spec='...')"
+            )
+
+    if mode == "em" and tool in ("Edit", "Write", "MultiEdit"):
+        if file_path and "specs/" in file_path:
+            return GateResult(
+                allowed=False,
+                gate="mode",
+                reason="EM MODE: Cannot modify specifications.\n"
+                       "Escalate to PM: enki_escalate(reason='...')"
+            )
+
+    return GateResult(allowed=True)
+
+
+def _gate_mode(tool, file_path, agent_type, project_path, **kw):
+    return check_mode_restrictions(tool, file_path, project_path)
+
+
+# Register mode gate — checked after enforcement_integrity but before phase
+register_gate("mode", _gate_mode, needs_file_path=True)
+
+
+# =============================================================================
+# Spec 4: Dynamic Gate Activation
+# =============================================================================
+
+import json as _json
+
+
+def get_active_gates(project_path: Path) -> Optional[list[str]]:
+    """Read active gate set. Returns None if file missing (fail-closed — PE-4)."""
+    from .session import get_project_enki_dir
+    gates_file = get_project_enki_dir(project_path) / "GATES"
+    if not gates_file.exists():
+        return None  # Caller must treat as all-gates-active
+    try:
+        return _json.loads(gates_file.read_text())
+    except (_json.JSONDecodeError, OSError):
+        return None  # Corrupted — fail closed

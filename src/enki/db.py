@@ -38,7 +38,18 @@ CREATE TABLE IF NOT EXISTS beads (
     id TEXT PRIMARY KEY,
     content TEXT NOT NULL,
     summary TEXT,
-    type TEXT NOT NULL CHECK (type IN ('decision', 'solution', 'learning', 'violation', 'pattern')),
+
+    -- WHAT was learned (type expansion: v2 adds style, approach, rejection)
+    type TEXT NOT NULL CHECK (type IN (
+        'decision', 'solution', 'learning', 'violation', 'pattern',
+        'style', 'approach', 'rejection'
+    )),
+
+    -- HOW it behaves in lifecycle (v2: kind axis)
+    kind TEXT NOT NULL DEFAULT 'fact' CHECK (kind IN (
+        'fact', 'preference', 'pattern', 'decision'
+    )),
+
     project TEXT,
 
     -- Retention
@@ -46,10 +57,13 @@ CREATE TABLE IF NOT EXISTS beads (
     starred INTEGER DEFAULT 0,
     superseded_by TEXT,
 
+    -- Archival + dedup
+    archived_at TIMESTAMP,
+    content_hash TEXT,  -- SHA-256 of content for exact dedup
+
     -- Context
     context TEXT,
     tags TEXT,  -- JSON array
-    content_hash TEXT,  -- SHA-256 of content for exact dedup
 
     -- Timestamps
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -179,15 +193,59 @@ CREATE TABLE IF NOT EXISTS enki_self_analysis (
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_beads_project ON beads(project);
 CREATE INDEX IF NOT EXISTS idx_beads_type ON beads(type);
+CREATE INDEX IF NOT EXISTS idx_beads_kind ON beads(kind);
+CREATE INDEX IF NOT EXISTS idx_beads_archived ON beads(archived_at);
+CREATE INDEX IF NOT EXISTS idx_beads_content_hash ON beads(content_hash);
 CREATE INDEX IF NOT EXISTS idx_beads_created ON beads(created_at);
 CREATE INDEX IF NOT EXISTS idx_beads_weight ON beads(weight);
--- idx_beads_content_hash created in _migrate_content_hash()
 CREATE INDEX IF NOT EXISTS idx_access_log_bead ON access_log(bead_id);
 CREATE INDEX IF NOT EXISTS idx_interceptions_session ON interceptions(session_id);
 CREATE INDEX IF NOT EXISTS idx_interceptions_result ON interceptions(result);
 CREATE INDEX IF NOT EXISTS idx_violations_session ON violations(session_id);
 CREATE INDEX IF NOT EXISTS idx_violations_gate ON violations(gate);
 CREATE INDEX IF NOT EXISTS idx_escalations_session ON tier_escalations(session_id);
+
+-- ============================================================
+-- Agent Messaging Tables (v2)
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS agents (
+    id TEXT PRIMARY KEY,
+    role TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    status TEXT DEFAULT 'active',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    completed_at TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS messages (
+    id TEXT PRIMARY KEY,
+    from_agent TEXT NOT NULL,
+    to_agent TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    body TEXT NOT NULL,
+    importance TEXT DEFAULT 'normal' CHECK (importance IN ('low', 'normal', 'high', 'critical')),
+    thread_id TEXT,
+    session_id TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    read_at TIMESTAMP,
+    FOREIGN KEY (from_agent) REFERENCES agents(id),
+    FOREIGN KEY (to_agent) REFERENCES agents(id)
+);
+
+CREATE TABLE IF NOT EXISTS file_claims (
+    file_path TEXT NOT NULL,
+    agent_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    claimed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    released_at TIMESTAMP,
+    PRIMARY KEY (file_path, agent_id, session_id),
+    FOREIGN KEY (agent_id) REFERENCES agents(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_messages_to ON messages(to_agent, read_at);
+CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(thread_id);
+CREATE INDEX IF NOT EXISTS idx_file_claims_active ON file_claims(file_path, released_at);
 
 -- ============================================================
 -- Offline Mode Tables
@@ -307,8 +365,9 @@ def init_db(db_path: Optional[Path] = None) -> None:
     conn.executescript(SCHEMA)
     conn.commit()
 
-    # Migration: add content_hash column if missing, backfill existing rows
+    # Migrations
     _migrate_content_hash(conn)
+    _migrate_v2_columns(conn)
 
 
 def _migrate_content_hash(conn: sqlite3.Connection) -> None:
@@ -333,6 +392,29 @@ def _migrate_content_hash(conn: sqlite3.Connection) -> None:
     for row in rows:
         content_hash = hashlib.sha256(row[1].encode()).hexdigest()
         conn.execute("UPDATE beads SET content_hash = ? WHERE id = ?", (content_hash, row[0]))
+    conn.commit()
+
+
+def _migrate_v2_columns(conn: sqlite3.Connection) -> None:
+    """Add v2 columns (kind, archived_at) if missing.
+
+    For databases created before v2 migration script was run.
+    Does NOT recreate table — just adds columns with defaults.
+    Full migration (with CHECK constraints) requires scripts/migrate_v2.py.
+    """
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(beads)").fetchall()}
+
+    if "kind" not in columns:
+        conn.execute("ALTER TABLE beads ADD COLUMN kind TEXT NOT NULL DEFAULT 'fact'")
+        # Backfill kind from type
+        conn.execute("UPDATE beads SET kind = 'pattern' WHERE type = 'pattern'")
+        conn.execute("UPDATE beads SET kind = 'decision' WHERE type = 'decision'")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_beads_kind ON beads(kind)")
+
+    if "archived_at" not in columns:
+        conn.execute("ALTER TABLE beads ADD COLUMN archived_at TIMESTAMP")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_beads_archived ON beads(archived_at)")
+
     conn.commit()
 
 

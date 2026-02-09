@@ -10,7 +10,45 @@ from dataclasses import dataclass, field
 from .db import get_db
 from .embeddings import embed, vector_to_blob, blob_to_vector
 
-BeadType = Literal["decision", "solution", "learning", "violation", "pattern"]
+BeadType = Literal[
+    "decision", "solution", "learning", "violation", "pattern",
+    "style", "approach", "rejection",
+]
+BeadKind = Literal["fact", "preference", "pattern", "decision"]
+
+
+def assign_kind(bead_type: str, content: str) -> str:
+    """Assign lifecycle kind based on bead type and content.
+
+    HARDCODED. No config. No LLM. Returns one of:
+    'fact', 'preference', 'pattern', 'decision'
+    """
+    TYPE_TO_KIND = {
+        "style": "preference",
+        "decision": "decision",
+        "violation": "fact",
+        "rejection": "fact",
+        "learning": "fact",
+    }
+
+    if bead_type in TYPE_TO_KIND:
+        return TYPE_TO_KIND[bead_type]
+
+    content_lower = content.lower()
+
+    if bead_type == "pattern":
+        return "pattern"
+
+    if bead_type == "approach":
+        recurring_signals = ["always", "recurring", "every time", "consistently", "habit"]
+        if any(signal in content_lower for signal in recurring_signals):
+            return "pattern"
+        return "fact"
+
+    if bead_type == "solution":
+        return "fact"
+
+    return "fact"
 
 
 @dataclass
@@ -19,11 +57,14 @@ class Bead:
     id: str
     content: str
     type: BeadType
+    kind: BeadKind = "fact"
     summary: Optional[str] = None
     project: Optional[str] = None
     weight: float = 1.0
     starred: bool = False
     superseded_by: Optional[str] = None
+    archived_at: Optional[datetime] = None
+    content_hash: Optional[str] = None
     context: Optional[str] = None
     tags: list[str] = field(default_factory=list)
     created_at: Optional[datetime] = None
@@ -39,15 +80,24 @@ class Bead:
             except json.JSONDecodeError:
                 tags = []
 
+        # Handle both old schema (no kind/archived_at) and new
+        keys = row.keys() if hasattr(row, 'keys') else []
+        kind = row["kind"] if "kind" in keys else "fact"
+        archived_at = row["archived_at"] if "archived_at" in keys else None
+        content_hash = row["content_hash"] if "content_hash" in keys else None
+
         return cls(
             id=row["id"],
             content=row["content"],
             type=row["type"],
+            kind=kind,
             summary=row["summary"],
             project=row["project"],
             weight=row["weight"],
             starred=bool(row["starred"]),
             superseded_by=row["superseded_by"],
+            archived_at=archived_at,
+            content_hash=content_hash,
             context=row["context"],
             tags=tags,
             created_at=row["created_at"],
@@ -58,29 +108,36 @@ class Bead:
 def create_bead(
     content: str,
     bead_type: BeadType,
+    kind: Optional[BeadKind] = None,
     summary: Optional[str] = None,
     project: Optional[str] = None,
     context: Optional[str] = None,
     tags: Optional[list[str]] = None,
     starred: bool = False,
+    content_hash: Optional[str] = None,
 ) -> Bead:
     """Create a new bead with embedding.
 
     Args:
         content: The knowledge content
-        bead_type: Type of bead (decision, solution, learning, violation, pattern)
+        bead_type: Type of bead
+        kind: Lifecycle kind (auto-assigned via assign_kind if not provided)
         summary: Optional short summary
         project: Optional project identifier
         context: Optional context when learned
         tags: Optional list of tags
         starred: Whether to star (never decay)
+        content_hash: Pre-computed SHA-256 hash (computed if not provided)
 
     Returns:
         Created Bead
     """
     bead_id = str(uuid.uuid4())
     tags_json = json.dumps(tags or [])
-    content_hash = hashlib.sha256(content.encode()).hexdigest()
+    if content_hash is None:
+        content_hash = hashlib.sha256(content.encode()).hexdigest()
+    if kind is None:
+        kind = assign_kind(bead_type, content)
 
     db = get_db()
 
@@ -91,15 +148,14 @@ def create_bead(
     if existing:
         return get_bead(existing[0])
 
-    # P1-09: Wrap bead + embedding insert in explicit transaction
     try:
         db.execute("BEGIN")
         db.execute(
             """
-            INSERT INTO beads (id, content, type, summary, project, context, tags, starred, content_hash)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO beads (id, content, type, kind, summary, project, context, tags, starred, content_hash)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (bead_id, content, bead_type, summary, project, context, tags_json, int(starred), content_hash),
+            (bead_id, content, bead_type, kind, summary, project, context, tags_json, int(starred), content_hash),
         )
 
         # Generate and store embedding
@@ -114,7 +170,6 @@ def create_bead(
         db.execute("ROLLBACK")
         raise
 
-    # Fetch and return
     return get_bead(bead_id)
 
 

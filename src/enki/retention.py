@@ -230,3 +230,61 @@ def maintain_wisdom() -> dict:
         "archived": archive_old_beads(),
         "purged": purge_old_superseded(),
     }
+
+
+def cleanup_archived_preferences() -> int:
+    """Delete preference beads archived more than 30 days ago.
+
+    Runs unconditionally at session start. No config flag.
+    """
+    db = get_db()
+    deleted = db.execute("""
+        DELETE FROM beads
+        WHERE kind = 'preference'
+          AND archived_at IS NOT NULL
+          AND archived_at < datetime('now', '-30 days')
+    """)
+    db.commit()
+    return deleted.rowcount
+
+
+def get_active_preferences(limit: int = 3) -> list:
+    """Get active (non-archived) preference beads for session start.
+
+    Returns beads with kind='preference' AND archived_at IS NULL.
+    Ordered by last_accessed DESC, created_at DESC.
+    Cross-project (no project filter).
+    """
+    db = get_db()
+    rows = db.execute("""
+        SELECT * FROM beads
+        WHERE kind = 'preference'
+          AND archived_at IS NULL
+          AND superseded_by IS NULL
+        ORDER BY
+            COALESCE(last_accessed, created_at) DESC
+        LIMIT ?
+    """, (limit,)).fetchall()
+    return [Bead.from_row(r) for r in rows]
+
+
+def get_weekly_pattern_candidates(days: int = 7) -> list[dict]:
+    """Get beads from last N days as candidates for pattern distillation.
+
+    This is the trigger/data-gathering step. Actual distillation is
+    a batch process that calls Gemini (not Claude).
+
+    Returns list of bead dicts grouped by content similarity.
+    """
+    db = get_db()
+    rows = db.execute(
+        """
+        SELECT * FROM beads
+        WHERE created_at > datetime('now', ?)
+        AND superseded_by IS NULL
+        ORDER BY created_at DESC
+        """,
+        (f"-{days} days",),
+    ).fetchall()
+
+    return [dict(row) for row in rows]

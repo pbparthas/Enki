@@ -31,9 +31,9 @@ def temp_project(tmp_path):
 
 
 class TestDispatchMap:
-    def test_all_28_handlers_registered(self):
+    def test_all_35_handlers_registered(self):
         from enki.mcp_server import TOOL_HANDLERS
-        assert len(TOOL_HANDLERS) == 28
+        assert len(TOOL_HANDLERS) == 35
 
     def test_all_handlers_are_callable(self):
         from enki.mcp_server import TOOL_HANDLERS
@@ -53,6 +53,9 @@ class TestDispatchMap:
             "enki_worktree_list", "enki_worktree_merge",
             "enki_worktree_remove", "enki_reflect", "enki_feedback_loop",
             "enki_simplify",
+            "enki_send_message", "enki_get_messages",
+            "enki_claim_file", "enki_release_file",
+            "enki_triage", "enki_handover", "enki_escalate",
         }
         assert set(TOOL_HANDLERS.keys()) == expected
 
@@ -70,14 +73,14 @@ class TestHandleRemember:
         assert len(result) == 1
         assert "Remembered [learning]" in result[0].text
 
-    def test_truncates_long_content_in_response(self, temp_project):
+    def test_remember_shows_echo_section(self, temp_project):
+        """C7: Remember response always has Similar Knowledge header."""
         from enki.mcp_server import _handle_remember
-        long_content = "x" * 300
         result = _handle_remember(
-            {"content": long_content, "type": "decision", "project": str(temp_project)},
+            {"content": "some unique knowledge content here", "type": "decision", "project": str(temp_project)},
             remote=False,
         )
-        assert "..." in result[0].text
+        assert "--- Similar Knowledge ---" in result[0].text
 
     def test_with_optional_fields(self, temp_project):
         from enki.mcp_server import _handle_remember

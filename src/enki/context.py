@@ -432,3 +432,289 @@ def set_default_tier(tier: ContextTier, project_path: Path = None) -> None:
         {"context_tier": tier.value},
         project_path,
     )
+
+
+# ============================================================
+# CONTEXT.md Generation (Enki v2)
+# ============================================================
+# Single injection point for session start context.
+# Always produces output. NEVER returns empty string.
+# Capped at 3KB.
+
+MAX_BYTES = 3072
+
+
+def generate_context_md(project_path: Path) -> str:
+    """Generate CONTEXT.md from beads. Always produces output.
+
+    Returns non-empty string always. If no beads exist,
+    returns skeleton with empty sections. NEVER returns "".
+    """
+    from .session import get_phase, get_tier, get_goal
+
+    sections = []
+
+    # Section 1: Current State
+    sections.append(_generate_current_state(project_path))
+
+    # Section 2: Recent Decisions (kind='decision', last 7 days)
+    sections.append(_generate_decisions_section(project_path))
+
+    # Section 3: Working Style (type='style' or kind='preference')
+    sections.append(_generate_style_section(project_path))
+
+    # Section 4: Active Preferences (kind='preference', not archived)
+    # Populated by Proactive spec (Spec 2) — skeleton here
+    sections.append(_generate_preferences_section())
+
+    # Section 5: Open Questions
+    sections.append(_generate_questions_section(project_path))
+
+    # Section 6: Last Session
+    sections.append(_generate_last_session(project_path))
+
+    result = "\n\n".join(sections)
+
+    # Enforce 3KB cap — truncate sections in priority order
+    if len(result.encode("utf-8")) > MAX_BYTES:
+        result = _truncate_context(sections)
+
+    return result
+
+
+def _generate_current_state(project_path: Path) -> str:
+    """Generate Current State section."""
+    from .session import get_phase, get_tier, get_goal
+
+    phase = get_phase(project_path) or "intake"
+    tier = get_tier(project_path) or "trivial"
+    goal = get_goal(project_path) or "(not set)"
+
+    project_name = project_path.name if project_path else "unknown"
+
+    # Last session summary
+    last_summary = _get_last_session_summary(project_path)
+
+    lines = [
+        "## Current State",
+        f"Phase: {phase} | Tier: {tier} | Goal: {goal}",
+        f"Project: {project_name}",
+    ]
+    if last_summary:
+        lines.append(f"Last session: {last_summary}")
+
+    return "\n".join(lines)
+
+
+def _generate_decisions_section(project_path: Path) -> str:
+    """Generate Recent Decisions section (last 7 days)."""
+    header = "## Recent Decisions (last 7 days)"
+    try:
+        from .search import search
+        results = search(
+            query="decision",
+            project=None,  # Cross-project
+            bead_type="decision",
+            limit=5,
+            log_accesses=False,
+        )
+        if results:
+            items = []
+            for r in results[:5]:
+                proj = r.bead.project or "global"
+                date = str(r.bead.created_at)[:10] if r.bead.created_at else "?"
+                summary = r.bead.summary or r.bead.content[:100]
+                items.append(f"- [DECISION] {summary} ({proj}, {date})")
+            return header + "\n" + "\n".join(items)
+    except Exception as e:
+        logger.warning("Context generation (decisions): %s", e)
+    return header + "\n(none found)"
+
+
+def _generate_style_section(project_path: Path) -> str:
+    """Generate Working Style section."""
+    header = "## Working Style"
+    try:
+        from .search import search
+        results = search(
+            query="style preference approach",
+            project=None,
+            limit=5,
+            log_accesses=False,
+        )
+        style_beads = [
+            r for r in results
+            if r.bead.type in ("style", "approach")
+            or getattr(r.bead, "kind", "fact") == "preference"
+        ]
+        if style_beads:
+            items = []
+            for r in style_beads[:5]:
+                label = r.bead.type.upper()
+                summary = r.bead.summary or r.bead.content[:100]
+                items.append(f"- [{label}] {summary}")
+            return header + "\n" + "\n".join(items)
+    except Exception as e:
+        logger.warning("Context generation (style): %s", e)
+    return header + "\n(none found)"
+
+
+def _generate_preferences_section() -> str:
+    """Generate Active Preferences section.
+
+    Section is ALWAYS present, even if empty (shows '(none yet)').
+    Content is populated when Proactive spec (Spec 2) adds get_active_preferences().
+    """
+    header = "## Active Preferences (apply to all work)"
+    try:
+        from .retention import get_active_preferences
+        prefs = get_active_preferences(limit=3)
+        if prefs:
+            items = []
+            for p in prefs:
+                proj = f"({p.project})" if p.project else "(global)"
+                summary = p.summary or p.content[:100]
+                items.append(f"- {proj} {summary}")
+            return header + "\n" + "\n".join(items)
+    except (ImportError, AttributeError):
+        pass  # Proactive spec not yet implemented
+    except Exception as e:
+        logger.warning("Context generation (preferences): %s", e)
+    return header + "\n(none yet)"
+
+
+def _generate_questions_section(project_path: Path) -> str:
+    """Generate Open Questions section."""
+    header = "## Open Questions"
+    try:
+        from .search import search
+        results = search(
+            query="open question unresolved",
+            project=str(project_path) if project_path else None,
+            limit=3,
+            log_accesses=False,
+        )
+        if results:
+            items = []
+            for r in results[:3]:
+                summary = r.bead.summary or r.bead.content[:100]
+                items.append(f"- {summary}")
+            return header + "\n" + "\n".join(items)
+    except Exception as e:
+        logger.warning("Context generation (questions): %s", e)
+    return header + "\n(none)"
+
+
+def _generate_last_session(project_path: Path) -> str:
+    """Generate Last Session summary section."""
+    header = "## Last Session"
+    summary = _get_last_session_detail(project_path)
+    if summary:
+        return header + "\n" + summary
+    return header + "\n(no previous session)"
+
+
+def _get_last_session_summary(project_path: Path) -> Optional[str]:
+    """Get one-line summary of last session from archives."""
+    if not project_path:
+        return None
+    sessions_dir = project_path / ".enki" / "sessions"
+    if not sessions_dir.exists():
+        return None
+    archives = sorted(sessions_dir.glob("*.md"), reverse=True)
+    if not archives:
+        return None
+    try:
+        content = archives[0].read_text()
+        # Extract first non-empty, non-header line
+        for line in content.split("\n"):
+            line = line.strip()
+            if line and not line.startswith("#") and not line.startswith("---"):
+                return line[:100]
+    except OSError:
+        pass
+    return None
+
+
+def _get_last_session_detail(project_path: Path) -> Optional[str]:
+    """Get 2-3 sentence summary of last session."""
+    if not project_path:
+        return None
+    sessions_dir = project_path / ".enki" / "sessions"
+    if not sessions_dir.exists():
+        return None
+    archives = sorted(sessions_dir.glob("*.md"), reverse=True)
+    if not archives:
+        return None
+    try:
+        content = archives[0].read_text()
+        # Extract first paragraph after any header
+        lines = []
+        in_content = False
+        for line in content.split("\n"):
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                in_content = True
+                continue
+            if in_content and stripped:
+                lines.append(stripped)
+                if len(lines) >= 3:
+                    break
+            elif in_content and not stripped and lines:
+                break
+        if lines:
+            return " ".join(lines)[:300]
+    except OSError:
+        pass
+    return None
+
+
+def _truncate_context(sections: list[str]) -> str:
+    """Truncate CONTEXT.md to fit within MAX_BYTES.
+
+    Priority (truncate first → last):
+    1. Open Questions (least critical)
+    2. Recent Decisions (keep top 3 instead of 5)
+    3. Working Style (keep top 3 instead of 5)
+    4. Active Preferences — NEVER truncated
+    5. Current State — NEVER truncated
+    """
+    # Try removing Open Questions content first
+    result = "\n\n".join(sections)
+    if len(result.encode("utf-8")) <= MAX_BYTES:
+        return result
+
+    # Truncate Open Questions to just header
+    if len(sections) > 4:
+        sections[4] = "## Open Questions\n(truncated)"
+    result = "\n\n".join(sections)
+    if len(result.encode("utf-8")) <= MAX_BYTES:
+        return result
+
+    # Truncate Decisions to 3 items
+    if len(sections) > 1:
+        lines = sections[1].split("\n")
+        sections[1] = "\n".join(lines[:4])  # header + 3 items
+    result = "\n\n".join(sections)
+    if len(result.encode("utf-8")) <= MAX_BYTES:
+        return result
+
+    # Truncate Style to 3 items
+    if len(sections) > 2:
+        lines = sections[2].split("\n")
+        sections[2] = "\n".join(lines[:4])  # header + 3 items
+    result = "\n\n".join(sections)
+    if len(result.encode("utf-8")) <= MAX_BYTES:
+        return result
+
+    # Last resort: truncate Last Session
+    if len(sections) > 5:
+        sections[5] = "## Last Session\n(truncated)"
+
+    result = "\n\n".join(sections)
+    # Hard truncate if still over
+    encoded = result.encode("utf-8")
+    if len(encoded) > MAX_BYTES:
+        result = encoded[:MAX_BYTES].decode("utf-8", errors="ignore")
+
+    return result

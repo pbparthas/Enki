@@ -2,6 +2,7 @@
 
 import json
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Any
 from dataclasses import dataclass
@@ -278,6 +279,129 @@ def handle_session_end(project_path: Optional[Path] = None) -> dict:
         result["regressions"] = {"status": f"error: {e}"}
 
     return result
+
+
+def find_transcript(session_id: str) -> Optional[Path]:
+    """Find CC's JSONL transcript file for a session.
+
+    Searches ~/.claude/projects/ for the session JSONL.
+    """
+    claude_dir = Path.home() / ".claude" / "projects"
+    if not claude_dir.exists():
+        return None
+    for project_dir in claude_dir.iterdir():
+        if not project_dir.is_dir():
+            continue
+        jsonl = project_dir / f"{session_id}.jsonl"
+        if jsonl.exists():
+            return jsonl
+    return None
+
+
+def read_jsonl_since_last_snapshot(
+    transcript_path: Path,
+    project_path: Path,
+) -> list[dict]:
+    """Read JSONL entries since the last snapshot marker.
+
+    Returns all entries if no prior snapshot exists.
+    """
+    snapshot_path = project_path / ".enki" / "SNAPSHOT.json"
+    last_count = 0
+    if snapshot_path.exists():
+        try:
+            snapshots = json.loads(snapshot_path.read_text())
+            if snapshots:
+                # Count total entries processed in prior snapshots
+                last_count = sum(len(s.get("entries", [])) for s in snapshots)
+        except (json.JSONDecodeError, OSError):
+            last_count = 0
+
+    entries = []
+    try:
+        with open(transcript_path) as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        entries.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+    except OSError:
+        return []
+
+    # Return entries after what we've already processed
+    # Cap at 200 entries per snapshot to bound memory
+    return entries[last_count:][:200]
+
+
+def extract_pre_compact_snapshot(
+    project_path: Path,
+    session_id: str,
+) -> dict:
+    """Extract structured snapshot from CC transcript before compaction.
+
+    Reads the JSONL transcript (not CC's context window).
+    Returns a JSON dict, NOT beads. Beads are created during
+    end-of-session distillation.
+    """
+    from .session import get_phase, get_tier, get_goal
+
+    transcript_path = find_transcript(session_id)
+    if not transcript_path or not transcript_path.exists():
+        return {"error": "transcript_not_found", "session_id": session_id}
+
+    entries = read_jsonl_since_last_snapshot(transcript_path, project_path)
+
+    snapshot = {
+        "session_id": session_id,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "phase": get_phase(project_path),
+        "tier": get_tier(project_path),
+        "goal": get_goal(project_path),
+        "entries": [],
+    }
+
+    for entry in entries:
+        # Extract thinking blocks (CC's reasoning — richest source)
+        if entry.get("type") == "thinking":
+            snapshot["entries"].append({
+                "type": "thinking",
+                "content": str(entry.get("thinking", ""))[:2000],
+            })
+        # Extract user messages (questions, corrections, decisions)
+        elif entry.get("type") == "user" or entry.get("role") == "user":
+            text = entry.get("content", entry.get("text", ""))
+            if isinstance(text, str) and len(text) > 20:
+                snapshot["entries"].append({
+                    "type": "user",
+                    "content": text[:1000],
+                })
+        # Extract tool calls (structural events)
+        elif entry.get("type") == "tool_use":
+            snapshot["entries"].append({
+                "type": "tool_call",
+                "tool": entry.get("name", ""),
+                "summary": str(entry.get("input", ""))[:500],
+            })
+
+    # Write to disk — survives compaction
+    enki_dir = project_path / ".enki"
+    enki_dir.mkdir(parents=True, exist_ok=True)
+    snapshot_path = enki_dir / "SNAPSHOT.json"
+    snapshots = []
+    if snapshot_path.exists():
+        try:
+            snapshots = json.loads(snapshot_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            snapshots = []
+
+    snapshots.append(snapshot)
+    # Keep last 10 snapshots per session (bounded)
+    snapshots = snapshots[-10:]
+    snapshot_path.write_text(json.dumps(snapshots, indent=2))
+
+    return snapshot
 
 
 def parse_hook_input(stdin_data: str) -> dict:
