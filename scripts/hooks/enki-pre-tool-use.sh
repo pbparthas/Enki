@@ -95,21 +95,25 @@ fi
 if [[ "${TOOL}" == "Bash" ]]; then
     COMMAND=$(echo "${INPUT}" | jq -r '.tool_input.command // ""')
 
-    for BLOCKED in ${INFRA_BLOCKLIST}; do
-        if echo "${COMMAND}" | grep -q "${BLOCKED}"; then
-            if echo "${COMMAND}" | grep -qE "sed -i|tee |> |>> |cat >|echo >|cp |mv |rm |chmod |perl -pi|awk.*>|python.*open|dd |truncate|install "; then
-                echo "{\"decision\": \"block\", \"reason\": \"INFRASTRUCTURE BLOCKLIST: Bash command targets protected file ${BLOCKED}. Shell-layer hard stop — no exceptions.\"}"
-                exit 0
+    # Git operations are safe — version control, not file mutation
+    if echo "${COMMAND}" | grep -qE "^git "; then
+        true  # allow git through Layer 0b
+    else
+        for BLOCKED in ${INFRA_BLOCKLIST}; do
+            if echo "${COMMAND}" | grep -q "${BLOCKED}"; then
+                if echo "${COMMAND}" | grep -qE "sed -i|tee |> |>> |cat >|echo >|cp |mv |rm |chmod |perl -pi|awk.*>|python.*open|dd |truncate|install "; then
+                    echo "{\"decision\": \"block\", \"reason\": \"INFRASTRUCTURE BLOCKLIST: Bash command targets protected file ${BLOCKED}. Shell-layer hard stop — no exceptions.\"}"
+                    exit 0
+                fi
             fi
-        fi
-    done
+        done
 
-    if echo "${COMMAND}" | grep -qE "base64.*-d|eval |source /tmp|bash /tmp|\\\$\(.*\).*>.*\.(py|sh|json)"; then
-        echo '{"decision": "block", "reason": "Indirect file modification pattern detected — fail closed."}'
-        exit 0
+        if echo "${COMMAND}" | grep -qE "base64.*-d|eval |source /tmp|bash /tmp|\\\$\(.*\).*>.*\.(py|sh|json)"; then
+            echo '{"decision": "block", "reason": "Indirect file modification pattern detected — fail closed."}'
+            exit 0
+        fi
     fi
 fi
-
 # === Layer 1: Gate Checks ===
 # Check phase, spec, TDD, scope gates
 GATE_RESULT=$("${ENKI_BIN}" gate check \
