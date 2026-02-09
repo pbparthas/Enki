@@ -1,4 +1,5 @@
 #!/bin/bash
+HOOK_VERSION="2026-02-10-v3"
 set -euo pipefail
 # Enki Pre-Tool-Use Hook
 # Called before each tool execution in Claude Code
