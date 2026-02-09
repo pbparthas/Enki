@@ -120,6 +120,63 @@ DEFAULT_PATTERNS = {
         r"sed.*(hook|enforcement|ereshkigal)",
         r"(mv|cp|ln).*(hook|enforcement|ereshkigal)",
     ],
+
+    # === Enki v2 Pattern Expansion (Section 8) ===
+
+    "config_flag_injection_patterns": [
+        r"adding (configuration|config) option",
+        r"making.*toggleable",
+        r"adding feature flag",
+        r"adding enable_",
+        r"ENABLE_\w+\s*=\s*False",
+        r"making.*configurable",
+        r"adding.*setting.*for",
+    ],
+
+    "llm_in_search_path_patterns": [
+        r"using model to extract",
+        r"calling embed.*for keyword",
+        r"semantic extraction",
+        r"embedding.*similarity.*keyword",
+        r"llm.*keyword",
+        r"api.*call.*search",
+    ],
+
+    "silent_error_suppression_patterns": [
+        r"handling gracefully.*pass",
+        r"returning default on error",
+        r"skipping section on failure",
+        r"silently.*return",
+        r"except.*pass.*default",
+        r"ignore.*error.*continue",
+    ],
+
+    "ttl_modification_patterns": [
+        r"changing retention period",
+        r"making TTL configurable",
+        r"extending archive window",
+        r"configurable.*ttl",
+        r"adjustable.*retention",
+        r"env.*var.*ttl",
+    ],
+
+    "gate_weakening_patterns": [
+        r"making gate optional",
+        r"skipping gate for",
+        r"adding bypass for",
+        r"disable.*gate",
+        r"gate.*not.*needed",
+        r"relax.*gate.*check",
+    ],
+
+    "mode_bypass_patterns": [
+        r"allowing PM to edit",
+        r"letting EM modify spec",
+        r"temporary mode override",
+        r"mode.*bypass",
+        r"override.*mode.*restriction",
+        r"skip.*mode.*check",
+    ],
 }
 
 
