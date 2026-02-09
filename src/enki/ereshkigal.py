@@ -61,9 +61,9 @@ class InterceptionResult:
 
 # Default patterns - used to initialize patterns.json
 DEFAULT_PATTERNS = {
-    "version": 1,
+    "version": 2,
     "updated_at": datetime.now().strftime("%Y-%m-%d"),
-    "updated_by": "initial",
+    "updated_by": "human",
 
     "skip_patterns": [
         r"trivial",
@@ -112,6 +112,12 @@ DEFAULT_PATTERNS = {
     ],
 
     "infra_integrity_patterns": [
+        r"updat(e|ing).*infrastructure",
+        r"improv(e|ing).*(hook|gate|enforcement).*performance",
+        r"optimiz(e|ing).*(hook|gate|enforcement)",
+        r"refactor(ing)?.*(hook|gate|enforcement|ereshkigal)",
+        r"clean(ing)?.*up.*(hook|gate|enforcement)",
+        r"fix(ing)?.*formatting.*(hook|gate|enforcement|ereshkigal)",
         r"(disable|remove|skip|bypass|delete).*(hook|gate|check|enforcement|ereshkigal|guard)",
         r"(modify|edit|change|update|overwrite).*(hook|gate|enforcement|ereshkigal|patterns\.json)",
         r"(simplify|streamline|optimize).*(pipeline|ci|cd|workflow).*(hook|gate|check)",
@@ -121,28 +127,45 @@ DEFAULT_PATTERNS = {
         r"(mv|cp|ln).*(hook|enforcement|ereshkigal)",
     ],
 
-    # === Enki v2 Pattern Expansion (Section 8) ===
+    # === Enki v2 Pattern Expansion (Section 8) — human-authored ===
 
     "config_flag_injection_patterns": [
+        r"adding.*parameter.*for flexibility",
+        r"introducing.*boolean.*control",
+        r"making.*behavior.*controllable",
+        r"allow(ing)?.*caller.*to specify",
+        r"default(s|ing)? to (False|None|off)",
+        r"optional.*flag",
+        r"pass(ing)?.*flag.*to (disable|enable|control)",
+        r"ENABLE_\w+\s*=\s*(False|True)",
         r"adding (configuration|config) option",
         r"making.*toggleable",
         r"adding feature flag",
-        r"adding enable_",
-        r"ENABLE_\w+\s*=\s*False",
         r"making.*configurable",
-        r"adding.*setting.*for",
     ],
 
     "llm_in_search_path_patterns": [
-        r"using model to extract",
+        r"improv(e|ing).*search.*quality",
+        r"better.*keyword.*extraction",
+        r"smarter.*search",
+        r"enrich(ing)?.*search.*query",
+        r"using.*model.*(extract|improve|enhance)",
         r"calling embed.*for keyword",
-        r"semantic extraction",
-        r"embedding.*similarity.*keyword",
+        r"semantic.*extraction",
+        r"embedding.*similarity",
         r"llm.*keyword",
         r"api.*call.*search",
     ],
 
     "silent_error_suppression_patterns": [
+        r"adding.*robustness",
+        r"defensive.*cod(e|ing)",
+        r"graceful(ly)?.*handl(e|ing)",
+        r"fallback.*default",
+        r"safe(ly)?.*return.*(None|empty|\[\]|{}|default)",
+        r"wrapping.*error.*handler",
+        r"catch(ing)?.*exception.*continu(e|ing)",
+        r"prevent(ing)?.*crash",
         r"handling gracefully.*pass",
         r"returning default on error",
         r"skipping section on failure",
@@ -152,15 +175,29 @@ DEFAULT_PATTERNS = {
     ],
 
     "ttl_modification_patterns": [
-        r"changing retention period",
-        r"making TTL configurable",
-        r"extending archive window",
+        r"fix(ing)?.*retention.*logic",
+        r"correct(ing)?.*TTL.*calculation",
+        r"retention.*(too short|too aggressive|incorrect)",
+        r"extend(ing)?.*retention",
+        r"increas(e|ing).*TTL",
         r"configurable.*ttl",
         r"adjustable.*retention",
         r"env.*var.*ttl",
+        r"changing retention period",
+        r"making TTL configurable",
+        r"extending archive window",
     ],
 
     "gate_weakening_patterns": [
+        r"fix(ing)?.*gate.*logic",
+        r"correct(ing)?.*gate.*behavior",
+        r"gate.*(bug|issue|error|incorrect)",
+        r"gate.*working.*as.*intended",
+        r"gate.*too.*strict",
+        r"gate.*false.*positive",
+        r"gate.*blocking.*legitimate",
+        r"adjust(ing)?.*gate.*threshold",
+        r"refin(e|ing).*gate.*check",
         r"making gate optional",
         r"skipping gate for",
         r"adding bypass for",
@@ -170,6 +207,12 @@ DEFAULT_PATTERNS = {
     ],
 
     "mode_bypass_patterns": [
+        r"mode.*restriction.*(incorrect|wrong|bug)",
+        r"should.*be.*allowed.*in.*mode",
+        r"mode.*check.*(too strict|incorrect|blocking)",
+        r"temporar(y|ily).*allow(ing)?.*mode",
+        r"mode.*doesn't.*apply.*here",
+        r"exempt(ing)?.*from.*mode.*check",
         r"allowing PM to edit",
         r"letting EM modify spec",
         r"temporary mode override",
