@@ -77,7 +77,7 @@ fi
 # === Layer 0: Infrastructure Blocklist (Hardening Spec v2, Step 1.5) ===
 # Shell-layer hard stop. No exceptions. No scope override. No phase override.
 # These files are NEVER writable by any tool, regardless of context.
-INFRA_BLOCKLIST="enforcement.py ereshkigal.py hooks.py enki-pre-tool-use.sh enki-post-tool-use.sh patterns.json"
+INFRA_BLOCKLIST="enforcement.py ereshkigal.py hooks.py enki-pre-tool-use.sh enki-post-tool-use.sh patterns.json gates.py"
 
 if [[ "${TOOL}" =~ ^(Edit|Write|MultiEdit)$ ]] && [[ -n "${FILE_PATH}" ]]; then
     BASENAME=$(basename "${FILE_PATH}")
