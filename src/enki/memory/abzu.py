@@ -90,10 +90,24 @@ def inject_post_compact(session_id: str, tier: str) -> str:
 
 def finalize_session(session_id: str, project: str) -> None:
     """Session end: reconcile summaries, extract candidates, run decay."""
+    from enki.memory.extraction import extract_candidates
     from enki.memory.retention import run_decay
     from enki.memory.sessions import cleanup_old_summaries, finalize_session as _finalize
+    from enki.memory.staging import add_candidate
 
-    _finalize(session_id, project)
+    final = _finalize(session_id, project)
+    content = final.get("content") if isinstance(final, dict) else None
+    if content:
+        candidates = extract_candidates(content, session_id)
+        for c in candidates:
+            add_candidate(
+                content=c["content"],
+                category=c["category"],
+                project=project,
+                summary=None,
+                source=c.get("source", "session_end"),
+                session_id=session_id,
+            )
     cleanup_old_summaries(project)
     run_decay()
 

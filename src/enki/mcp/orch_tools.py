@@ -16,15 +16,12 @@ from enki.orch.tiers import (
 from enki.orch.pm import (
     validate_intake,
     create_spec,
-    approve_spec,
     is_spec_approved,
     record_decision,
     get_decisions,
     detect_entry_point as pm_detect_entry,
 )
 from enki.orch.mail import (
-    create_thread,
-    send,
     get_inbox,
     get_thread_messages,
     mark_read,
@@ -125,11 +122,6 @@ def enki_spec(
     """Create a spec (product or implementation)."""
     decision_id = create_spec(project, spec_type, content)
     return {"spec_type": spec_type, "decision_id": decision_id}
-
-
-def enki_approve(project: str = ".") -> dict:
-    """Human approval of spec. Satisfies Gate 2."""
-    return approve_spec(project)
 
 
 def enki_is_approved(project: str = ".") -> dict:
@@ -250,31 +242,6 @@ def enki_escalate(task_id: str, reason: str, project: str = ".") -> dict:
 
 
 # ── Mail ──
-
-
-def enki_mail_send(
-    to_agent: str,
-    content: str,
-    subject: str | None = None,
-    importance: str = "normal",
-    from_agent: str = "Human",
-    project: str = ".",
-) -> dict:
-    """Send mail within project."""
-    thread_id = create_thread(
-        project=project,
-        subject=subject or f"Message to {to_agent}",
-        created_by=from_agent,
-    )
-    msg_id = send(
-        project=project,
-        thread_id=thread_id,
-        from_agent=from_agent,
-        to_agent=to_agent,
-        content=content,
-        importance=importance,
-    )
-    return {"thread_id": thread_id, "message_id": msg_id}
 
 
 def enki_mail_inbox(agent: str = "EM", project: str = ".") -> list[dict]:

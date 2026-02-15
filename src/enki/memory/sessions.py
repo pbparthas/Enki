@@ -122,7 +122,7 @@ def get_post_compact_injection(session_id: str, tier: str) -> str:
     return _format_minimal(decisions_only, most_recent)
 
 
-def finalize_session(session_id: str, project: str | None = None) -> str:
+def finalize_session(session_id: str, project: str | None = None) -> dict:
     """Create final session summary from accumulated pre-compact summaries.
 
     Returns the final summary ID.
@@ -157,7 +157,7 @@ def finalize_session(session_id: str, project: str | None = None) -> str:
     # Clean up pre-compact snapshots for this session
     _cleanup_pre_compact(session_id)
 
-    return final_id
+    return {"id": final_id, "content": reconciled}
 
 
 def get_last_final_summary(project: str) -> dict | None:

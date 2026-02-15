@@ -281,6 +281,11 @@ def extract_from_text(text: str, session_id: str) -> list[dict]:
     return candidates
 
 
+def extract_candidates(text: str, session_id: str) -> list[dict]:
+    """Extract bead candidates from text for session end staging."""
+    return extract_all_from_text(text, session_id)
+
+
 # ── Private helpers ──
 
 

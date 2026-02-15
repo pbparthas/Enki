@@ -103,7 +103,6 @@ def run_migration():
                     source="v1/v2 migration",
                     project=bead.get("project"),
                     summary=bead.get("summary"),
-                    tags=bead.get("tags"),
                 )
                 migrated += 1
             except Exception as e:

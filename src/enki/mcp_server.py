@@ -137,16 +137,6 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
-            name="enki_approve",
-            description="Human approval of spec. Satisfies Gate 2.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "project": {"type": "string", "default": "."},
-                },
-            },
-        ),
-        Tool(
             name="enki_orchestrate",
             description="Begin execution — EM starts spawning tasks",
             inputSchema={
@@ -269,12 +259,6 @@ def _handle_quick(args: dict) -> str:
     return json.dumps(result, indent=2)
 
 
-def _handle_approve(args: dict) -> str:
-    from .mcp.orch_tools import enki_approve
-    result = enki_approve(args.get("project", "."))
-    return json.dumps(result, indent=2)
-
-
 def _handle_orchestrate(args: dict) -> str:
     from .mcp.orch_tools import enki_orchestrate
     result = enki_orchestrate(args.get("project", "."))
@@ -313,7 +297,6 @@ TOOL_HANDLERS = {
     "enki_phase": _handle_phase,
     "enki_triage": _handle_triage,
     "enki_quick": _handle_quick,
-    "enki_approve": _handle_approve,
     "enki_orchestrate": _handle_orchestrate,
     "enki_decompose": _handle_decompose,
     "enki_bug": _handle_bug,

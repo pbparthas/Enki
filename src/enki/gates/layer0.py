@@ -29,6 +29,7 @@ LAYER0_PROTECTED = {
     # Core enforcement
     "uru.py",
     "layer0.py",
+    "abzu.py",
     # Identity
     "PERSONA.md",
     # Shared prompt templates

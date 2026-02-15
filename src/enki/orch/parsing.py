@@ -34,6 +34,7 @@ VALID_STATUSES = {"DONE", "BLOCKED", "FAILED"}
 LIST_FIELDS = {"files_modified", "files_created", "decisions", "messages",
                "concerns", "blockers"}
 INT_FIELDS = {"tests_run", "tests_passed", "tests_failed"}
+MAX_PARSE_ATTEMPTS = 3
 
 
 def parse_agent_output(raw_output: str) -> dict:
@@ -220,6 +221,13 @@ def get_retry_prompt(attempt: int) -> str:
         )
     else:
         return ""  # Escalate to HITL
+
+
+def get_retry_action(attempt: int) -> dict:
+    """Return retry or HITL action for parse failures."""
+    if attempt >= MAX_PARSE_ATTEMPTS:
+        return {"status": "hitl"}
+    return {"status": "retry", "retry_prompt": get_retry_prompt(attempt)}
 
 
 def extract_decisions(parsed_output: dict) -> list[dict]:

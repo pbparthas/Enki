@@ -144,25 +144,25 @@ def load_prompt(role: AgentRole) -> str:
     Returns the content of the prompt file, or a fallback if not found.
     """
     prompt_file = PROMPTS_DIR / f"{role.value}.md"
-    if prompt_file.exists():
-        return prompt_file.read_text()
-    return f"# {AGENTS[role]['full_name']}\nPrompt file not found. Operating with defaults."
+    if not prompt_file.exists():
+        raise FileNotFoundError(f"Missing prompt file: {prompt_file}")
+    return prompt_file.read_text()
 
 
 def load_base_prompt() -> str:
     """Load the shared base prompt template."""
     base_file = PROMPTS_DIR / "_base.md"
-    if base_file.exists():
-        return base_file.read_text()
-    return "# Base Agent Template\nShared template not found."
+    if not base_file.exists():
+        raise FileNotFoundError(f"Missing base prompt: {base_file}")
+    return base_file.read_text()
 
 
 def load_coding_standards() -> str:
     """Load shared coding standards."""
     standards_file = PROMPTS_DIR / "_coding_standards.md"
-    if standards_file.exists():
-        return standards_file.read_text()
-    return ""
+    if not standards_file.exists():
+        raise FileNotFoundError(f"Missing coding standards prompt: {standards_file}")
+    return standards_file.read_text()
 
 
 def assemble_prompt(
@@ -292,20 +292,16 @@ def get_blind_wall_filter(role: AgentRole) -> dict:
     """
     filters = {
         AgentRole.DEV: {
-            "sees": ["implementation_spec", "architect_plans", "claude_md", "filtered_mail"],
-            "blocked": ["qa_output", "test_results", "test_code"],
+            "exclude": ["qa_output", "test_results", "test_code"],
         },
         AgentRole.QA: {
-            "sees": ["product_spec", "implementation_spec_api", "filtered_mail"],
-            "blocked": ["dev_output", "implementation_details", "source_code"],
+            "exclude": ["dev_output", "implementation_details", "source_code"],
         },
         AgentRole.VALIDATOR: {
-            "sees": ["specs", "raw_outputs"],
-            "blocked": ["agent_reasoning", "mail_threads"],
+            "exclude": ["agent_reasoning", "mail_threads"],
         },
         AgentRole.REVIEWER: {
-            "sees": ["implementation_spec", "claude_md", "codebase_profile", "code"],
-            "blocked": ["test_details", "qa_reasoning"],
+            "exclude": ["test_details", "qa_reasoning"],
         },
     }
-    return filters.get(role, {"sees": ["all"], "blocked": []})
+    return filters.get(role, {"exclude": []})

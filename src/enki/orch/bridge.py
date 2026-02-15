@@ -120,6 +120,18 @@ def extract_beads_from_project(project: str) -> list[dict]:
                 "project": project,
             })
 
+    if candidates:
+        from enki.memory.staging import add_candidate
+        for c in candidates:
+            add_candidate(
+                content=c["content"],
+                category=c["category"],
+                project=project,
+                summary=None,
+                source=c.get("source", "em.db"),
+                session_id=None,
+            )
+
     return candidates
 
 

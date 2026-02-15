@@ -47,7 +47,7 @@ from enki.orch.tiers import (
     set_phase,
 )
 from enki.orch.pm import is_spec_approved
-from enki.orch.parsing import parse_agent_output, get_retry_prompt
+from enki.orch.parsing import parse_agent_output, get_retry_action
 from enki.orch.validation import validate_agent_output
 from enki.orch.bugs import file_bug, has_blocking_bugs
 from enki.orch.onboarding import detect_entry_point
@@ -140,10 +140,23 @@ class Orchestrator:
         # Parse JSON from output
         parse_result = parse_agent_output(raw_output)
         if not parse_result["success"]:
+            attempt = increment_retry(self.project, task_id)
+            action = get_retry_action(attempt)
+            if action["status"] == "hitl":
+                self.escalate_to_human(
+                    task_id,
+                    f"Agent output unparseable after {attempt} attempts.",
+                )
+                return {
+                    "status": "hitl_escalation",
+                    "error": parse_result["error"],
+                    "attempt": attempt,
+                }
             return {
                 "status": "parse_error",
                 "error": parse_result["error"],
-                "retry_prompt": get_retry_prompt(1),
+                "attempt": attempt,
+                "retry_prompt": action["retry_prompt"],
             }
 
         parsed = parse_result["parsed"]

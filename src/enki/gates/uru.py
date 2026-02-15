@@ -45,70 +45,82 @@ def check_pre_tool_use(tool_name: str, tool_input: dict) -> dict:
 
     Returns: {"decision": "allow"} or {"decision": "block", "reason": "..."}
     """
-    if tool_name not in MUTATION_TOOLS and tool_name != "Bash":
-        return {"decision": "allow"}
+    try:
+        if tool_name not in MUTATION_TOOLS and tool_name != "Bash":
+            return {"decision": "allow"}
 
-    if tool_name in MUTATION_TOOLS:
-        filepath = tool_input.get("file_path") or tool_input.get("path", "")
-        targets = [filepath] if filepath else []
-    elif tool_name == "Bash":
-        command = tool_input.get("command", "")
+        if tool_name in MUTATION_TOOLS:
+            filepath = tool_input.get("file_path") or tool_input.get("path", "")
+            targets = [filepath] if filepath else []
+        elif tool_name == "Bash":
+            command = tool_input.get("command", "")
 
-        # Layer 0.5: DB protection
-        db_targets = extract_db_targets(command)
-        enki_root_str = str(ENKI_ROOT.resolve())
-        for db in db_targets:
-            db_resolved = str(Path(db).resolve())
-            if db_resolved.startswith(enki_root_str):
+            # Layer 0.5: DB protection
+            db_targets = extract_db_targets(command)
+            enki_root_str = str(ENKI_ROOT.resolve())
+            for db in db_targets:
+                db_resolved = str(Path(db).resolve())
+                if db_resolved.startswith(enki_root_str):
+                    _log_enforcement(
+                        "pre-tool-use", "layer0.5", tool_name,
+                        db, "block", "Direct DB manipulation"
+                    )
+                    return {
+                        "decision": "block",
+                        "reason": "Layer 0.5: Direct DB manipulation. Use Enki tools.",
+                    }
+
+            targets = extract_write_targets(command)
+        else:
+            targets = []
+
+        if not targets:
+            return {"decision": "allow"}
+
+        for target in targets:
+            if target == "__PYTHON_WRITE__":
                 _log_enforcement(
                     "pre-tool-use", "layer0.5", tool_name,
-                    db, "block", "Direct DB manipulation"
+                    target, "block", "Unverifiable Python write"
                 )
                 return {
                     "decision": "block",
-                    "reason": "Layer 0.5: Direct DB manipulation. Use Enki tools.",
+                    "reason": "Unverifiable Python file write in bash command.",
                 }
 
-        targets = extract_write_targets(command)
-    else:
-        targets = []
+            if is_layer0_protected(target):
+                _log_enforcement(
+                    "pre-tool-use", "layer0", tool_name,
+                    target, "block", f"Protected file {Path(target).name}"
+                )
+                return {
+                    "decision": "block",
+                    "reason": f"Layer 0: Protected file {Path(target).name}",
+                }
 
-    if not targets:
+            if is_exempt(target, tool_name):
+                continue
+
+            try:
+                gate_result = _check_gates(target)
+            except Exception:
+                return {
+                    "decision": "block",
+                    "reason": "Gate check failed unexpectedly. Blocking by default.",
+                }
+            if gate_result["decision"] == "block":
+                _log_enforcement(
+                    "pre-tool-use", "layer1", tool_name,
+                    target, "block", gate_result["reason"]
+                )
+                return gate_result
+
         return {"decision": "allow"}
-
-    for target in targets:
-        if target == "__PYTHON_WRITE__":
-            _log_enforcement(
-                "pre-tool-use", "layer0.5", tool_name,
-                target, "block", "Unverifiable Python write"
-            )
-            return {
-                "decision": "block",
-                "reason": "Unverifiable Python file write in bash command.",
-            }
-
-        if is_layer0_protected(target):
-            _log_enforcement(
-                "pre-tool-use", "layer0", tool_name,
-                target, "block", f"Protected file {Path(target).name}"
-            )
-            return {
-                "decision": "block",
-                "reason": f"Layer 0: Protected file {Path(target).name}",
-            }
-
-        if is_exempt(target, tool_name):
-            continue
-
-        gate_result = _check_gates(target)
-        if gate_result["decision"] == "block":
-            _log_enforcement(
-                "pre-tool-use", "layer1", tool_name,
-                target, "block", gate_result["reason"]
-            )
-            return gate_result
-
-    return {"decision": "allow"}
+    except Exception:
+        return {
+            "decision": "block",
+            "reason": "Enforcement error. Blocking by default.",
+        }
 
 
 def check_post_tool_use(
@@ -117,49 +129,55 @@ def check_post_tool_use(
     assistant_response: str = "",
 ) -> dict:
     """Post-tool-use checks. Non-blocking. Returns nudge messages."""
-    nudges = []
-    session_id = _get_session_id()
+    try:
+        nudges = []
+        session_id = _get_session_id()
 
-    # Nudge 1: Unrecorded decision
-    if assistant_response and _contains_decision_language(assistant_response):
-        if not _recent_enki_remember(session_id, within_turns=2):
-            if _should_fire_nudge("unrecorded_decision", session_id):
+        # Nudge 1: Unrecorded decision
+        if assistant_response and _contains_decision_language(assistant_response):
+            if not _recent_enki_remember(session_id, within_turns=2):
+                if _should_fire_nudge("unrecorded_decision", session_id):
+                    nudges.append(
+                        "Good decision. Worth recording — consider enki_remember."
+                    )
+                    _record_nudge_fired("unrecorded_decision", session_id)
+
+        # Nudge 2: Long session without summary
+        tool_count = _get_tool_count(session_id)
+        if tool_count > 30:
+            if _should_fire_nudge("long_session", session_id):
                 nudges.append(
-                    "Good decision. Worth recording — consider enki_remember."
+                    f"Productive session — {tool_count} actions since last checkpoint. "
+                    "Good time to capture state."
                 )
-                _record_nudge_fired("unrecorded_decision", session_id)
+                _record_nudge_fired("long_session", session_id)
 
-    # Nudge 2: Long session without summary
-    tool_count = _get_tool_count(session_id)
-    if tool_count > 30:
-        if _should_fire_nudge("long_session", session_id):
-            nudges.append(
-                f"Productive session — {tool_count} actions since last checkpoint. "
-                "Good time to capture state."
-            )
-            _record_nudge_fired("long_session", session_id)
+        # Nudge 3: Unread kickoff mail
+        if tool_name in ("Write", "Edit", "Bash"):
+            unread = _get_unread_kickoff_mails()
+            if unread:
+                project = unread[0]
+                if _should_fire_nudge("unread_kickoff", session_id):
+                    nudges.append(
+                        f"Kickoff mail pending for {project}. "
+                        "Spawn EM to begin execution."
+                    )
+                    _record_nudge_fired("unread_kickoff", session_id)
 
-    # Nudge 3: Unread kickoff mail
-    if tool_name in ("Write", "Edit", "Bash"):
-        unread = _get_unread_kickoff_mails()
-        if unread:
-            project = unread[0]
-            if _should_fire_nudge("unread_kickoff", session_id):
-                nudges.append(
-                    f"Kickoff mail pending for {project}. "
-                    "Spawn EM to begin execution."
-                )
-                _record_nudge_fired("unread_kickoff", session_id)
+        # Log tool call
+        _log_enforcement(
+            "post-tool-use", "nudge", tool_name,
+            None, "allow", "; ".join(nudges) if nudges else None
+        )
 
-    # Log tool call
-    _log_enforcement(
-        "post-tool-use", "nudge", tool_name,
-        None, "allow", "; ".join(nudges) if nudges else None
-    )
-
-    if nudges:
-        return {"decision": "allow", "nudges": nudges}
-    return {"decision": "allow"}
+        if nudges:
+            return {"decision": "allow", "nudges": nudges}
+        return {"decision": "allow"}
+    except Exception:
+        return {
+            "decision": "block",
+            "reason": "Post-tool-use enforcement error. Blocking by default.",
+        }
 
 
 def init_session(session_id: str) -> None:
@@ -254,6 +272,11 @@ def _check_gates(filepath: str) -> dict:
         }
 
     tier = _get_tier(project)
+    if tier is None:
+        return {
+            "decision": "block",
+            "reason": "Gate 2: Cannot determine tier. Blocking by default.",
+        }
     if tier in ("standard", "full"):
         if not _is_spec_approved(project):
             return {
@@ -401,8 +424,8 @@ def _record_nudge_fired(nudge_type: str, session_id: str) -> None:
                 "last_fired = datetime('now'), fire_count = fire_count + 1",
                 (nudge_type, session_id),
             )
-    except Exception:
-        pass
+    except Exception as e:
+        raise RuntimeError("Failed to record nudge") from e
 
 
 def _get_tool_count(session_id: str) -> int:
@@ -441,8 +464,8 @@ def _get_unread_kickoff_mails() -> list[str]:
                 ).fetchone()
                 if row and row["cnt"] > 0:
                     results.append(proj_dir.name)
-        except Exception:
-            continue
+        except Exception as e:
+            raise RuntimeError("Failed to read kickoff mail") from e
 
     return results
 
@@ -474,8 +497,8 @@ def _log_enforcement(
                     reason,
                 ),
             )
-    except Exception:
-        pass  # Enforcement logging should never break the workflow
+    except Exception as e:
+        raise RuntimeError("Failed to log enforcement") from e
 
 
 # ── CLI entry point for hooks ──

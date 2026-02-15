@@ -207,6 +207,15 @@ def _create_abzu_tables(conn) -> None:
             END
         """)
 
+        conn.execute("""
+            CREATE TRIGGER candidates_au AFTER UPDATE ON bead_candidates BEGIN
+                INSERT INTO candidates_fts(candidates_fts, rowid, content, summary)
+                VALUES ('delete', old.rowid, old.content, old.summary);
+                INSERT INTO candidates_fts(rowid, content, summary)
+                VALUES (new.rowid, new.content, new.summary);
+            END
+        """)
+
     conn.execute("""
         CREATE TABLE IF NOT EXISTS extraction_log (
             id TEXT PRIMARY KEY,
