@@ -214,8 +214,8 @@ def end_session(session_id: str) -> dict:
                 for row in nudge_stats
             ],
         }
-    except Exception:
-        return {"session_id": session_id, "enforcement": {}, "nudges": []}
+    except Exception as e:
+        raise RuntimeError("Failed to end enforcement session") from e
 
 
 def inject_enforcement_context() -> str:
@@ -326,8 +326,8 @@ def _get_active_goal(project: str) -> str | None:
                 "ORDER BY started_at DESC LIMIT 1"
             ).fetchone()
             return row["task_name"] if row else None
-    except Exception:
-        return None
+    except Exception as e:
+        raise RuntimeError("Failed to read active goal") from e
 
 
 def _get_current_phase(project: str) -> str | None:
@@ -340,8 +340,8 @@ def _get_current_phase(project: str) -> str | None:
                 "ORDER BY started_at DESC LIMIT 1"
             ).fetchone()
             return row["task_name"] if row else None
-    except Exception:
-        return None
+    except Exception as e:
+        raise RuntimeError("Failed to read current phase") from e
 
 
 def _get_tier(project: str) -> str | None:
@@ -354,8 +354,8 @@ def _get_tier(project: str) -> str | None:
                 "ORDER BY started_at DESC LIMIT 1"
             ).fetchone()
             return row["tier"] if row else None
-    except Exception:
-        return None
+    except Exception as e:
+        raise RuntimeError("Failed to read tier") from e
 
 
 def _is_spec_approved(project: str) -> bool:
@@ -370,8 +370,8 @@ def _is_spec_approved(project: str) -> bool:
                 (project,),
             ).fetchone()
             return row is not None
-    except Exception:
-        return False
+    except Exception as e:
+        raise RuntimeError("Failed to check spec approval") from e
 
 
 def _contains_decision_language(text: str) -> bool:
@@ -390,8 +390,8 @@ def _recent_enki_remember(session_id: str, within_turns: int = 2) -> bool:
                 (session_id, within_turns),
             ).fetchone()
             return row["cnt"] > 0
-    except Exception:
-        return False
+    except Exception as e:
+        raise RuntimeError("Failed to check recent enki_remember") from e
 
 
 def _should_fire_nudge(nudge_type: str, session_id: str) -> bool:
@@ -409,8 +409,8 @@ def _should_fire_nudge(nudge_type: str, session_id: str) -> bool:
 
             # Graduate: first time immediately, then every 10 tool calls
             return row["fire_count"] < 3
-    except Exception:
-        return True
+    except Exception as e:
+        raise RuntimeError("Failed to evaluate nudge firing") from e
 
 
 def _record_nudge_fired(nudge_type: str, session_id: str) -> None:
@@ -438,8 +438,8 @@ def _get_tool_count(session_id: str) -> int:
                 (session_id,),
             ).fetchone()
             return row["cnt"]
-    except Exception:
-        return 0
+    except Exception as e:
+        raise RuntimeError("Failed to read tool count") from e
 
 
 def _get_unread_kickoff_mails() -> list[str]:

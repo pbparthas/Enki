@@ -4,9 +4,24 @@ set -euo pipefail
 
 INPUT=$(cat)
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
+PROJECT=$(echo "$INPUT" | jq -r '.project // empty')
+GOAL=$(echo "$INPUT" | jq -r '.goal // empty')
+TIER=$(echo "$INPUT" | jq -r '.tier // empty')
 
 if [[ -z "$SESSION_ID" ]]; then
     SESSION_ID=$(python -c "import uuid; print(uuid.uuid4())")
+fi
+if [[ -z "$PROJECT" && -f "$HOME/.enki/PROJECT" ]]; then
+    PROJECT=$(cat "$HOME/.enki/PROJECT")
+fi
+if [[ -z "$GOAL" && -f "$HOME/.enki/GOAL" ]]; then
+    GOAL=$(cat "$HOME/.enki/GOAL")
+fi
+if [[ -z "$TIER" && -f "$HOME/.enki/TIER" ]]; then
+    TIER=$(cat "$HOME/.enki/TIER")
+fi
+if [[ -z "$TIER" ]]; then
+    TIER="standard"
 fi
 
 # Initialize enforcement state (Uru)
@@ -31,12 +46,10 @@ except Exception:
 # Abzu memory context (persona + beads + last summary)
 try:
     from enki.memory.abzu import inject_session_start
-    abzu_ctx = inject_session_start(
-        session_id='$SESSION_ID',
-        project=None,
-        goal=None,
-        tier='standard',
-    )
+    project = '$PROJECT' or None
+    goal = '$GOAL' or None
+    tier = '$TIER' or 'standard'
+    abzu_ctx = inject_session_start(project, goal, tier)
     if abzu_ctx:
         parts.append(abzu_ctx)
 except Exception:

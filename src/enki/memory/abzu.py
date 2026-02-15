@@ -96,6 +96,7 @@ def finalize_session(session_id: str, project: str) -> None:
     from enki.memory.staging import add_candidate
 
     final = _finalize(session_id, project)
+    candidates_extracted = 0
     content = final.get("content") if isinstance(final, dict) else None
     if content:
         candidates = extract_candidates(content, session_id)
@@ -108,8 +109,14 @@ def finalize_session(session_id: str, project: str) -> None:
                 source=c.get("source", "session_end"),
                 session_id=session_id,
             )
+            candidates_extracted += 1
     cleanup_old_summaries(project)
     run_decay()
+    summary_id = final.get("id") if isinstance(final, dict) else None
+    return {
+        "candidates_extracted": candidates_extracted,
+        "summary_id": summary_id,
+    }
 
 
 def remember(
