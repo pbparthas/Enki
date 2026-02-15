@@ -1,118 +1,35 @@
 #!/bin/bash
+# hooks/pre-compact.sh — Save enforcement state + Abzu pre-compact summary
 set -euo pipefail
-# Enki Pre-Compact Hook
-# Called before context compaction in Claude Code
-#
-# Reads the JSONL transcript directly and produces a digest.
-# No dependency on `enki` CLI being on PATH.
-#
-# The digest is deterministic: same transcript -> same digest.
-# It uses regex extraction only — no AI summarization.
 
-# Read input from stdin
 INPUT=$(cat)
 
-CWD=$(echo "${INPUT}" | jq -r '.cwd // "."')
-SESSION_ID=$(echo "${INPUT}" | jq -r '.session_id // ""')
-TRANSCRIPT_PATH=$(echo "${INPUT}" | jq -r '.transcript_path // ""')
-
-ENKI_DIR="${CWD}/.enki"
-mkdir -p "${ENKI_DIR}"
-
-# Record compaction event
-TIMESTAMP=$(date +%Y-%m-%d\ %H:%M:%S)
-echo "[${TIMESTAMP}] COMPACT: Context compaction triggered (session: ${SESSION_ID})" >> "${ENKI_DIR}/RUNNING.md"
-
-# Save basic state (always — fallback if transcript extraction fails)
-{
-    echo "SESSION_ID=${SESSION_ID}"
-    echo "PHASE=$(cat "${ENKI_DIR}/PHASE" 2>/dev/null || echo 'intake')"
-    echo "GOAL=$(cat "${ENKI_DIR}/GOAL" 2>/dev/null || echo '')"
-    echo "TIER=$(cat "${ENKI_DIR}/TIER" 2>/dev/null || echo 'unknown')"
-    echo "TIMESTAMP=${TIMESTAMP}"
-} > "${ENKI_DIR}/.pre-compact-state"
-
-# =============================================================================
-# TRANSCRIPT DIGEST
-# =============================================================================
-
-if [[ -n "${TRANSCRIPT_PATH}" ]] && [[ -f "${TRANSCRIPT_PATH}" ]]; then
-    # Find transcript.py — check common locations
-    SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-    TRANSCRIPT_PY=""
-
-    for candidate in \
-        "${SCRIPT_DIR}/transcript.py" \
-        "${CWD}/src/enki/transcript.py" \
-        "${CWD}/scripts/hooks/transcript.py" \
-        "${HOME}/.claude/hooks/transcript.py"; do
-        if [[ -f "${candidate}" ]]; then
-            TRANSCRIPT_PY="${candidate}"
-            break
-        fi
-    done
-
-    if [[ -n "${TRANSCRIPT_PY}" ]]; then
-        # Find Python — try venv first, then system
-        PYTHON=""
-        for py_candidate in \
-            "${CWD}/.venv/bin/python" \
-            "${CWD}/.venv/bin/python3" \
-            "$(which python3 2>/dev/null || true)" \
-            "$(which python 2>/dev/null || true)"; do
-            if [[ -n "${py_candidate}" ]] && [[ -x "${py_candidate}" ]]; then
-                PYTHON="${py_candidate}"
-                break
-            fi
-        done
-
-        if [[ -n "${PYTHON}" ]]; then
-            # Generate digest and save to .enki/
-            DIGEST=$("${PYTHON}" "${TRANSCRIPT_PY}" "${TRANSCRIPT_PATH}" "${ENKI_DIR}" 2>/dev/null) || true
-
-            if [[ -n "${DIGEST}" ]] && [[ ${#DIGEST} -gt 50 ]]; then
-                echo "${DIGEST}" > "${ENKI_DIR}/.compact-digest"
-                echo "[${TIMESTAMP}] COMPACT: Digest saved ($(echo "${DIGEST}" | wc -c) bytes)" >> "${ENKI_DIR}/RUNNING.md"
-            else
-                echo "[${TIMESTAMP}] COMPACT: Digest extraction failed or empty" >> "${ENKI_DIR}/RUNNING.md"
-            fi
-        else
-            echo "[${TIMESTAMP}] COMPACT: No Python found for transcript extraction" >> "${ENKI_DIR}/RUNNING.md"
-        fi
-    else
-        echo "[${TIMESTAMP}] COMPACT: transcript.py not found" >> "${ENKI_DIR}/RUNNING.md"
-    fi
-else
-    echo "[${TIMESTAMP}] COMPACT: No transcript_path provided or file missing" >> "${ENKI_DIR}/RUNNING.md"
-fi
-
-# =============================================================================
-# SNAPSHOT EXTRACTION (Enki v2)
-# =============================================================================
-# Extract structured snapshot from CC transcript before compaction.
-# This captures thinking blocks, user messages, and tool calls.
-# Beads are NOT created here — distillation happens at session end.
-
-if [[ -n "${SESSION_ID}" ]]; then
-    if [[ -n "${PYTHON}" ]]; then
-        "${PYTHON}" -c "
+# Uru: Log enforcement state snapshot
+python -c "
 import sys
-sys.path.insert(0, '${CWD}/src')
-try:
-    from enki.hooks import extract_pre_compact_snapshot
-    from pathlib import Path
-    result = extract_pre_compact_snapshot(Path('${CWD}'), '${SESSION_ID}')
-    entries = len(result.get('entries', []))
-    error = result.get('error', '')
-    if error:
-        print(f'SNAPSHOT: {error}', file=sys.stderr)
-    else:
-        print(f'SNAPSHOT: {entries} entries extracted', file=sys.stderr)
-except Exception as e:
-    print(f'SNAPSHOT: error: {e}', file=sys.stderr)
-" 2>>"${ENKI_DIR}/RUNNING.md" || true
-    fi
-fi
+sys.path.insert(0, 'src')
+from enki.gates.uru import _get_session_id, _log_enforcement
+session_id = _get_session_id()
+_log_enforcement('pre-compact', 'system', None, None, 'snapshot', 'Pre-compact state capture')
+" 2>/dev/null || true
 
-# Pre-compact hooks don't output to stdout
-exit 0
+# Abzu: Save pre-compact summary for injection after compaction
+python -c "
+import sys
+sys.path.insert(0, 'src')
+try:
+    from enki.memory.abzu import update_pre_compact_summary
+    from enki.gates.uru import _get_session_id
+    session_id = _get_session_id()
+    if session_id:
+        update_pre_compact_summary(
+            session_id=session_id,
+            project=None,
+            operational_state='Pre-compact checkpoint',
+            conversational_state='Session in progress',
+        )
+except Exception:
+    pass
+" 2>/dev/null || true
+
+echo '{"decision":"allow"}'

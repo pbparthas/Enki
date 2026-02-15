@@ -1,45 +1,44 @@
 #!/bin/bash
+# hooks/session-end.sh — Finalize Uru + Abzu, generate proposals
 set -euo pipefail
-# Enki Session End Hook
-# Called when Claude Code session ends (Stop hook)
-#
-# Runs: enki session end — reflect + feedback loop + archive + summary table
-# This is the counterpart to enki-session-start.sh
 
-# Read input from stdin (Claude Code passes JSON with cwd, etc.)
 INPUT=$(cat)
 
-CWD=$(echo "${INPUT}" | jq -r '.cwd // "."')
+# Uru: End enforcement session
+RESULT=$(echo "$INPUT" | python -m enki.gates.uru --hook session-end 2>/dev/null || true)
 
-# P1-11: Discover enki binary dynamically
-ENKI_BIN="${ENKI_BIN:-}"
-if [[ -z "${ENKI_BIN}" ]]; then
-    if [[ -x "${CWD}/.venv/bin/enki" ]]; then
-        ENKI_BIN="${CWD}/.venv/bin/enki"
-    elif command -v enki &> /dev/null; then
-        ENKI_BIN="$(command -v enki)"
-    fi
+# Uru: Generate feedback proposals
+python -c "
+import sys
+sys.path.insert(0, 'src')
+from enki.gates.uru import _get_session_id
+from enki.gates.feedback import generate_session_proposals
+session_id = _get_session_id()
+proposals = generate_session_proposals(session_id)
+if proposals:
+    print(f'Generated {len(proposals)} feedback proposal(s)')
+" 2>/dev/null || true
+
+# Abzu: Finalize session (reconcile summaries, extract candidates, run decay)
+python -c "
+import sys
+sys.path.insert(0, 'src')
+try:
+    from enki.memory.abzu import finalize_session
+    from enki.gates.uru import _get_session_id
+    session_id = _get_session_id()
+    if session_id:
+        result = finalize_session(session_id=session_id, project=None)
+        if result:
+            candidates = result.get('candidates_extracted', 0)
+            if candidates:
+                print(f'Extracted {candidates} bead candidate(s)')
+except Exception:
+    pass
+" 2>/dev/null || true
+
+if [[ -n "$RESULT" ]]; then
+    echo "$RESULT"
+else
+    echo '{"decision":"allow"}'
 fi
-
-if [[ -z "${ENKI_BIN}" ]] || [[ ! -x "${ENKI_BIN}" ]]; then
-    exit 0
-fi
-
-# Check if there's an active session
-if [[ ! -f "${CWD}/.enki/SESSION_ID" ]]; then
-    exit 0
-fi
-
-# =============================================================================
-# RUN SESSION END (reflect + feedback loop + archive + summary)
-# =============================================================================
-
-"${ENKI_BIN}" session end --project "${CWD}" 2>&1
-
-# =============================================================================
-# MAINTENANCE (decay weights — lightweight, still useful)
-# =============================================================================
-
-"${ENKI_BIN}" maintain 2>/dev/null || true
-
-exit 0

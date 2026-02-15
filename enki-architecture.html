@@ -1,0 +1,972 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Enki Architecture Explorer</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #0f172a;
+      color: #e2e8f0;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    .container {
+      display: grid;
+      grid-template-columns: 280px 1fr;
+      grid-template-rows: 1fr auto;
+      height: 100vh;
+    }
+
+    .sidebar {
+      background: #1e293b;
+      padding: 16px;
+      overflow-y: auto;
+      border-right: 1px solid #334155;
+    }
+
+    .sidebar h1 {
+      font-size: 18px;
+      font-weight: 600;
+      margin-bottom: 4px;
+      color: #f8fafc;
+    }
+
+    .sidebar .subtitle {
+      font-size: 12px;
+      color: #94a3b8;
+      margin-bottom: 20px;
+    }
+
+    .section {
+      margin-bottom: 20px;
+    }
+
+    .section-title {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: #64748b;
+      margin-bottom: 8px;
+      font-weight: 600;
+    }
+
+    .presets {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .preset-btn {
+      background: #334155;
+      border: 1px solid #475569;
+      color: #e2e8f0;
+      padding: 6px 10px;
+      border-radius: 6px;
+      font-size: 12px;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+
+    .preset-btn:hover {
+      background: #475569;
+    }
+
+    .preset-btn.active {
+      background: #3b82f6;
+      border-color: #3b82f6;
+    }
+
+    .checkbox-group {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .checkbox-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+      cursor: pointer;
+    }
+
+    .checkbox-item input {
+      width: 14px;
+      height: 14px;
+      cursor: pointer;
+    }
+
+    .color-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      display: inline-block;
+    }
+
+    .stats-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+
+    .stat-box {
+      background: #334155;
+      padding: 10px;
+      border-radius: 6px;
+      text-align: center;
+    }
+
+    .stat-value {
+      font-size: 20px;
+      font-weight: 600;
+      color: #f8fafc;
+    }
+
+    .stat-label {
+      font-size: 10px;
+      color: #94a3b8;
+      text-transform: uppercase;
+    }
+
+    .comments-section {
+      margin-top: 16px;
+      border-top: 1px solid #334155;
+      padding-top: 16px;
+    }
+
+    .comment-item {
+      background: #334155;
+      padding: 10px;
+      border-radius: 6px;
+      margin-bottom: 8px;
+      position: relative;
+    }
+
+    .comment-target {
+      font-size: 12px;
+      font-weight: 600;
+      color: #60a5fa;
+      margin-bottom: 4px;
+    }
+
+    .comment-text {
+      font-size: 12px;
+      color: #cbd5e1;
+      line-height: 1.4;
+    }
+
+    .comment-delete {
+      position: absolute;
+      top: 8px;
+      right: 8px;
+      background: none;
+      border: none;
+      color: #64748b;
+      cursor: pointer;
+      font-size: 14px;
+    }
+
+    .comment-delete:hover {
+      color: #ef4444;
+    }
+
+    .canvas-container {
+      position: relative;
+      background: #0f172a;
+      overflow: hidden;
+    }
+
+    .canvas-container svg {
+      width: 100%;
+      height: 100%;
+    }
+
+    .zoom-controls {
+      position: absolute;
+      bottom: 16px;
+      right: 16px;
+      display: flex;
+      gap: 4px;
+    }
+
+    .zoom-btn {
+      background: #1e293b;
+      border: 1px solid #334155;
+      color: #e2e8f0;
+      width: 32px;
+      height: 32px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 16px;
+    }
+
+    .zoom-btn:hover {
+      background: #334155;
+    }
+
+    .legend {
+      position: absolute;
+      bottom: 16px;
+      left: 16px;
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 8px;
+      padding: 12px;
+      font-size: 11px;
+    }
+
+    .legend-title {
+      font-weight: 600;
+      margin-bottom: 8px;
+      color: #f8fafc;
+    }
+
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 4px;
+      color: #94a3b8;
+    }
+
+    .legend-line {
+      width: 24px;
+      height: 2px;
+    }
+
+    .prompt-container {
+      grid-column: 1 / -1;
+      background: #1e293b;
+      border-top: 1px solid #334155;
+      padding: 16px;
+    }
+
+    .prompt-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 8px;
+    }
+
+    .prompt-label {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: #64748b;
+      font-weight: 600;
+    }
+
+    .copy-btn {
+      background: #3b82f6;
+      border: none;
+      color: white;
+      padding: 6px 12px;
+      border-radius: 6px;
+      font-size: 12px;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+
+    .copy-btn:hover {
+      background: #2563eb;
+    }
+
+    .copy-btn.copied {
+      background: #10b981;
+    }
+
+    .prompt-output {
+      background: #0f172a;
+      border: 1px solid #334155;
+      border-radius: 6px;
+      padding: 12px;
+      font-family: 'SF Mono', Consolas, monospace;
+      font-size: 12px;
+      color: #cbd5e1;
+      line-height: 1.5;
+      max-height: 120px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+    }
+
+    /* Modal */
+    .modal-overlay {
+      display: none;
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(0, 0, 0, 0.7);
+      z-index: 100;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .modal-overlay.active {
+      display: flex;
+    }
+
+    .modal {
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 12px;
+      padding: 20px;
+      width: 400px;
+      max-width: 90%;
+    }
+
+    .modal-title {
+      font-size: 16px;
+      font-weight: 600;
+      margin-bottom: 4px;
+    }
+
+    .modal-subtitle {
+      font-size: 12px;
+      color: #64748b;
+      margin-bottom: 16px;
+    }
+
+    .modal textarea {
+      width: 100%;
+      height: 100px;
+      background: #0f172a;
+      border: 1px solid #334155;
+      border-radius: 6px;
+      padding: 10px;
+      color: #e2e8f0;
+      font-family: inherit;
+      font-size: 13px;
+      resize: none;
+      margin-bottom: 12px;
+    }
+
+    .modal textarea:focus {
+      outline: none;
+      border-color: #3b82f6;
+    }
+
+    .modal-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+    }
+
+    .modal-btn {
+      padding: 8px 16px;
+      border-radius: 6px;
+      font-size: 13px;
+      cursor: pointer;
+      border: none;
+    }
+
+    .modal-btn.cancel {
+      background: #334155;
+      color: #e2e8f0;
+    }
+
+    .modal-btn.save {
+      background: #3b82f6;
+      color: white;
+    }
+
+    /* Node styles */
+    .node {
+      cursor: pointer;
+      transition: transform 0.1s;
+    }
+
+    .node:hover rect {
+      stroke-width: 2;
+    }
+
+    .node.has-comment rect {
+      stroke: #f59e0b;
+      stroke-width: 2;
+    }
+
+    .node-label {
+      font-size: 11px;
+      font-weight: 600;
+      fill: #1e293b;
+      pointer-events: none;
+    }
+
+    .node-subtitle {
+      font-size: 9px;
+      fill: #64748b;
+      pointer-events: none;
+    }
+
+    .connection {
+      fill: none;
+      stroke-width: 1.5;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="sidebar">
+      <h1>Enki Architecture</h1>
+      <p class="subtitle">Second Brain for Software Engineering</p>
+
+      <div class="section">
+        <div class="section-title">View Presets</div>
+        <div class="presets">
+          <button class="preset-btn active" data-preset="full">Full System</button>
+          <button class="preset-btn" data-preset="core">Core Memory</button>
+          <button class="preset-btn" data-preset="agents">Agents</button>
+          <button class="preset-btn" data-preset="cli">CLI/MCP</button>
+          <button class="preset-btn" data-preset="hooks">Hooks</button>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="section-title">Layers</div>
+        <div class="checkbox-group" id="layers">
+          <label class="checkbox-item">
+            <input type="checkbox" data-layer="interface" checked>
+            <span class="color-dot" style="background: #dbeafe"></span>
+            Interface (CLI, MCP, API)
+          </label>
+          <label class="checkbox-item">
+            <input type="checkbox" data-layer="orchestration" checked>
+            <span class="color-dot" style="background: #dcfce7"></span>
+            Orchestration (Agents)
+          </label>
+          <label class="checkbox-item">
+            <input type="checkbox" data-layer="core" checked>
+            <span class="color-dot" style="background: #f3e8ff"></span>
+            Core (Memory, Search)
+          </label>
+          <label class="checkbox-item">
+            <input type="checkbox" data-layer="data" checked>
+            <span class="color-dot" style="background: #fce7f3"></span>
+            Data (DB, Embeddings)
+          </label>
+          <label class="checkbox-item">
+            <input type="checkbox" data-layer="hooks" checked>
+            <span class="color-dot" style="background: #fef3c7"></span>
+            Hooks & Skills
+          </label>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="section-title">Connections</div>
+        <div class="checkbox-group" id="connections">
+          <label class="checkbox-item">
+            <input type="checkbox" data-conn="data-flow" checked>
+            <span class="color-dot" style="background: #3b82f6"></span>
+            Data Flow
+          </label>
+          <label class="checkbox-item">
+            <input type="checkbox" data-conn="tool-call" checked>
+            <span class="color-dot" style="background: #10b981"></span>
+            Tool Calls
+          </label>
+          <label class="checkbox-item">
+            <input type="checkbox" data-conn="validation" checked>
+            <span class="color-dot" style="background: #f59e0b"></span>
+            Validation
+          </label>
+          <label class="checkbox-item">
+            <input type="checkbox" data-conn="hook" checked>
+            <span class="color-dot" style="background: #ef4444"></span>
+            Hook Events
+          </label>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="section-title">Statistics</div>
+        <div class="stats-grid">
+          <div class="stat-box">
+            <div class="stat-value">27</div>
+            <div class="stat-label">Modules</div>
+          </div>
+          <div class="stat-box">
+            <div class="stat-value">11</div>
+            <div class="stat-label">Agents</div>
+          </div>
+          <div class="stat-box">
+            <div class="stat-value">26</div>
+            <div class="stat-label">MCP Tools</div>
+          </div>
+          <div class="stat-box">
+            <div class="stat-value">89</div>
+            <div class="stat-label">CLI Cmds</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="comments-section">
+        <div class="section-title">Comments (<span id="comment-count">0</span>)</div>
+        <div id="comments-list"></div>
+      </div>
+    </div>
+
+    <div class="canvas-container">
+      <svg id="canvas" viewBox="0 0 1000 700">
+        <defs>
+          <marker id="arrow-blue" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+            <polygon points="0 0, 8 3, 0 6" fill="#3b82f6"/>
+          </marker>
+          <marker id="arrow-green" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+            <polygon points="0 0, 8 3, 0 6" fill="#10b981"/>
+          </marker>
+          <marker id="arrow-orange" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+            <polygon points="0 0, 8 3, 0 6" fill="#f59e0b"/>
+          </marker>
+          <marker id="arrow-red" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+            <polygon points="0 0, 8 3, 0 6" fill="#ef4444"/>
+          </marker>
+        </defs>
+        <g id="connections-layer"></g>
+        <g id="nodes-layer"></g>
+      </svg>
+
+      <div class="legend">
+        <div class="legend-title">Connection Types</div>
+        <div class="legend-item">
+          <div class="legend-line" style="background: #3b82f6"></div>
+          Data Flow
+        </div>
+        <div class="legend-item">
+          <div class="legend-line" style="background: #10b981; border-style: dashed"></div>
+          Tool Calls
+        </div>
+        <div class="legend-item">
+          <div class="legend-line" style="background: #f59e0b"></div>
+          Validation
+        </div>
+        <div class="legend-item">
+          <div class="legend-line" style="background: #ef4444; border-style: dotted"></div>
+          Hook Events
+        </div>
+      </div>
+
+      <div class="zoom-controls">
+        <button class="zoom-btn" id="zoom-out">−</button>
+        <button class="zoom-btn" id="zoom-reset">⟲</button>
+        <button class="zoom-btn" id="zoom-in">+</button>
+      </div>
+    </div>
+
+    <div class="prompt-container">
+      <div class="prompt-header">
+        <span class="prompt-label">Generated Prompt</span>
+        <button class="copy-btn" id="copy-btn">Copy Prompt</button>
+      </div>
+      <div class="prompt-output" id="prompt-output">Click on components to add comments and generate a prompt...</div>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="modal">
+    <div class="modal">
+      <div class="modal-title" id="modal-title">Component Name</div>
+      <div class="modal-subtitle" id="modal-subtitle">src/enki/module.py</div>
+      <textarea id="modal-input" placeholder="Add your comment or question about this component..."></textarea>
+      <div class="modal-actions">
+        <button class="modal-btn cancel" id="modal-cancel">Cancel</button>
+        <button class="modal-btn save" id="modal-save">Save Comment</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // State
+    const state = {
+      zoom: 1,
+      panX: 0,
+      panY: 0,
+      layers: {
+        interface: true,
+        orchestration: true,
+        core: true,
+        data: true,
+        hooks: true
+      },
+      connections: {
+        'data-flow': true,
+        'tool-call': true,
+        'validation': true,
+        'hook': true
+      },
+      comments: [],
+      selectedNode: null
+    };
+
+    // Nodes definition
+    const nodes = [
+      // Interface Layer (y: 30-80)
+      { id: 'cli', label: 'CLI', subtitle: 'cli.py (89 commands)', x: 80, y: 50, w: 130, h: 45, layer: 'interface', color: '#dbeafe' },
+      { id: 'mcp', label: 'MCP Server', subtitle: 'mcp_server.py (26 tools)', x: 230, y: 50, w: 150, h: 45, layer: 'interface', color: '#dbeafe' },
+      { id: 'api', label: 'API Server', subtitle: 'api_server.py', x: 400, y: 50, w: 120, h: 45, layer: 'interface', color: '#dbeafe' },
+      { id: 'client', label: 'HTTP Client', subtitle: 'client.py', x: 540, y: 50, w: 120, h: 45, layer: 'interface', color: '#dbeafe' },
+
+      // Orchestration Layer (y: 130-220)
+      { id: 'orchestrator', label: 'Orchestrator', subtitle: 'orchestrator.py (11 agents)', x: 80, y: 140, w: 150, h: 45, layer: 'orchestration', color: '#dcfce7' },
+      { id: 'agents', label: 'Agents', subtitle: 'AGENTS dict', x: 250, y: 140, w: 100, h: 45, layer: 'orchestration', color: '#dcfce7' },
+      { id: 'validation', label: 'Validators', subtitle: 'Two-stage blind', x: 370, y: 140, w: 120, h: 45, layer: 'orchestration', color: '#dcfce7' },
+      { id: 'simplifier', label: 'Simplifier', subtitle: 'simplifier.py', x: 510, y: 140, w: 110, h: 45, layer: 'orchestration', color: '#dcfce7' },
+      { id: 'worktree', label: 'Worktree', subtitle: 'worktree.py', x: 640, y: 140, w: 110, h: 45, layer: 'orchestration', color: '#dcfce7' },
+
+      { id: 'pm', label: 'PM', subtitle: 'pm.py (debate/plan)', x: 80, y: 200, w: 120, h: 45, layer: 'orchestration', color: '#dcfce7' },
+      { id: 'persona', label: 'Persona', subtitle: 'persona.py', x: 220, y: 200, w: 110, h: 45, layer: 'orchestration', color: '#dcfce7' },
+      { id: 'context', label: 'Context', subtitle: 'context.py (tiers)', x: 350, y: 200, w: 120, h: 45, layer: 'orchestration', color: '#dcfce7' },
+      { id: 'ereshkigal', label: 'Ereshkigal', subtitle: 'ereshkigal.py', x: 490, y: 200, w: 120, h: 45, layer: 'orchestration', color: '#dcfce7' },
+      { id: 'enforcement', label: 'Enforcement', subtitle: 'enforcement.py', x: 630, y: 200, w: 120, h: 45, layer: 'orchestration', color: '#dcfce7' },
+
+      // Core Layer (y: 280-380)
+      { id: 'beads', label: 'Beads', subtitle: 'beads.py', x: 80, y: 300, w: 100, h: 45, layer: 'core', color: '#f3e8ff' },
+      { id: 'search', label: 'Search', subtitle: 'search.py (hybrid)', x: 200, y: 300, w: 120, h: 45, layer: 'core', color: '#f3e8ff' },
+      { id: 'session', label: 'Session', subtitle: 'session.py', x: 340, y: 300, w: 110, h: 45, layer: 'core', color: '#f3e8ff' },
+      { id: 'violations', label: 'Violations', subtitle: 'violations.py', x: 470, y: 300, w: 110, h: 45, layer: 'core', color: '#f3e8ff' },
+      { id: 'evolution', label: 'Evolution', subtitle: 'evolution.py', x: 600, y: 300, w: 110, h: 45, layer: 'core', color: '#f3e8ff' },
+
+      { id: 'retention', label: 'Retention', subtitle: 'retention.py', x: 80, y: 360, w: 110, h: 45, layer: 'core', color: '#f3e8ff' },
+      { id: 'summarization', label: 'Summarization', subtitle: 'summarization.py', x: 210, y: 360, w: 130, h: 45, layer: 'core', color: '#f3e8ff' },
+      { id: 'style', label: 'Style Learning', subtitle: 'style_learning.py', x: 360, y: 360, w: 130, h: 45, layer: 'core', color: '#f3e8ff' },
+      { id: 'onboarding', label: 'Onboarding', subtitle: 'onboarding.py', x: 510, y: 360, w: 120, h: 45, layer: 'core', color: '#f3e8ff' },
+      { id: 'migration', label: 'Migration', subtitle: 'migration.py', x: 650, y: 360, w: 110, h: 45, layer: 'core', color: '#f3e8ff' },
+
+      // Data Layer (y: 440-500)
+      { id: 'db', label: 'Database', subtitle: 'db.py (9 tables)', x: 150, y: 460, w: 130, h: 45, layer: 'data', color: '#fce7f3' },
+      { id: 'embeddings', label: 'Embeddings', subtitle: 'embeddings.py', x: 320, y: 460, w: 130, h: 45, layer: 'data', color: '#fce7f3' },
+      { id: 'sqlite', label: 'SQLite', subtitle: 'wisdom.db', x: 490, y: 460, w: 100, h: 45, layer: 'data', color: '#fce7f3' },
+
+      // Hooks & Skills Layer (y: 540-600)
+      { id: 'hooks', label: 'Hooks', subtitle: 'hooks.py', x: 80, y: 560, w: 100, h: 45, layer: 'hooks', color: '#fef3c7' },
+      { id: 'session-start', label: 'Session Start', subtitle: 'enki-session-start.sh', x: 200, y: 560, w: 130, h: 45, layer: 'hooks', color: '#fef3c7' },
+      { id: 'pre-tool', label: 'Pre-Tool', subtitle: 'enki-pre-tool-use.sh', x: 350, y: 560, w: 120, h: 45, layer: 'hooks', color: '#fef3c7' },
+      { id: 'post-tool', label: 'Post-Tool', subtitle: 'enki-post-tool-use.sh', x: 490, y: 560, w: 120, h: 45, layer: 'hooks', color: '#fef3c7' },
+      { id: 'skills', label: 'Skills', subtitle: 'skills.py', x: 630, y: 560, w: 100, h: 45, layer: 'hooks', color: '#fef3c7' },
+      { id: 'sentinel', label: 'Sentinel', subtitle: 'skills/sentinel/', x: 750, y: 560, w: 110, h: 45, layer: 'hooks', color: '#fef3c7' },
+    ];
+
+    // Connections definition
+    const connections = [
+      // CLI/MCP to Core
+      { from: 'cli', to: 'orchestrator', type: 'tool-call' },
+      { from: 'cli', to: 'beads', type: 'data-flow' },
+      { from: 'cli', to: 'session', type: 'data-flow' },
+      { from: 'mcp', to: 'orchestrator', type: 'tool-call' },
+      { from: 'mcp', to: 'beads', type: 'data-flow' },
+      { from: 'mcp', to: 'worktree', type: 'tool-call' },
+      { from: 'mcp', to: 'simplifier', type: 'tool-call' },
+      { from: 'api', to: 'client', type: 'data-flow' },
+
+      // Orchestration internal
+      { from: 'orchestrator', to: 'agents', type: 'tool-call' },
+      { from: 'agents', to: 'validation', type: 'validation' },
+      { from: 'validation', to: 'simplifier', type: 'validation' },
+      { from: 'orchestrator', to: 'pm', type: 'data-flow' },
+      { from: 'orchestrator', to: 'worktree', type: 'tool-call' },
+      { from: 'persona', to: 'context', type: 'data-flow' },
+      { from: 'ereshkigal', to: 'enforcement', type: 'data-flow' },
+
+      // Core to Data
+      { from: 'beads', to: 'db', type: 'data-flow' },
+      { from: 'beads', to: 'embeddings', type: 'data-flow' },
+      { from: 'search', to: 'beads', type: 'data-flow' },
+      { from: 'search', to: 'embeddings', type: 'data-flow' },
+      { from: 'session', to: 'db', type: 'data-flow' },
+      { from: 'violations', to: 'db', type: 'data-flow' },
+      { from: 'evolution', to: 'db', type: 'data-flow' },
+      { from: 'db', to: 'sqlite', type: 'data-flow' },
+
+      // Retention/Summarization
+      { from: 'retention', to: 'beads', type: 'data-flow' },
+      { from: 'summarization', to: 'beads', type: 'data-flow' },
+      { from: 'style', to: 'beads', type: 'data-flow' },
+
+      // Hooks
+      { from: 'hooks', to: 'session-start', type: 'hook' },
+      { from: 'hooks', to: 'pre-tool', type: 'hook' },
+      { from: 'hooks', to: 'post-tool', type: 'hook' },
+      { from: 'pre-tool', to: 'enforcement', type: 'hook' },
+      { from: 'pre-tool', to: 'ereshkigal', type: 'hook' },
+      { from: 'session-start', to: 'context', type: 'hook' },
+
+      // Skills
+      { from: 'skills', to: 'sentinel', type: 'tool-call' },
+      { from: 'agents', to: 'skills', type: 'tool-call' },
+
+      // Context loading
+      { from: 'context', to: 'beads', type: 'data-flow' },
+      { from: 'context', to: 'session', type: 'data-flow' },
+    ];
+
+    // Presets
+    const presets = {
+      full: { interface: true, orchestration: true, core: true, data: true, hooks: true },
+      core: { interface: false, orchestration: false, core: true, data: true, hooks: false },
+      agents: { interface: true, orchestration: true, core: false, data: false, hooks: false },
+      cli: { interface: true, orchestration: false, core: true, data: false, hooks: false },
+      hooks: { interface: false, orchestration: true, core: false, data: false, hooks: true },
+    };
+
+    // Get node by ID
+    function getNode(id) {
+      return nodes.find(n => n.id === id);
+    }
+
+    // Draw connection
+    function drawConnection(conn) {
+      const from = getNode(conn.from);
+      const to = getNode(conn.to);
+      if (!from || !to) return null;
+      if (!state.layers[from.layer] || !state.layers[to.layer]) return null;
+      if (!state.connections[conn.type]) return null;
+
+      const x1 = from.x + from.w / 2;
+      const y1 = from.y + from.h;
+      const x2 = to.x + to.w / 2;
+      const y2 = to.y;
+
+      const midY = (y1 + y2) / 2;
+      const path = `M ${x1} ${y1} C ${x1} ${midY}, ${x2} ${midY}, ${x2} ${y2}`;
+
+      const colors = {
+        'data-flow': '#3b82f6',
+        'tool-call': '#10b981',
+        'validation': '#f59e0b',
+        'hook': '#ef4444'
+      };
+
+      const dashes = {
+        'data-flow': '',
+        'tool-call': '6,3',
+        'validation': '',
+        'hook': '4,4'
+      };
+
+      const markers = {
+        'data-flow': 'url(#arrow-blue)',
+        'tool-call': 'url(#arrow-green)',
+        'validation': 'url(#arrow-orange)',
+        'hook': 'url(#arrow-red)'
+      };
+
+      return `<path class="connection" d="${path}" stroke="${colors[conn.type]}" stroke-dasharray="${dashes[conn.type]}" marker-end="${markers[conn.type]}"/>`;
+    }
+
+    // Draw node
+    function drawNode(node) {
+      if (!state.layers[node.layer]) return '';
+
+      const hasComment = state.comments.some(c => c.target === node.id);
+      const commentClass = hasComment ? 'has-comment' : '';
+
+      return `
+        <g class="node ${commentClass}" data-id="${node.id}" transform="translate(${node.x}, ${node.y})">
+          <rect width="${node.w}" height="${node.h}" rx="6" fill="${node.color}" stroke="#64748b"/>
+          <text class="node-label" x="${node.w/2}" y="18" text-anchor="middle">${node.label}</text>
+          <text class="node-subtitle" x="${node.w/2}" y="32" text-anchor="middle">${node.subtitle}</text>
+        </g>
+      `;
+    }
+
+    // Render diagram
+    function renderDiagram() {
+      const connectionsLayer = document.getElementById('connections-layer');
+      const nodesLayer = document.getElementById('nodes-layer');
+
+      connectionsLayer.innerHTML = connections.map(drawConnection).filter(Boolean).join('');
+      nodesLayer.innerHTML = nodes.map(drawNode).join('');
+
+      // Add click handlers
+      document.querySelectorAll('.node').forEach(node => {
+        node.addEventListener('click', () => openModal(node.dataset.id));
+      });
+    }
+
+    // Update prompt
+    function updatePrompt() {
+      const output = document.getElementById('prompt-output');
+
+      if (state.comments.length === 0) {
+        output.textContent = 'Click on components to add comments and generate a prompt...';
+        return;
+      }
+
+      const visibleLayers = Object.entries(state.layers)
+        .filter(([_, v]) => v)
+        .map(([k, _]) => k);
+
+      let prompt = `Enki architecture review focusing on ${visibleLayers.join(', ')} layers.\n\n`;
+      prompt += `Feedback on specific components:\n\n`;
+
+      state.comments.forEach(c => {
+        prompt += `**${c.targetLabel}** (${c.targetFile}):\n${c.text}\n\n`;
+      });
+
+      output.textContent = prompt.trim();
+    }
+
+    // Update comments list
+    function updateComments() {
+      const list = document.getElementById('comments-list');
+      const count = document.getElementById('comment-count');
+
+      count.textContent = state.comments.length;
+
+      if (state.comments.length === 0) {
+        list.innerHTML = '<p style="font-size: 12px; color: #64748b;">Click components to add comments</p>';
+        return;
+      }
+
+      list.innerHTML = state.comments.map((c, i) => `
+        <div class="comment-item">
+          <button class="comment-delete" data-index="${i}">×</button>
+          <div class="comment-target">${c.targetLabel}</div>
+          <div class="comment-text">${c.text.substring(0, 80)}${c.text.length > 80 ? '...' : ''}</div>
+        </div>
+      `).join('');
+
+      // Add delete handlers
+      document.querySelectorAll('.comment-delete').forEach(btn => {
+        btn.addEventListener('click', () => {
+          state.comments.splice(parseInt(btn.dataset.index), 1);
+          updateAll();
+        });
+      });
+    }
+
+    // Open modal
+    function openModal(nodeId) {
+      const node = getNode(nodeId);
+      if (!node) return;
+
+      state.selectedNode = node;
+      document.getElementById('modal-title').textContent = node.label;
+      document.getElementById('modal-subtitle').textContent = node.subtitle;
+      document.getElementById('modal-input').value = '';
+      document.getElementById('modal').classList.add('active');
+      document.getElementById('modal-input').focus();
+    }
+
+    // Close modal
+    function closeModal() {
+      document.getElementById('modal').classList.remove('active');
+      state.selectedNode = null;
+    }
+
+    // Save comment
+    function saveComment() {
+      const text = document.getElementById('modal-input').value.trim();
+      if (!text || !state.selectedNode) return;
+
+      state.comments.push({
+        id: Date.now(),
+        target: state.selectedNode.id,
+        targetLabel: state.selectedNode.label,
+        targetFile: state.selectedNode.subtitle,
+        text: text
+      });
+
+      closeModal();
+      updateAll();
+    }
+
+    // Update all
+    function updateAll() {
+      renderDiagram();
+      updatePrompt();
+      updateComments();
+    }
+
+    // Copy prompt
+    function copyPrompt() {
+      const text = document.getElementById('prompt-output').textContent;
+      navigator.clipboard.writeText(text).then(() => {
+        const btn = document.getElementById('copy-btn');
+        btn.textContent = 'Copied!';
+        btn.classList.add('copied');
+        setTimeout(() => {
+          btn.textContent = 'Copy Prompt';
+          btn.classList.remove('copied');
+        }, 1500);
+      });
+    }
+
+    // Update zoom
+    function updateZoom(delta) {
+      state.zoom = Math.max(0.5, Math.min(2, state.zoom + delta));
+      const svg = document.getElementById('canvas');
+      const w = 1000 / state.zoom;
+      const h = 700 / state.zoom;
+      svg.setAttribute('viewBox', `${state.panX} ${state.panY} ${w} ${h}`);
+    }
+
+    // Initialize
+    function init() {
+      // Preset buttons
+      document.querySelectorAll('.preset-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+          document.querySelectorAll('.preset-btn').forEach(b => b.classList.remove('active'));
+          btn.classList.add('active');
+
+          const preset = presets[btn.dataset.preset];
+          Object.assign(state.layers, preset);
+
+          // Update checkboxes
+          document.querySelectorAll('[data-layer]').forEach(cb => {
+            cb.checked = state.layers[cb.dataset.layer];
+          });
+
+          updateAll();
+        });
+      });
+
+      // Layer checkboxes
+      document.querySelectorAll('[data-layer]').forEach(cb => {
+        cb.addEventListener('change', () => {
+          state.layers[cb.dataset.layer] = cb.checked;
+          updateAll();
+        });
+      });
+
+      // Connection checkboxes
+      document.querySelectorAll('[data-conn]').forEach(cb => {
+        cb.addEventListener('change', () => {
+          state.connections[cb.dataset.conn] = cb.checked;
+          updateAll();
+        });
+      });
+
+      // Modal
+      document.getElementById('modal-cancel').addEventListener('click', closeModal);
+      document.getElementById('modal-save').addEventListener('click', saveComment);
+      document.getElementById('modal').addEventListener('click', e => {
+        if (e.target.id === 'modal') closeModal();
+      });
+
+      // Copy
+      document.getElementById('copy-btn').addEventListener('click', copyPrompt);
+
+      // Zoom
+      document.getElementById('zoom-in').addEventListener('click', () => updateZoom(0.2));
+      document.getElementById('zoom-out').addEventListener('click', () => updateZoom(-0.2));
+      document.getElementById('zoom-reset').addEventListener('click', () => {
+        state.zoom = 1;
+        state.panX = 0;
+        state.panY = 0;
+        updateZoom(0);
+      });
+
+      // Initial render
+      updateAll();
+    }
+
+    init();
+  </script>
+</body>
+</html>

@@ -1,23 +1,21 @@
-"""Pytest fixtures for Enki tests."""
+"""Pytest fixtures for Enki v3 tests."""
 
 import pytest
-import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
-from enki.db import init_db, get_db, close_db, set_db_path
-
-
-@pytest.fixture
-def temp_db(tmp_path):
-    """Create a temporary database for testing."""
-    db_path = tmp_path / "test_wisdom.db"
-    init_db(db_path)  # This also sets the current db path
-    yield db_path
-    close_db()
-    set_db_path(None)  # Reset to default after test
+import enki.db as db_mod
 
 
 @pytest.fixture
-def db(temp_db):
-    """Get database connection for testing."""
-    return get_db(temp_db)
+def enki_root(tmp_path):
+    """Provide a temporary ~/.enki directory with all DBs initialized."""
+    root = tmp_path / ".enki"
+    root.mkdir()
+    old_initialized = db_mod._em_initialized.copy()
+    db_mod._em_initialized.clear()
+    with patch.object(db_mod, "ENKI_ROOT", root):
+        from enki.db import init_all
+        init_all()
+        yield root
+    db_mod._em_initialized = old_initialized
