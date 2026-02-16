@@ -46,3 +46,8 @@ Thumbs.db
 # Freyja (development only)
 .freyja/
 .mcp.json
+ereshkigal.py
+wisdom.db
+abzu.db
+em.db
+*.db-journal

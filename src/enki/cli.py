@@ -72,6 +72,95 @@ def cmd_setup(args):
     )
 
 
+def cmd_session_end(args):
+    """Finalize current session: extract beads, run feedback loop, archive."""
+    from pathlib import Path
+
+    from enki.db import ENKI_ROOT
+    from enki.gates.feedback import generate_session_proposals
+    from enki.gates.uru import end_session as uru_end_session
+    from enki.memory.abzu import finalize_session
+
+    # Read current session ID
+    session_path = ENKI_ROOT / "SESSION_ID"
+    if session_path.exists():
+        session_id = session_path.read_text().strip()
+    else:
+        session_id = "unknown"
+
+    project = args.project
+
+    print(f"Ending session: {session_id[:12]}...")
+    print(f"Project: {project}")
+    print()
+
+    # Step 1: Finalize memory — extract candidates, reconcile summaries, run decay
+    print("Memory finalization...")
+    mem_result = finalize_session(session_id, project)
+    candidates = mem_result.get("candidates_extracted", 0) if isinstance(mem_result, dict) else 0
+    summary_id = mem_result.get("summary_id") if isinstance(mem_result, dict) else None
+    print(f"  Candidates extracted: {candidates}")
+    if summary_id:
+        print(f"  Final summary: {summary_id[:12]}...")
+
+    # Step 2: Enforcement summary
+    print("\nEnforcement summary...")
+    uru_result = uru_end_session(session_id)
+    enforcement = uru_result.get("enforcement", {})
+    if enforcement:
+        for action, count in enforcement.items():
+            print(f"  {action}: {count}")
+    else:
+        print("  No enforcement events this session")
+
+    # Step 3: Feedback loop — propose gate adjustments
+    print("\nFeedback loop...")
+    proposals = generate_session_proposals(session_id)
+    if proposals:
+        print(f"  Generated {len(proposals)} proposal(s) for review")
+    else:
+        print("  No adjustment proposals")
+
+    # Step 4: Archive session summary to .enki/sessions/
+    sessions_dir = ENKI_ROOT / "sessions"
+    sessions_dir.mkdir(parents=True, exist_ok=True)
+    from datetime import datetime
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    archive_path = sessions_dir / f"{timestamp}-{session_id[:8]}.md"
+
+    archive_lines = [
+        f"# Session {session_id[:12]}",
+        f"**Date:** {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+        f"**Project:** {project}",
+        "",
+        "## Summary",
+        f"- Candidates extracted: {candidates}",
+        f"- Enforcement events: {sum(enforcement.values()) if enforcement else 0}",
+        f"- Feedback proposals: {len(proposals)}",
+    ]
+
+    # Add goal/phase if available
+    try:
+        from enki.orch.tiers import get_project_state
+        state = get_project_state(project)
+        if state.get("goal"):
+            archive_lines.insert(3, f"**Goal:** {state['goal']}")
+        if state.get("phase"):
+            archive_lines.insert(4, f"**Phase:** {state['phase']}")
+    except Exception:
+        pass
+
+    archive_path.write_text("\n".join(archive_lines) + "\n")
+
+    # Print final summary table
+    print(f"\n{'─' * 40}")
+    print(f"Session archived: {archive_path.name}")
+    print(f"  Beads captured:    {candidates}")
+    print(f"  Enforcement:       {sum(enforcement.values()) if enforcement else 0} events")
+    print(f"  Proposals:         {len(proposals)}")
+    print(f"{'─' * 40}")
+
+
 def cmd_checkpoint(args):
     """Create a session checkpoint."""
     from enki.orch.checkpoints import checkpoint_session
@@ -413,6 +502,21 @@ def main():
     )
     setup_parser.set_defaults(func=cmd_setup)
 
+    # session (parent with subcommands)
+    session_parser = subparsers.add_parser(
+        "session", help="Session lifecycle commands"
+    )
+    session_sub = session_parser.add_subparsers(dest="session_command")
+
+    session_end = session_sub.add_parser(
+        "end", help="Finalize session: extract beads, feedback loop, archive"
+    )
+    session_end.add_argument(
+        "--project", "-p", default=".",
+        help="Project ID (default: .)",
+    )
+    session_end.set_defaults(func=cmd_session_end)
+
     # checkpoint
     cp_parser = subparsers.add_parser(
         "checkpoint", help="Create a session checkpoint"
@@ -565,6 +669,8 @@ def main():
             github_parser.print_help()
         elif args.command == "digest":
             digest_parser.print_help()
+        elif args.command == "session":
+            session_parser.print_help()
         sys.exit(1)
 
     args.func(args)
