@@ -7,10 +7,126 @@ Only two paths write to wisdom.db:
 """
 
 import hashlib
+import re
 import uuid
 from datetime import datetime
 
 from enki.db import abzu_db, wisdom_db
+
+
+# Filler phrases that indicate no actionable content
+FILLER_PHRASES = frozenset({
+    "ok", "done", "got it", "sure", "yes", "no", "thanks",
+    "let me think", "hmm", "alright", "sounds good", "will do",
+    "okay", "yep", "nope", "yeah", "nah", "right", "fine",
+    "thank you", "cool", "nice", "great", "good", "yup",
+})
+
+# Common English stopwords (articles, prepositions, conjunctions, pronouns)
+STOPWORDS = frozenset({
+    "a", "an", "the", "and", "or", "but", "in", "on", "at", "to", "for",
+    "of", "with", "by", "from", "is", "it", "this", "that", "i", "we",
+    "you", "he", "she", "they", "me", "my", "your", "his", "her", "its",
+    "our", "their", "am", "are", "was", "were", "be", "been", "being",
+    "have", "has", "had", "do", "does", "did", "will", "would", "could",
+    "should", "may", "might", "can", "shall", "just", "so", "if", "not",
+    "then", "than", "when", "what", "how", "all", "each", "every", "both",
+    "few", "more", "most", "some", "any", "no", "about", "up", "out",
+    "into", "over", "after", "before", "between", "under", "again",
+    "there", "here", "very", "too", "also",
+})
+
+
+def bouncer_check(content: str) -> tuple[bool, str]:
+    """Check if content is worth staging.
+
+    Returns:
+        (passed, reason) — True if content should be staged,
+        False with reason if rejected.
+    """
+    stripped = content.strip()
+
+    # Rule 1: Too short
+    if len(stripped) < 10:
+        return (False, "Too short")
+
+    # Rule 2: Filler phrases (normalize and check)
+    normalized = stripped.lower().rstrip(".!?,:;")
+    if normalized in FILLER_PHRASES:
+        return (False, "No actionable content")
+
+    # Rule 3: All stopwords (no substance)
+    words = re.findall(r"[a-zA-Z]+", stripped.lower())
+    if words and all(w in STOPWORDS for w in words):
+        return (False, "No substance")
+
+    # Rule 4: Exact duplicate already in staging (content hash check)
+    content_hash = hashlib.sha256(stripped.encode()).hexdigest()
+    with abzu_db() as conn:
+        existing = conn.execute(
+            "SELECT id FROM bead_candidates WHERE content_hash = ?",
+            (content_hash,),
+        ).fetchone()
+        if existing:
+            return (False, "Duplicate")
+
+    return (True, "")
+
+
+def _log_rejection(content: str, reason: str, source: str = "session") -> None:
+    """Log a bouncer rejection to staging_rejections table."""
+    with abzu_db() as conn:
+        conn.execute(
+            "INSERT INTO staging_rejections (content, reason, source) "
+            "VALUES (?, ?, ?)",
+            (content, reason, source),
+        )
+
+
+def list_rejections(limit: int = 20) -> list[dict]:
+    """List recent bouncer rejections."""
+    with abzu_db() as conn:
+        rows = conn.execute(
+            "SELECT id, content, reason, rejected_at, source "
+            "FROM staging_rejections ORDER BY rejected_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def override_rejection(rejection_id: int) -> str | None:
+    """Push a rejected item back into staging as a candidate.
+
+    Returns the new candidate ID, or None if rejection not found.
+    """
+    with abzu_db() as conn:
+        row = conn.execute(
+            "SELECT content, source FROM staging_rejections WHERE id = ?",
+            (rejection_id,),
+        ).fetchone()
+        if not row:
+            return None
+
+    # Add directly to staging, bypassing bouncer
+    content = row["content"]
+    source = row["source"] or "session"
+    content_hash = hashlib.sha256(content.strip().encode()).hexdigest()
+
+    candidate_id = str(uuid.uuid4())
+    with abzu_db() as conn:
+        conn.execute(
+            "INSERT INTO bead_candidates "
+            "(id, content, summary, category, project, content_hash, source, session_id) "
+            "VALUES (?, ?, NULL, 'learning', NULL, ?, ?, NULL)",
+            (candidate_id, content, content_hash, source),
+        )
+        # Remove from rejections
+        conn.execute(
+            "DELETE FROM staging_rejections WHERE id = ?",
+            (rejection_id,),
+        )
+
+    return candidate_id
 
 
 def add_candidate(
@@ -23,8 +139,14 @@ def add_candidate(
 ) -> str | None:
     """Add a bead candidate to staging in abzu.db.
 
-    Returns candidate ID, or None if duplicate.
+    Returns candidate ID, or None if rejected by bouncer or duplicate.
     """
+    # Bouncer gate — reject junk before staging
+    passed, reason = bouncer_check(content)
+    if not passed:
+        _log_rejection(content, reason, source)
+        return None
+
     content_hash = hashlib.sha256(content.encode()).hexdigest()
 
     # Check for duplicates in staging

@@ -8,10 +8,19 @@ No API keys stored. No external calls from codebase. No attack surface.
 """
 
 import json
+import logging
+import shutil
 from datetime import datetime
 from pathlib import Path
 
 from enki.db import ENKI_ROOT, uru_db, wisdom_db
+
+logger = logging.getLogger(__name__)
+
+# ── Gemini CLI availability ──
+GEMINI_CLI_AVAILABLE = shutil.which("gemini") is not None
+if not GEMINI_CLI_AVAILABLE:
+    logger.info("Gemini CLI not found — manual review package workflow only")
 from enki.memory.retention import get_decay_stats
 from enki.memory.staging import count_candidates, list_candidates
 

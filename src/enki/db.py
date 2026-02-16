@@ -11,6 +11,19 @@ from contextlib import contextmanager
 from pathlib import Path
 
 ENKI_ROOT = Path(os.environ.get("ENKI_ROOT", str(Path.home() / ".enki")))
+DB_DIR = ENKI_ROOT / "db"
+
+
+def _db_path(name: str) -> Path:
+    """Resolve database path, preferring ~/.enki/db/ but falling back to ~/.enki/."""
+    new_path = DB_DIR / name
+    if new_path.exists():
+        return new_path
+    old_path = ENKI_ROOT / name
+    if old_path.exists():
+        return old_path
+    # Default to new location for fresh installs
+    return new_path
 
 
 def _configure(conn: sqlite3.Connection) -> None:
@@ -43,17 +56,17 @@ def connect(db_path: str | Path):
 
 def wisdom_db():
     """Connection to wisdom.db (permanent beads)."""
-    return connect(ENKI_ROOT / "wisdom.db")
+    return connect(_db_path("wisdom.db"))
 
 
 def abzu_db():
     """Connection to abzu.db (session summaries + staging)."""
-    return connect(ENKI_ROOT / "abzu.db")
+    return connect(_db_path("abzu.db"))
 
 
 def uru_db():
     """Connection to uru.db (enforcement logs)."""
-    return connect(ENKI_ROOT / "uru.db")
+    return connect(_db_path("uru.db"))
 
 
 _em_initialized: set[str] = set()
@@ -76,12 +89,20 @@ def em_db(project: str):
 def init_all():
     """Create all databases and tables. Idempotent."""
     ENKI_ROOT.mkdir(parents=True, exist_ok=True)
+    DB_DIR.mkdir(parents=True, exist_ok=True)
 
     from enki.gates.schemas import create_tables as create_uru
     from enki.memory.schemas import create_tables as create_memory
 
     with wisdom_db() as conn:
         create_memory(conn, "wisdom")
+        # Add synthesis_id column if not present (Item 16 migration)
+        try:
+            conn.execute(
+                "ALTER TABLE beads ADD COLUMN synthesis_id TEXT DEFAULT NULL"
+            )
+        except sqlite3.OperationalError:
+            pass  # Column already exists
     with abzu_db() as conn:
         create_memory(conn, "abzu")
     with uru_db() as conn:

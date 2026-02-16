@@ -1,4 +1,4 @@
-"""retention.py — Decay scoring + maintenance.
+"""retention.py — Decay scoring + maintenance + freshness checks.
 
 Recall-based decay: recalled beads stay hot, unused beads fade.
 Decay reduces search ranking but NEVER deletes.
@@ -11,7 +11,10 @@ Thresholds (from config):
     Starred or preference: always 1.0
 """
 
+import json
+import re
 from datetime import datetime, timedelta
+from pathlib import Path
 
 from enki.config import get_config
 from enki.db import wisdom_db
@@ -177,6 +180,198 @@ def calculate_weight(
         return thresholds["d90"]
     else:
         return 1.0
+
+
+# ── Freshness checks ──
+
+# Regex patterns for version references in bead content
+_VERSION_PATTERNS = [
+    # "Node 18", "Python 3.11", "React 18.2", "PostgreSQL 15"
+    re.compile(r'\b(Node|Python|React|Vue|Angular|Django|Flask|PostgreSQL|MySQL|Ruby|Go|Rust|Java|PHP|Swift|Kotlin)\s+(\d+(?:\.\d+)*)\b', re.IGNORECASE),
+    # "v2.3.1", "version 4.18"
+    re.compile(r'\b(?:v|version\s*)(\d+(?:\.\d+)+)\b', re.IGNORECASE),
+    # "express@4.18.2", "lodash@4.17"
+    re.compile(r'\b([a-z][a-z0-9_-]*)@(\d+(?:\.\d+)*)\b'),
+    # "node:18-alpine", "python:3.11-slim"
+    re.compile(r'\b([a-z][a-z0-9_-]*):(\d+(?:\.\d+)*)(?:-[a-z]+)?\b'),
+]
+
+
+def _extract_project_versions(project_path: Path | None) -> dict[str, str]:
+    """Extract current versions from project files."""
+    versions: dict[str, str] = {}
+    if not project_path or not project_path.exists():
+        return versions
+
+    # package.json
+    pkg_json = project_path / "package.json"
+    if pkg_json.exists():
+        try:
+            data = json.loads(pkg_json.read_text())
+            deps = {**data.get("dependencies", {}), **data.get("devDependencies", {})}
+            for name, ver in deps.items():
+                # Strip ^ ~ >= etc.
+                clean = re.sub(r'^[^0-9]*', '', str(ver))
+                if clean:
+                    versions[name.lower()] = clean
+            # Node version from engines
+            engines = data.get("engines", {})
+            if "node" in engines:
+                clean = re.sub(r'^[^0-9]*', '', str(engines["node"]))
+                if clean:
+                    versions["node"] = clean
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    # requirements.txt
+    req_txt = project_path / "requirements.txt"
+    if req_txt.exists():
+        try:
+            for line in req_txt.read_text().splitlines():
+                line = line.strip()
+                if "==" in line:
+                    name, ver = line.split("==", 1)
+                    versions[name.strip().lower()] = ver.strip()
+        except OSError:
+            pass
+
+    # pyproject.toml — simple regex extraction
+    pyproject = project_path / "pyproject.toml"
+    if pyproject.exists():
+        try:
+            content = pyproject.read_text()
+            # Look for python version
+            m = re.search(r'requires-python\s*=\s*"[><=]*(\d+\.\d+)', content)
+            if m:
+                versions["python"] = m.group(1)
+        except OSError:
+            pass
+
+    # .node-version, .python-version, .tool-versions
+    for vfile, key in [(".node-version", "node"), (".python-version", "python")]:
+        p = project_path / vfile
+        if p.exists():
+            try:
+                ver = p.read_text().strip()
+                if ver:
+                    versions[key] = ver
+            except OSError:
+                pass
+
+    tool_versions = project_path / ".tool-versions"
+    if tool_versions.exists():
+        try:
+            for line in tool_versions.read_text().splitlines():
+                parts = line.strip().split()
+                if len(parts) >= 2:
+                    versions[parts[0].lower()] = parts[1]
+        except OSError:
+            pass
+
+    return versions
+
+
+def check_freshness(project_path: Path | None = None) -> list[dict]:
+    """Scan beads for versioned references and flag potentially stale ones.
+
+    Cross-references against project files (package.json, requirements.txt, etc.)
+    to detect outdated version references.
+
+    Returns list of dicts with bead_id, detected_version, status, etc.
+    """
+    project_versions = _extract_project_versions(project_path)
+    results = []
+
+    with wisdom_db() as conn:
+        beads = conn.execute(
+            "SELECT id, content, category FROM beads"
+        ).fetchall()
+
+        # Load previous checks
+        existing_checks = {}
+        try:
+            checks = conn.execute(
+                "SELECT bead_id, detected_version, status, checked_at "
+                "FROM freshness_checks"
+            ).fetchall()
+            for c in checks:
+                existing_checks[(c["bead_id"], c["detected_version"])] = dict(c)
+        except Exception:
+            pass  # Table might not exist yet
+
+    for bead in beads:
+        bead = dict(bead)
+        content = bead["content"]
+
+        for pattern in _VERSION_PATTERNS:
+            for match in pattern.finditer(content):
+                groups = match.groups()
+                if len(groups) == 2:
+                    tool_name, version = groups[0], groups[1]
+                else:
+                    tool_name, version = "unknown", groups[0]
+
+                detected = f"{tool_name} {version}"
+                tool_key = tool_name.lower()
+
+                # Check against project versions
+                current_version = project_versions.get(tool_key)
+                prev_check = existing_checks.get((bead["id"], detected))
+
+                if prev_check and prev_check["status"] == "dismissed":
+                    continue  # Already reviewed by user
+
+                if current_version:
+                    if current_version.startswith(version) or version.startswith(current_version):
+                        status = "current"
+                    else:
+                        status = "stale"
+                else:
+                    status = "unknown"
+
+                results.append({
+                    "bead_id": bead["id"],
+                    "content_excerpt": content[:80],
+                    "detected_version": detected,
+                    "current_version": current_version,
+                    "last_checked": prev_check["checked_at"] if prev_check else None,
+                    "status": status,
+                })
+
+    # Record checks
+    with wisdom_db() as conn:
+        for r in results:
+            conn.execute(
+                "INSERT OR REPLACE INTO freshness_checks "
+                "(bead_id, detected_version, current_version, status) "
+                "VALUES (?, ?, ?, ?)",
+                (r["bead_id"], r["detected_version"],
+                 r["current_version"], r["status"]),
+            )
+
+    return results
+
+
+def dismiss_freshness(bead_id: str, detected_version: str | None = None) -> bool:
+    """Mark a freshness check as dismissed (user reviewed it).
+
+    If detected_version is None, dismiss all checks for the bead.
+    Returns True if any rows were updated.
+    """
+    with wisdom_db() as conn:
+        if detected_version:
+            cursor = conn.execute(
+                "UPDATE freshness_checks SET status = 'dismissed' "
+                "WHERE bead_id = ? AND detected_version = ?",
+                (bead_id, detected_version),
+            )
+        else:
+            cursor = conn.execute(
+                "UPDATE freshness_checks SET status = 'dismissed' "
+                "WHERE bead_id = ?",
+                (bead_id,),
+            )
+        return cursor.rowcount > 0
 
 
 def _set_weight(conn, bead_id: str, weight: float) -> None:

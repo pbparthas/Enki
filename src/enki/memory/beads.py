@@ -12,8 +12,10 @@ abzu.db staging holds candidates awaiting review.
 """
 
 import hashlib
+import re
 import uuid
 from datetime import datetime
+from pathlib import Path
 
 from enki.config import get_config
 from enki.db import wisdom_db
@@ -230,6 +232,146 @@ def list_beads(
     with wisdom_db() as conn:
         rows = conn.execute(query, params).fetchall()
         return [dict(r) for r in rows]
+
+
+# ── Reference healing ──
+
+# File extensions to scan for in bead content
+_PATH_PATTERN = re.compile(
+    r'(?:^|[\s"\'`(,])([a-zA-Z0-9_./-]+\.(?:py|ts|tsx|js|jsx|md|yml|yaml|json|toml|sql|sh|css|html|go|rs|rb))\b'
+)
+
+# Categories that must NEVER be modified by healing — skip enforcement beads
+_PROTECTED_CATEGORIES = frozenset({"enforcement", "gate", "pattern"})
+
+
+def check_bead_references(project_path: Path) -> list[dict]:
+    """Scan beads for file path references and check if they still exist.
+
+    Returns list of:
+    {
+        "bead_id": "...",
+        "referenced_path": "src/old/auth.py",
+        "status": "missing" | "moved" | "ok",
+        "suggested_path": "src/new/auth.py"  # if found via filename match
+    }
+    """
+    project_path = Path(project_path).resolve()
+    results = []
+
+    with wisdom_db() as conn:
+        beads = conn.execute(
+            "SELECT id, content, category FROM beads"
+        ).fetchall()
+
+    # Build filename index for moved-file detection
+    file_index: dict[str, list[Path]] = {}
+    if project_path.exists():
+        for f in project_path.rglob("*"):
+            if f.is_file() and not any(
+                p in f.parts for p in (".git", "node_modules", "__pycache__", ".venv", ".env")
+            ):
+                file_index.setdefault(f.name, []).append(f)
+
+    for bead in beads:
+        bead = dict(bead)
+
+        # Skip protected categories — never touch enforcement beads
+        if bead["category"] in _PROTECTED_CATEGORIES:
+            continue
+
+        paths_found = _PATH_PATTERN.findall(bead["content"])
+        for ref_path in paths_found:
+            full_path = project_path / ref_path
+            if full_path.exists():
+                results.append({
+                    "bead_id": bead["id"],
+                    "referenced_path": ref_path,
+                    "status": "ok",
+                    "suggested_path": None,
+                })
+            else:
+                # Try to find the file by basename
+                basename = Path(ref_path).name
+                candidates = file_index.get(basename, [])
+                if candidates:
+                    # Pick the shortest relative path as suggestion
+                    try:
+                        suggested = min(
+                            candidates,
+                            key=lambda p: len(str(p.relative_to(project_path))),
+                        )
+                        suggested_rel = str(suggested.relative_to(project_path))
+                    except ValueError:
+                        suggested_rel = str(candidates[0])
+
+                    results.append({
+                        "bead_id": bead["id"],
+                        "referenced_path": ref_path,
+                        "status": "moved",
+                        "suggested_path": suggested_rel,
+                    })
+                else:
+                    results.append({
+                        "bead_id": bead["id"],
+                        "referenced_path": ref_path,
+                        "status": "missing",
+                        "suggested_path": None,
+                    })
+
+    return results
+
+
+def heal_bead_references(project_path: Path, auto_heal: bool = False) -> dict:
+    """Fix broken references in beads.
+
+    If auto_heal=False: dry run, report what would change
+    If auto_heal=True: update bead content with new paths
+
+    Never modifies enforcement/gate/pattern category beads.
+
+    Returns: {"healed": count, "missing": count, "unchanged": count}
+    """
+    refs = check_bead_references(project_path)
+    stats = {"healed": 0, "missing": 0, "unchanged": 0}
+
+    # Group by bead_id for batch updates
+    bead_updates: dict[str, list[tuple[str, str]]] = {}
+    for ref in refs:
+        if ref["status"] == "ok":
+            stats["unchanged"] += 1
+        elif ref["status"] == "missing":
+            stats["missing"] += 1
+        elif ref["status"] == "moved" and ref["suggested_path"]:
+            bead_updates.setdefault(ref["bead_id"], []).append(
+                (ref["referenced_path"], ref["suggested_path"])
+            )
+
+    if auto_heal:
+        for bead_id, replacements in bead_updates.items():
+            bead = get(bead_id)
+            if not bead:
+                continue
+
+            # Skip protected categories — extra safety check
+            if bead.get("category") in _PROTECTED_CATEGORIES:
+                continue
+
+            content = bead["content"]
+            for old_path, new_path in replacements:
+                content = content.replace(old_path, new_path)
+
+            if content != bead["content"]:
+                update(bead_id, content=content)
+                stats["healed"] += len(replacements)
+            else:
+                stats["unchanged"] += len(replacements)
+    else:
+        # Dry run — count what would be healed
+        for bead_id, replacements in bead_updates.items():
+            stats["healed"] += len(replacements)
+
+    return stats
 
 
 # ── Private helpers ──

@@ -18,9 +18,12 @@ def em_root(tmp_path):
     """Provide isolated ENKI_ROOT with all DBs + em.db auto-init."""
     root = tmp_path / ".enki"
     root.mkdir()
+    db_dir = root / "db"
+    db_dir.mkdir()
     old_init = db_mod._em_initialized.copy()
     db_mod._em_initialized.clear()
-    with patch.object(db_mod, "ENKI_ROOT", root):
+    with patch.object(db_mod, "ENKI_ROOT", root), \
+         patch.object(db_mod, "DB_DIR", db_dir):
         from enki.db import init_all
         init_all()
         yield root
@@ -800,24 +803,28 @@ class TestOrchestrator:
 
 
 class TestSetup:
-    def test_run_setup_non_interactive(self, em_root):
+    def test_run_setup_non_interactive(self, em_root, tmp_path):
         from enki.setup import run_setup
+        project_dir = tmp_path / "myproject"
+        project_dir.mkdir()
         result = run_setup(
-            name="Test User",
-            role="backend engineer",
-            projects=["myapp"],
+            project_dir=str(project_dir),
+            assistant_name="TestBot",
             interactive=False,
-            repo_root="/home/partha/Desktop/Enki",
         )
         assert "directories_created" in result["steps"]
         assert "databases_initialized" in result["steps"]
-        assert "persona_created" in result["steps"]
-        assert result["hooks_installed"] == 6
+        assert "persona_generated" in result["steps"]
+        assert result["hooks_installed"] >= 1
 
-    def test_persona_not_overwritten(self, em_root):
+    def test_persona_not_overwritten(self, em_root, tmp_path):
         from enki.setup import run_setup
+        project_dir = tmp_path / "myproject2"
+        project_dir.mkdir()
         # First run creates persona
-        run_setup(name="First", role="dev", interactive=False)
+        run_setup(project_dir=str(project_dir), assistant_name="First", interactive=False)
+        persona = project_dir / ".enki" / "PERSONA.md"
+        original_content = persona.read_text()
         # Second run should not overwrite
-        result = run_setup(name="Second", role="dev", interactive=False)
-        assert "persona_exists" in result["steps"]
+        run_setup(project_dir=str(project_dir), assistant_name="Second", interactive=False)
+        assert persona.read_text() == original_content

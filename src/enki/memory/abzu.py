@@ -343,6 +343,117 @@ def get_project_registry() -> list[dict]:
         return [dict(r) for r in rows]
 
 
+def recall_for_nudge(goal_text: str, limit: int = 3) -> list[dict]:
+    """Search beads relevant to the current goal for proactive nudging.
+
+    Uses FTS5 search across wisdom.db + prioritizes starred beads.
+    Returns top beads most relevant to the goal text.
+    Read-only: never creates, modifies, or deletes beads.
+    """
+    from enki.memory.beads import search
+    from enki.db import wisdom_db as _wisdom_db
+
+    if not goal_text or not goal_text.strip():
+        return []
+
+    results = []
+
+    # FTS5 search for relevant beads
+    try:
+        fts_results = search(goal_text, limit=limit * 2)
+        for r in fts_results:
+            r["nudge_source"] = "fts"
+            results.append(r)
+    except Exception:
+        pass  # Nudge failure must not propagate
+
+    # Also fetch starred beads that might be relevant
+    try:
+        with _wisdom_db() as conn:
+            starred = conn.execute(
+                "SELECT id, content, summary, category, starred, created_at "
+                "FROM beads WHERE starred = 1 ORDER BY created_at DESC LIMIT ?",
+                (limit * 2,),
+            ).fetchall()
+
+        # Simple keyword overlap scoring for starred beads
+        goal_words = set(goal_text.lower().split())
+        for row in starred:
+            bead = dict(row)
+            bead_words = set(bead["content"].lower().split())
+            overlap = len(goal_words & bead_words)
+            if overlap > 0:
+                bead["nudge_source"] = "starred"
+                bead["overlap_score"] = overlap
+                # Avoid duplicates with FTS results
+                if not any(r["id"] == bead["id"] for r in results):
+                    results.append(bead)
+    except Exception:
+        pass  # Nudge failure must not propagate
+
+    # Sort: starred first, then by overlap/relevance
+    def sort_key(b):
+        is_starred = 1 if b.get("starred") else 0
+        overlap = b.get("overlap_score", 0)
+        return (is_starred, overlap)
+
+    results.sort(key=sort_key, reverse=True)
+    return results[:limit]
+
+
+def format_nudge(beads: list[dict]) -> str:
+    """Format beads as a nudge message for injection into context.
+
+    Produces a readable block showing related past decisions,
+    with starred beads marked.
+    """
+    if not beads:
+        return ""
+
+    from datetime import datetime
+
+    lines = [
+        "───────────────────────────────",
+        "Related decisions from past sessions:",
+        "",
+    ]
+
+    for bead in beads:
+        # Calculate relative time
+        age_label = ""
+        created = bead.get("created_at", "")
+        if created:
+            try:
+                if "T" in str(created):
+                    created_dt = datetime.fromisoformat(str(created))
+                else:
+                    created_dt = datetime.strptime(str(created), "%Y-%m-%d %H:%M:%S")
+                delta = datetime.now() - created_dt
+                days = delta.days
+                if days < 1:
+                    age_label = "today"
+                elif days < 7:
+                    age_label = f"{days} day{'s' if days != 1 else ''} ago"
+                elif days < 30:
+                    weeks = days // 7
+                    age_label = f"{weeks} week{'s' if weeks != 1 else ''} ago"
+                else:
+                    months = days // 30
+                    age_label = f"{months} month{'s' if months != 1 else ''} ago"
+            except (ValueError, TypeError):
+                age_label = ""
+
+        star_prefix = "\u2b50 " if bead.get("starred") else ""
+        time_bracket = f"[{age_label}] " if age_label else ""
+        content_preview = bead["content"][:200]
+
+        lines.append(f"\u2022 {star_prefix}{time_bracket}\"{content_preview}\"")
+        lines.append("")
+
+    lines.append("───────────────────────────────")
+    return "\n".join(lines)
+
+
 def star(bead_id: str) -> None:
     """Mark bead as permanent (never decays)."""
     from enki.memory.beads import star as _star

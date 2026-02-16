@@ -30,10 +30,16 @@ def cmd_generate(output_dir: str | None = None):
     """Generate full quarterly review package.
 
     Writes markdown file to ~/.enki/reviews/ and prints the path.
+    If Gemini CLI is available, offers to pipe directly.
     """
+    from enki.memory.gemini import GEMINI_CLI_AVAILABLE
+
     filepath = generate_review_package(output_dir)
     print(f"Review package written to: {filepath}")
-    print("Send this file to your review LLM and save the JSON response.")
+    if GEMINI_CLI_AVAILABLE:
+        print(f"Gemini CLI detected. Run: gemini < {filepath}")
+    else:
+        print("Gemini CLI not found. Copy review-package.md to AI Studio manually.")
 
 
 def cmd_mini(project: str):

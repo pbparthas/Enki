@@ -20,10 +20,13 @@ def em_root(tmp_path):
     """Isolated ENKI_ROOT with all DBs initialized."""
     root = tmp_path / ".enki"
     root.mkdir()
+    db_dir = root / "db"
+    db_dir.mkdir()
     old_initialized = db_mod._em_initialized.copy()
     db_mod._em_initialized.clear()
     import enki.gates.uru as uru_mod
     with patch.object(db_mod, "ENKI_ROOT", root), \
+         patch.object(db_mod, "DB_DIR", db_dir), \
          patch.object(uru_mod, "ENKI_ROOT", root):
         db_mod.init_all()
         yield root

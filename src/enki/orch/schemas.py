@@ -166,3 +166,23 @@ def create_tables(conn) -> None:
         "CREATE INDEX IF NOT EXISTS idx_archive_thread "
         "ON mail_archive(thread_id)"
     )
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS checkpoints (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            label TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            phase TEXT,
+            tier TEXT,
+            goal TEXT,
+            orchestration_state TEXT,
+            mail_position TEXT,
+            recent_bead_ids TEXT
+        )
+    """)
+
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_checkpoints_session "
+        "ON checkpoints(session_id)"
+    )

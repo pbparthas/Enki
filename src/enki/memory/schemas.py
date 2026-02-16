@@ -114,6 +114,18 @@ def _create_wisdom_tables(conn) -> None:
         """)
 
     conn.execute("""
+        CREATE TABLE IF NOT EXISTS freshness_checks (
+            bead_id TEXT NOT NULL,
+            detected_version TEXT NOT NULL,
+            current_version TEXT,
+            checked_at TEXT NOT NULL DEFAULT (datetime('now')),
+            status TEXT NOT NULL DEFAULT 'unknown',
+            PRIMARY KEY (bead_id, detected_version),
+            FOREIGN KEY (bead_id) REFERENCES beads(id)
+        )
+    """)
+
+    conn.execute("""
         CREATE TABLE IF NOT EXISTS user_profile (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL,
@@ -215,6 +227,16 @@ def _create_abzu_tables(conn) -> None:
                 VALUES (new.rowid, new.content, new.summary);
             END
         """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS staging_rejections (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            content TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            rejected_at TEXT NOT NULL DEFAULT (datetime('now')),
+            source TEXT
+        )
+    """)
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS extraction_log (

@@ -1,164 +1,212 @@
 """setup.py — First-run onboarding for Enki.
 
-Interactive setup:
-1. Ask name, role, projects
-2. Generate PERSONA.md from template
-3. Initialize databases
-4. Install hooks from repo to ~/.enki/hooks/
-5. Create enki.toml with defaults
+Interactive setup (max 2 questions):
+1. Project directory
+2. Assistant name
+Then auto-detect and configure everything else.
 """
 
+import json
 import shutil
+import stat
 from pathlib import Path
 
 from enki.config import ensure_config
-from enki.db import ENKI_ROOT, init_all
+from enki.db import DB_DIR, ENKI_ROOT, init_all
 
 
-# Default PERSONA.md template
-_PERSONA_TEMPLATE = """\
-# {name}
+# Default values (used if user skips customization)
+_DEFAULTS = {
+    "assistant_name": "Enki",
+    "description": (
+        "A persistent second brain for software engineering. "
+        "You remember, advise, manage, and learn."
+    ),
+    "voice_style": "Conversational, direct, opinionated. No filler phrases.",
+}
 
-## Identity
-You are Enki — a second brain for software engineering.
-Your human partner is **{name}**, a {role}.
+CLAUDE_DIR = Path.home() / ".claude"
+CLAUDE_HOOKS_DIR = CLAUDE_DIR / "hooks"
+CLAUDE_SETTINGS = CLAUDE_DIR / "settings.json"
 
-## Voice
-- Direct, no filler
-- Technical but clear
-- Challenge weak reasoning (Ereshkigal mode)
-- Store decisions, patterns, fixes — not trivia
 
-## Working Style
-- Start simple, add complexity only when earned
-- Tests before features when possible
-- Prefer editing existing files over creating new ones
-- Keep CLAUDE.md under 300 lines
+def _find_template() -> Path | None:
+    """Locate PERSONA.md.template, checking repo tree then package."""
+    # Check relative to this file (installed or dev)
+    repo_template = (
+        Path(__file__).resolve().parent.parent.parent / "templates" / "PERSONA.md.template"
+    )
+    if repo_template.exists():
+        return repo_template
+    # Check package data location
+    pkg_template = Path(__file__).resolve().parent / "templates" / "PERSONA.md.template"
+    if pkg_template.exists():
+        return pkg_template
+    return None
 
-## Projects
-{projects_section}
-"""
+
+def _generate_persona(project_dir: Path, assistant_name: str) -> Path:
+    """Generate PERSONA.md from template into {project}/.enki/PERSONA.md."""
+    enki_project_dir = project_dir / ".enki"
+    enki_project_dir.mkdir(parents=True, exist_ok=True)
+    persona_path = enki_project_dir / "PERSONA.md"
+
+    if persona_path.exists():
+        return persona_path
+
+    template_path = _find_template()
+    if template_path:
+        content = template_path.read_text()
+    else:
+        # Fallback inline template
+        content = (
+            "# {assistant_name}\n\n"
+            "## Identity\n"
+            "You are {assistant_name}, an AI engineering assistant.\n"
+            "{description}\n\n"
+            "## Voice\n"
+            "{voice_style}\n\n"
+            "## Principles\n"
+            "- Remember decisions across sessions\n"
+            "- Enforce quality gates before code changes\n"
+            "- Challenge assumptions through structured debate\n"
+            "- Never modify your own enforcement rules\n"
+        )
+
+    rendered = content.format(
+        assistant_name=assistant_name,
+        description=_DEFAULTS["description"],
+        voice_style=_DEFAULTS["voice_style"],
+    )
+    persona_path.write_text(rendered)
+    return persona_path
+
+
+def _install_hooks() -> int:
+    """Copy hook scripts from repo to ~/.claude/hooks/. Returns count installed."""
+    # Find hooks source relative to this file (repo layout: src/enki/ → ../../scripts/hooks/)
+    hooks_src = Path(__file__).resolve().parent.parent.parent / "scripts" / "hooks"
+    if not hooks_src.exists():
+        return 0
+
+    CLAUDE_HOOKS_DIR.mkdir(parents=True, exist_ok=True)
+
+    installed = 0
+    for src_file in sorted(hooks_src.glob("enki-*.sh")):
+        dst_file = CLAUDE_HOOKS_DIR / src_file.name
+        shutil.copy2(src_file, dst_file)
+        dst_file.chmod(dst_file.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        installed += 1
+
+    return installed
+
+
+def _register_mcp_server() -> bool:
+    """Register Enki MCP server in ~/.claude/settings.json. Returns True if registered."""
+    CLAUDE_DIR.mkdir(parents=True, exist_ok=True)
+
+    settings = {}
+    if CLAUDE_SETTINGS.exists():
+        try:
+            settings = json.loads(CLAUDE_SETTINGS.read_text())
+        except (json.JSONDecodeError, OSError):
+            settings = {}
+
+    mcp_servers = settings.setdefault("mcpServers", {})
+
+    # Don't overwrite existing enki entry
+    if "enki" in mcp_servers:
+        return False
+
+    mcp_servers["enki"] = {
+        "command": "python",
+        "args": ["-m", "enki.mcp_server"],
+        "env": {},
+    }
+
+    CLAUDE_SETTINGS.write_text(json.dumps(settings, indent=2) + "\n")
+    return True
 
 
 def run_setup(
-    name: str | None = None,
-    role: str | None = None,
-    projects: list[str] | None = None,
+    project_dir: str | None = None,
+    assistant_name: str | None = None,
     interactive: bool = True,
-    repo_root: str | None = None,
+    **_kwargs,
 ) -> dict:
     """Run first-time Enki setup.
 
     Args:
-        name: User's name (prompted if None and interactive)
-        role: User's role (prompted if None and interactive)
-        projects: List of project names
+        project_dir: Project directory path (default: current directory)
+        assistant_name: Name for the AI assistant (default: Enki)
         interactive: Whether to prompt for missing values
-        repo_root: Path to Enki repo (for hook installation)
 
     Returns dict with setup results.
     """
     results = {"steps": []}
 
-    # Step 1: Collect info
-    if interactive and not name:
-        name = input("What's your name? ").strip()
-    if interactive and not role:
-        role = input("What's your role? (e.g., backend engineer, fullstack dev) ").strip()
-    if interactive and not projects:
-        raw = input("Projects you're working on? (comma-separated, or empty) ").strip()
-        projects = [p.strip() for p in raw.split(",") if p.strip()] if raw else []
+    # Step 1: Collect info (max 2 questions)
+    if interactive:
+        if project_dir is None:
+            raw = input("Project directory? [.] ").strip()
+            project_dir = raw if raw else "."
+        if assistant_name is None:
+            raw = input("Assistant name? [Enki] ").strip()
+            assistant_name = raw if raw else _DEFAULTS["assistant_name"]
 
-    name = name or "Engineer"
-    role = role or "software engineer"
-    projects = projects or []
+    project_dir = project_dir or "."
+    assistant_name = assistant_name or _DEFAULTS["assistant_name"]
+    project_path = Path(project_dir).resolve()
 
-    results["name"] = name
-    results["role"] = role
-    results["projects"] = projects
+    results["name"] = assistant_name
+    results["project_dir"] = str(project_path)
+
+    print(f"\nEnki v3 Setup")
+    print("─────────────\n")
+    print("Setting up...")
 
     # Step 2: Create directories
-    dirs = [
-        ENKI_ROOT,
-        ENKI_ROOT / "config",
-        ENKI_ROOT / "hooks",
-        ENKI_ROOT / "prompts",
-        ENKI_ROOT / "persona",
-        ENKI_ROOT / "sessions",
-    ]
-    for d in dirs:
+    for d in [ENKI_ROOT, ENKI_ROOT / "config", DB_DIR]:
         d.mkdir(parents=True, exist_ok=True)
     results["steps"].append("directories_created")
+    print("  ✓ Created ~/.enki/")
 
     # Step 3: Initialize databases
     init_all()
     results["steps"].append("databases_initialized")
+    print("  ✓ Initialized databases")
 
-    # Step 4: Generate PERSONA.md
-    persona_path = ENKI_ROOT / "persona" / "PERSONA.md"
-    if not persona_path.exists():
-        projects_section = "\n".join(f"- {p}" for p in projects) if projects else "- (none yet)"
-        persona_content = _PERSONA_TEMPLATE.format(
-            name=name,
-            role=role,
-            projects_section=projects_section,
-        )
-        persona_path.write_text(persona_content)
-        results["steps"].append("persona_created")
-        results["persona_path"] = str(persona_path)
-    else:
-        results["steps"].append("persona_exists")
-
-    # Step 5: Create config
+    # Step 4: Create config
     ensure_config()
     results["steps"].append("config_created")
+    print("  ✓ Created ~/.enki/config/enki.toml")
 
-    # Step 6: Install hooks from repo
-    hooks_installed = _install_hooks(repo_root)
-    if hooks_installed:
+    # Step 5: Generate PERSONA.md
+    persona_path = _generate_persona(project_path, assistant_name)
+    results["steps"].append("persona_generated")
+    results["persona_path"] = str(persona_path)
+    print("  ✓ Generated PERSONA.md")
+
+    # Step 6: Install hooks to ~/.claude/hooks/
+    hooks_count = _install_hooks()
+    results["hooks_installed"] = hooks_count
+    if hooks_count:
         results["steps"].append("hooks_installed")
-        results["hooks_installed"] = hooks_installed
+        print(f"  ✓ Copied hooks to ~/.claude/hooks/")
     else:
         results["steps"].append("hooks_skipped")
+        print("  ⚠ Hook scripts not found (install from repo)")
 
-    # Step 7: Initialize project em.db for each project
-    for project in projects:
-        from enki.db import em_db
-        with em_db(project) as conn:
-            pass  # em_db auto-creates tables
-    if projects:
-        results["steps"].append("projects_initialized")
+    # Step 7: Register MCP server
+    registered = _register_mcp_server()
+    if registered:
+        results["steps"].append("mcp_registered")
+        print("  ✓ Registered MCP server")
+    else:
+        results["steps"].append("mcp_exists")
+        print("  ✓ MCP server already registered")
+
+    print(f'\nReady! Start Claude Code and run:')
+    print(f'  enki_goal "your first task"')
 
     return results
-
-
-def _install_hooks(repo_root: str | None = None) -> int:
-    """Copy hook scripts from repo to ~/.enki/hooks/.
-
-    Returns count of hooks installed.
-    """
-    if not repo_root:
-        # Try to find repo root relative to this file
-        candidate = Path(__file__).resolve().parent.parent.parent / "scripts" / "hooks"
-        if candidate.exists():
-            repo_root = str(candidate.parent.parent)
-
-    if not repo_root:
-        return 0
-
-    hooks_src = Path(repo_root) / "scripts" / "hooks"
-    hooks_dst = ENKI_ROOT / "hooks"
-
-    if not hooks_src.exists():
-        return 0
-
-    installed = 0
-    for src_file in hooks_src.glob("enki-*.sh"):
-        # Strip "enki-" prefix for installed name
-        dst_name = src_file.name.replace("enki-", "", 1)
-        dst_file = hooks_dst / dst_name
-        shutil.copy2(src_file, dst_file)
-        dst_file.chmod(0o755)
-        installed += 1
-
-    return installed

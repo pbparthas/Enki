@@ -59,15 +59,31 @@ def enki_goal(description: str, project: str = ".") -> dict:
     """Set active goal. Satisfies Uru Gate 1.
 
     Auto-detects tier from description.
+    Surfaces relevant past decisions as nudges.
     """
     tier = detect_tier(description)
     result = set_goal(project, description, tier)
-    return {
+
+    # Nudge: surface relevant past decisions (read-only, fail-safe)
+    nudge_text = ""
+    try:
+        from enki.memory.abzu import recall_for_nudge, format_nudge
+        related = recall_for_nudge(description)
+        if related:
+            nudge_text = format_nudge(related)
+    except Exception:
+        pass  # Nudge failure must never block goal setting
+
+    response = {
         "goal": description,
         "tier": tier,
         "phase": "intake",
         "next_step": _next_step_hint(tier),
     }
+    if nudge_text:
+        response["nudge"] = nudge_text
+
+    return response
 
 
 def enki_triage(description: str) -> dict:

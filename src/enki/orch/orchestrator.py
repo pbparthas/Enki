@@ -11,6 +11,11 @@ Spawn authority:
 - InfoSec, UI/UX, DevOps, Performance, Researcher: EM (conditional)
 """
 
+import os
+import re
+import subprocess
+import tempfile
+
 from enki.db import em_db
 from enki.orch.task_graph import (
     TaskStatus,
@@ -98,8 +103,12 @@ class Orchestrator:
         agent_role: str,
         task_id: str,
         context: dict,
+        project_path: str | None = None,
     ) -> dict:
         """Prepare agent spawn (prompt + context).
+
+        Optionally runs sharpener (context gathering) and HITL prompt review
+        based on config. Quick mode bypasses sharpener.
 
         Returns prompt and filtered context for Task tool.
         Does NOT actually spawn — caller (MCP tool) does that.
@@ -113,7 +122,38 @@ class Orchestrator:
             if key not in blind_filter.get("exclude", set()):
                 filtered_context[key] = value
 
+        # Sharpener: gather precise file context (if enabled and not quick mode)
+        sharpener_enabled = self._config.get("orchestration", {}).get(
+            "sharpener_enabled", False
+        )
+        state = get_project_state(self.project)
+        is_quick = state.get("tier") == "minimal"
+
+        if sharpener_enabled and not is_quick and project_path:
+            task_info = {"task_name": context.get("task_name", ""),
+                         "assigned_files": context.get("assigned_files", ""),
+                         "work_type": agent_role}
+            sharpened = sharpen_task_context(task_info, project_path)
+            filtered_context["sharpened_context"] = sharpened
+
         prompt = assemble_prompt(role, filtered_context)
+
+        # HITL prompt review (if enabled)
+        hitl_enabled = self._config.get("orchestration", {}).get(
+            "hitl_prompt_review", False
+        )
+        if hitl_enabled and not is_quick:
+            task_info = {"task_name": context.get("task_name", task_id),
+                         "work_type": agent_role}
+            prompt, decision = present_prompt_for_approval(prompt, task_info)
+            if decision == "reject":
+                return {
+                    "agent": agent_role,
+                    "task_id": task_id,
+                    "prompt": None,
+                    "status": "rejected",
+                    "reason": "User rejected prompt",
+                }
 
         return {
             "agent": agent_role,
@@ -859,3 +899,192 @@ class Orchestrator:
             "critical_unread": critical,
             "count": len(reconciled),
         }
+
+
+# ── Sharpener + HITL Prompt Review (Phase 4, Item 9) ──
+
+
+def sharpen_task_context(task: dict, project_path: str) -> dict:
+    """Use Researcher agent logic in sharpener mode to gather precise context.
+
+    Reads files_in_scope, extracts function signatures, imports, class
+    definitions, and finds adjacent files that import the scope files.
+    Respects the blind wall: Dev context excludes test files,
+    QA context excludes implementation code.
+
+    Args:
+        task: Task dict with task_name, assigned_files, work_type, tier.
+        project_path: Absolute path to project root.
+
+    Returns dict with: relevant_code, signatures, imports, adjacent_context.
+    """
+    from pathlib import Path
+
+    project = Path(project_path)
+    assigned_files = task.get("assigned_files") or ""
+    if isinstance(assigned_files, str):
+        files_in_scope = [f.strip() for f in assigned_files.split(",") if f.strip()]
+    else:
+        files_in_scope = list(assigned_files)
+
+    work_type = task.get("work_type", "")
+
+    # Blind wall filtering for the sharpener
+    blind_wall_excludes = set()
+    if work_type in ("implementation", "dev", "Dev"):
+        blind_wall_excludes = {"test_", "tests/", "spec_", "_test.py", "_spec."}
+    elif work_type in ("qa", "test", "QA"):
+        blind_wall_excludes = {"src/", "lib/", "implementation"}
+
+    relevant_code = {}
+    signatures = []
+    imports = []
+    adjacent_context = {}
+
+    for rel_path in files_in_scope:
+        full_path = project / rel_path
+        if not full_path.exists() or not full_path.is_file():
+            continue
+
+        # Skip files excluded by blind wall
+        if any(excl in str(rel_path) for excl in blind_wall_excludes):
+            continue
+
+        try:
+            content = full_path.read_text(errors="replace")
+        except OSError:
+            continue
+
+        # Store relevant code (truncated to avoid context overflow)
+        if len(content) > 5000:
+            relevant_code[rel_path] = content[:5000] + "\n... (truncated)"
+        else:
+            relevant_code[rel_path] = content
+
+        # Extract function/class signatures
+        for line in content.split("\n"):
+            stripped = line.strip()
+            if stripped.startswith(("def ", "class ", "async def ")):
+                signatures.append(f"{rel_path}: {stripped}")
+            elif stripped.startswith(("import ", "from ")):
+                imports.append(stripped)
+
+    # Find adjacent files (files in the same directory or that import scope files)
+    for rel_path in files_in_scope:
+        full_path = project / rel_path
+        if not full_path.exists():
+            continue
+
+        parent = full_path.parent
+        stem = full_path.stem
+
+        # Check sibling files for imports of this module
+        if parent.exists():
+            for sibling in parent.iterdir():
+                if not sibling.is_file() or sibling.suffix != ".py":
+                    continue
+                if sibling.name == full_path.name:
+                    continue
+                # Skip blind-wall-excluded siblings
+                if any(excl in str(sibling) for excl in blind_wall_excludes):
+                    continue
+
+                try:
+                    sib_content = sibling.read_text(errors="replace")
+                    if f"import {stem}" in sib_content or f"from {stem}" in sib_content:
+                        # Include just signatures from adjacent files
+                        adj_sigs = []
+                        for line in sib_content.split("\n"):
+                            s = line.strip()
+                            if s.startswith(("def ", "class ", "async def ")):
+                                adj_sigs.append(s)
+                        if adj_sigs:
+                            adj_rel = str(sibling.relative_to(project))
+                            adjacent_context[adj_rel] = adj_sigs
+                except OSError:
+                    continue
+
+    return {
+        "relevant_code": relevant_code,
+        "signatures": signatures,
+        "imports": list(set(imports)),
+        "adjacent_context": adjacent_context,
+        "files_sharpened": len(relevant_code),
+    }
+
+
+def present_prompt_for_approval(assembled_prompt: str, task: dict) -> tuple[str, str]:
+    """HITL gate: show prompt to user before agent spawn.
+
+    Prints the assembled prompt to terminal and asks the user to
+    approve, edit, or reject it.
+
+    Args:
+        assembled_prompt: The full prompt that would be sent to the agent.
+        task: Task dict for context display.
+
+    Returns:
+        (approved_prompt, decision) where decision is "approve", "edit", or "reject".
+    """
+    agent_name = task.get("work_type", "Agent")
+    task_name = task.get("task_name", "Unknown task")
+
+    print("\n" + "═" * 60)
+    print(f"  HITL Prompt Review — {agent_name}: {task_name}")
+    print("═" * 60)
+    print()
+
+    # Show prompt (truncated if very long)
+    if len(assembled_prompt) > 3000:
+        print(assembled_prompt[:3000])
+        print(f"\n... ({len(assembled_prompt)} total chars, showing first 3000)")
+    else:
+        print(assembled_prompt)
+
+    print()
+    print("─" * 60)
+    print("  [A]pprove  /  [E]dit  /  [R]eject")
+    print("─" * 60)
+
+    while True:
+        try:
+            choice = input("  Your choice: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return assembled_prompt, "reject"
+
+        if choice in ("a", "approve"):
+            return assembled_prompt, "approve"
+
+        elif choice in ("r", "reject"):
+            try:
+                reason = input("  Reason (optional): ").strip()
+            except (EOFError, KeyboardInterrupt):
+                reason = ""
+            print(f"  Rejected. {f'Reason: {reason}' if reason else ''}")
+            return assembled_prompt, "reject"
+
+        elif choice in ("e", "edit"):
+            editor = os.environ.get("EDITOR", "nano")
+            with tempfile.NamedTemporaryFile(
+                mode="w", suffix=".md", delete=False, prefix="enki-prompt-"
+            ) as f:
+                f.write(assembled_prompt)
+                tmp_path = f.name
+
+            try:
+                subprocess.run([editor, tmp_path], check=True)
+                with open(tmp_path) as f:
+                    edited = f.read()
+                print(f"  Prompt edited ({len(edited)} chars).")
+                return edited, "edit"
+            except (subprocess.CalledProcessError, FileNotFoundError):
+                print(f"  Could not open editor '{editor}'. Using original prompt.")
+                return assembled_prompt, "approve"
+            finally:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+
+        else:
+            print("  Invalid choice. Please enter A, E, or R.")

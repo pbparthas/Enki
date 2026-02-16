@@ -1,25 +1,30 @@
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
 
 [project]
-name = "enki"
-version = "0.1.0"
-description = "Second brain for software engineering"
+name = "enki-ai"
+version = "3.0.0"
+description = "Persistent second brain and governance framework for Claude Code"
 readme = "README.md"
+license = "Apache-2.0"
 requires-python = ">=3.11"
+authors = [{ name = "Partha" }]
+keywords = ["ai", "second-brain", "claude-code", "memory", "governance"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Quality Assurance",
+]
 dependencies = [
-    "sentence-transformers>=2.2.0",
-    "numpy>=1.24.0",
     "mcp>=1.0.0",
-    "pyjwt>=2.8.0",
-    "keyring>=24.0.0",
 ]
 
 [project.optional-dependencies]
-server = [
-    "fastapi>=0.109.0",
-    "uvicorn[standard]>=0.27.0",
+embeddings = [
+    "sentence-transformers>=2.2.0",
+    "numpy>=1.24.0",
 ]
 dev = [
     "pytest>=7.0.0",
@@ -29,8 +34,19 @@ dev = [
 [project.scripts]
 enki = "enki.cli:main"
 
-[tool.hatch.build.targets.wheel]
-packages = ["src/enki"]
+[project.urls]
+Homepage = "https://github.com/pbparthas/Enki"
+Repository = "https://github.com/pbparthas/Enki"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+enki = [
+    "prompts/**/*.md",
+    "scripts/hooks/enki-*.sh",
+    "templates/**",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

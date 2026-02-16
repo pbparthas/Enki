@@ -20,7 +20,11 @@ def mem_env(tmp_path):
     (enki_root / "persona").mkdir()
     (enki_root / "persona" / "PERSONA.md").write_text("# Enki\nTest persona.")
 
+    db_dir = enki_root / "db"
+    db_dir.mkdir()
+
     with patch("enki.db.ENKI_ROOT", enki_root), \
+         patch("enki.db.DB_DIR", db_dir), \
          patch("enki.memory.abzu.ENKI_ROOT", enki_root):
         from enki.db import init_all
         init_all()
@@ -473,8 +477,8 @@ class TestAbzuFacade:
     def test_status(self, mem_env):
         from enki.memory.abzu import remember, status
 
-        remember("Bead 1", "preference")
-        remember("Bead 2", "decision")
+        remember("Always use JWT for authentication", "preference")
+        remember("Use refresh tokens with 7-day expiry", "decision")
 
         st = status()
         assert st["beads"]["total"] == 1  # Only preference in wisdom
@@ -521,7 +525,7 @@ class TestGeminiReview:
         from enki.memory.gemini import process_review_response
         from enki.memory.staging import add_candidate
 
-        cid = add_candidate("Good bead", "learning")
+        cid = add_candidate("Use connection pooling for database queries", "learning")
 
         response = json.dumps({
             "bead_decisions": [

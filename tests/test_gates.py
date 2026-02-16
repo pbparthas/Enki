@@ -239,7 +239,11 @@ class TestGateChecks:
         # Write session ID
         (enki_root / "SESSION_ID").write_text("test-session")
 
+        db_dir = enki_root / "db"
+        db_dir.mkdir()
+
         with patch("enki.db.ENKI_ROOT", enki_root), \
+             patch("enki.db.DB_DIR", db_dir), \
              patch("enki.gates.uru.ENKI_ROOT", enki_root), \
              patch("enki.gates.layer0.ENKI_ROOT", enki_root):
             yield enki_root, projects_dir, db_path
@@ -437,7 +441,11 @@ class TestNudges:
             from enki.gates.schemas import create_tables
             create_tables(conn)
 
+        db_dir = enki_root / "db"
+        db_dir.mkdir()
+
         with patch("enki.db.ENKI_ROOT", enki_root), \
+             patch("enki.db.DB_DIR", db_dir), \
              patch("enki.gates.uru.ENKI_ROOT", enki_root), \
              patch("enki.gates.layer0.ENKI_ROOT", enki_root):
             yield enki_root
@@ -487,11 +495,14 @@ class TestFeedback:
     def mock_feedback_env(self, tmp_path):
         enki_root = tmp_path / ".enki"
         enki_root.mkdir()
+        db_dir = enki_root / "db"
+        db_dir.mkdir()
         uru_path = enki_root / "uru.db"
         with connect(uru_path) as conn:
             from enki.gates.schemas import create_tables
             create_tables(conn)
-        with patch("enki.db.ENKI_ROOT", enki_root):
+        with patch("enki.db.ENKI_ROOT", enki_root), \
+             patch("enki.db.DB_DIR", db_dir):
             yield enki_root
 
     def test_create_proposal(self, mock_feedback_env):
@@ -562,7 +573,11 @@ class TestEnforcementContext:
                 "'phase', 'active', datetime('now'))"
             )
 
+        db_dir = enki_root / "db"
+        db_dir.mkdir()
+
         with patch("enki.db.ENKI_ROOT", enki_root), \
+             patch("enki.db.DB_DIR", db_dir), \
              patch("enki.gates.uru.ENKI_ROOT", enki_root):
             yield enki_root
 

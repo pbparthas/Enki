@@ -13,7 +13,10 @@ def temp_enki_root(tmp_path):
     """Provide a temporary ~/.enki directory."""
     enki_root = tmp_path / ".enki"
     enki_root.mkdir()
-    with patch("enki.db.ENKI_ROOT", enki_root):
+    db_dir = enki_root / "db"
+    db_dir.mkdir()
+    with patch("enki.db.ENKI_ROOT", enki_root), \
+         patch("enki.db.DB_DIR", db_dir):
         yield enki_root
 
 
