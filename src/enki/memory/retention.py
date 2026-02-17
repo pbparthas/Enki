@@ -37,8 +37,8 @@ def run_decay() -> dict:
         ).fetchall()
 
         for bead in beads:
-            # Never decay starred beads or preferences
-            if bead["starred"] or bead["category"] == "preference":
+            # Never decay starred beads, preferences, or protected categories
+            if bead["starred"] or bead["category"] in ("preference", "enforcement", "gate", "pattern"):
                 stats["unchanged"] += 1
                 continue
 
@@ -135,6 +135,9 @@ def process_flagged_deletions() -> dict:
 
         for bead in flagged:
             category = bead["category"]
+            # Never delete protected categories even if Gemini flags them
+            if category in ("enforcement", "gate", "pattern"):
+                continue
             stats["by_category"][category] = stats["by_category"].get(category, 0) + 1
             conn.execute("DELETE FROM beads WHERE id = ?", (bead["id"],))
             stats["deleted"] += 1
@@ -156,7 +159,7 @@ def calculate_weight(
     - Not recalled in 365 days: 0.1
     - Starred or preference: always 1.0
     """
-    if starred or category == "preference":
+    if starred or category in ("preference", "enforcement", "gate", "pattern"):
         return 1.0
 
     if not last_accessed:

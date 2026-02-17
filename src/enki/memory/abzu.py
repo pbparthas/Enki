@@ -65,11 +65,34 @@ def inject_session_start(project: str, goal: str, tier: str) -> str:
 
 def update_pre_compact_summary(
     session_id: str,
-    project: str,
-    operational_state: str,
-    conversational_state: str,
+    project: str = None,
+    transcript_path: str = None,
+    operational_state: str = None,
+    conversational_state: str = None,
 ) -> None:
-    """Store pre-compact summary. Accumulates across compactions."""
+    """Store pre-compact summary. Accumulates across compactions.
+
+    If transcript_path is provided, extracts operational state from JSONL.
+    This maintains backward compatibility while adding real JSONL support.
+    """
+    if transcript_path and not operational_state:
+        from enki.memory.extraction import extract_operational_state
+        state = extract_operational_state(transcript_path)
+        # Format operational state as readable text
+        parts = []
+        if state["files_modified"]:
+            parts.append(f"Files modified: {', '.join(state['files_modified'])}")
+        if state["errors"]:
+            parts.append(f"Errors: {'; '.join(state['errors'][:3])}")
+        if state["user_messages"]:
+            parts.append(f"User requests: {'; '.join(state['user_messages'][:3])}")
+        if state["tasks_completed"]:
+            parts.append(f"Tasks: {'; '.join(state['tasks_completed'][:3])}")
+        if state["assistant_summary"]:
+            parts.append(f"Summary: {state['assistant_summary'][:200]}")
+        parts.append(f"Tool calls: {state['tool_calls_count']}")
+        operational_state = "\n".join(parts) if parts else "No activity extracted."
+
     from enki.memory.sessions import update_pre_compact_summary as _update
     _update(
         session_id=session_id,
@@ -80,12 +103,80 @@ def update_pre_compact_summary(
 
 
 def inject_post_compact(session_id: str, tier: str) -> str:
-    """Load accumulated summaries for post-compact injection.
+    """Build complete post-compact context for re-injection.
 
-    Applies injection budget — collapses old summaries if over limit.
+    Includes persona identity, project state, accumulated session history,
+    and enforcement reminder. Output kept under ~2000 tokens.
     """
-    from enki.memory.sessions import get_post_compact_injection
-    return get_post_compact_injection(session_id, tier)
+    parts = []
+
+    # 1. Persona identity (compact)
+    parts.append("## Session Restored After Compaction")
+    parts.append("")
+    parts.append("**You ARE Enki.** Collaborator, craftsman, keeper of knowledge. Direct, opinionated, no filler.")
+    parts.append("")
+
+    # 2. Project state from DB
+    try:
+        from enki.gates.uru import inject_enforcement_context
+        enforcement = inject_enforcement_context()
+        # Parse out goal/phase/tier from enforcement context
+        goal_line = phase_line = tier_line = project_line = ""
+        for line in enforcement.split("\n"):
+            if "Goal:" in line:
+                goal_line = line.split("Goal:", 1)[1].strip()
+            elif "Phase:" in line:
+                phase_line = line.split("Phase:", 1)[1].strip()
+            elif "Tier:" in line:
+                tier_line = line.split("Tier:", 1)[1].strip()
+            elif "Project:" in line:
+                project_line = line.split("Project:", 1)[1].strip()
+
+        parts.append(f"**Project:** {project_line or 'unknown'}")
+        parts.append(f"**Goal:** {goal_line or 'NOT SET'}")
+        parts.append(f"**Phase:** {phase_line or 'NOT SET'} | **Tier:** {tier_line or tier}")
+        parts.append("")
+    except Exception:
+        parts.append(f"**Tier:** {tier}")
+        parts.append("")
+
+    # 3. Accumulated session state
+    from enki.memory.sessions import get_accumulated_summaries
+    summaries = get_accumulated_summaries(session_id)
+    if summaries:
+        parts.append("### Session History:")
+        for i, s in enumerate(summaries):
+            op_state = s.get("operational_state", "")
+            if op_state:
+                # Condense each compaction to one line
+                condensed = op_state.replace("\n", ". ")[:300]
+                parts.append(f"[Compaction {i + 1}] {condensed}")
+        parts.append("")
+
+    # 4. Enforcement reminder
+    try:
+        from enki.gates.uru import inject_enforcement_context
+        enforcement = inject_enforcement_context()
+        # Extract active gates
+        gate_lines = [l for l in enforcement.split("\n") if "Gate" in l and "ACTIVE" in l]
+        if gate_lines:
+            parts.append("### Enforcement:")
+            for gl in gate_lines:
+                parts.append(gl.strip().lstrip("- "))
+        else:
+            parts.append("### Enforcement:")
+            parts.append("All gates clear. Continue implementation within scope.")
+    except Exception:
+        parts.append("### Enforcement:")
+        parts.append("Enforcement state unavailable. Proceed with caution.")
+
+    result = "\n".join(parts)
+
+    # Budget: keep under ~2000 tokens (~8000 chars)
+    if len(result) > 8000:
+        result = result[:8000] + "\n\n[Truncated to fit injection budget]"
+
+    return result
 
 
 def finalize_session(session_id: str, project: str) -> None:
