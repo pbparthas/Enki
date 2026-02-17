@@ -27,7 +27,7 @@ from enki.gates.layer0 import (
     is_layer0_protected,
 )
 
-MUTATION_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
+MUTATION_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit", "Task"}
 
 # Phases where code changes are allowed
 IMPLEMENT_PHASES = {"implement", "review", "ship"}
