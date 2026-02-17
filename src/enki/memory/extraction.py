@@ -286,6 +286,129 @@ def extract_candidates(text: str, session_id: str) -> list[dict]:
     return extract_all_from_text(text, session_id)
 
 
+def extract_operational_state(transcript_path: str) -> dict:
+    """Extract operational state from a JSONL transcript for pre-compact summaries.
+
+    Parses from END of file (most recent first), max 100 lines.
+    Extracts files modified, errors, user messages, tool call count,
+    assistant summary, and task completions.
+
+    Returns empty dict with empty lists on missing/malformed file.
+    """
+    empty = {
+        "files_modified": [],
+        "tasks_completed": [],
+        "errors": [],
+        "user_messages": [],
+        "assistant_summary": "",
+        "tool_calls_count": 0,
+    }
+
+    path = Path(transcript_path)
+    if not path.exists():
+        return empty
+
+    # Read last 100 lines from file
+    try:
+        with open(path) as f:
+            all_lines = f.readlines()
+    except (IOError, OSError):
+        return empty
+
+    tail_lines = all_lines[-100:] if len(all_lines) > 100 else all_lines
+
+    files_modified = set()
+    errors = []
+    user_messages = []
+    assistant_texts = []
+    tool_calls_count = 0
+    tasks_completed = []
+
+    for raw_line in tail_lines:
+        raw_line = raw_line.strip()
+        if not raw_line:
+            continue
+        try:
+            entry = json.loads(raw_line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+
+        entry_type = entry.get("type", "")
+
+        # Human messages
+        if entry_type == "human":
+            content = entry.get("content", "")
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        user_messages.append(block["text"])
+            elif isinstance(content, str) and content:
+                user_messages.append(content)
+
+        # Tool use entries — extract file paths and count
+        elif entry_type == "tool_use":
+            tool_calls_count += 1
+            name = entry.get("name", "")
+            inp = entry.get("input", {})
+            if not isinstance(inp, dict):
+                continue
+
+            if name in ("Write", "Edit", "MultiEdit", "NotebookEdit"):
+                fp = inp.get("file_path") or inp.get("path", "")
+                if fp:
+                    files_modified.add(fp)
+            elif name == "Bash":
+                cmd = inp.get("command", "")
+                # Extract task completions from common commands
+                for pat in TASK_COMPLETION_PATTERNS:
+                    m = pat.search(cmd)
+                    if m:
+                        tasks_completed.append(m.group(0).strip())
+
+        # Tool results — extract errors
+        elif entry_type == "tool_result":
+            content = entry.get("content", "")
+            if isinstance(content, str):
+                content_lower = content.lower()
+                if any(kw in content_lower for kw in
+                       ("error", "traceback", "exception", "failed", "typeerror",
+                        "valueerror", "keyerror", "attributeerror", "importerror")):
+                    # Take first meaningful line as error summary
+                    for line in content.split("\n"):
+                        line = line.strip()
+                        if line and any(kw in line.lower() for kw in
+                                        ("error", "traceback", "exception", "failed",
+                                         "typeerror", "valueerror", "keyerror")):
+                            errors.append(line[:300])
+                            break
+
+        # Assistant messages — collect for summary
+        elif entry_type == "assistant":
+            content = entry.get("content", "")
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        assistant_texts.append(block["text"])
+            elif isinstance(content, str) and content:
+                assistant_texts.append(content)
+
+    # Build assistant summary from most recent assistant text
+    assistant_summary = ""
+    if assistant_texts:
+        last_text = assistant_texts[-1]
+        # Take first 300 chars as summary
+        assistant_summary = last_text[:300].strip()
+
+    return {
+        "files_modified": sorted(files_modified),
+        "tasks_completed": tasks_completed[:10],
+        "errors": errors[:10],
+        "user_messages": user_messages[-5:],  # Last 5 user messages
+        "assistant_summary": assistant_summary,
+        "tool_calls_count": tool_calls_count,
+    }
+
+
 # ── Private helpers ──
 
 

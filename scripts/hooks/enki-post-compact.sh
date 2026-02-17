@@ -4,35 +4,37 @@ set -euo pipefail
 
 INPUT=$(cat)
 
-# Re-inject combined context
-CONTEXT=$(python -c "
+# Extract session_id from stdin JSON
+SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty' 2>/dev/null || echo "")
+
+# Re-inject combined context with full persona + state + history
+CONTEXT=$(/home/partha/.enki-venv/bin/python -c "
 import sys
 sys.path.insert(0, 'src')
 
-parts = []
+session_id = '${SESSION_ID}'
 
-# Uru enforcement context
+# Try full injection first
 try:
-    from enki.gates.uru import inject_enforcement_context
-    uru_ctx = inject_enforcement_context()
-    if uru_ctx:
-        parts.append(uru_ctx)
-except Exception:
-    parts.append('Uru: Enforcement context unavailable after compaction.')
+    if not session_id:
+        from enki.gates.uru import _get_session_id
+        session_id = _get_session_id()
 
-# Abzu post-compact injection (with budget)
-try:
     from enki.memory.abzu import inject_post_compact
-    from enki.gates.uru import _get_session_id
-    session_id = _get_session_id()
-    if session_id:
-        abzu_ctx = inject_post_compact(session_id=session_id, tier='standard')
-        if abzu_ctx:
-            parts.append(abzu_ctx)
+    result = inject_post_compact(session_id=session_id, tier='standard')
+    if result:
+        print(result)
+    else:
+        # Minimal fallback: just enforcement state
+        from enki.gates.uru import inject_enforcement_context
+        print(inject_enforcement_context())
 except Exception:
-    pass
-
-print('\n'.join(parts))
-" 2>/dev/null || echo "Uru: Enforcement context unavailable after compaction.")
+    # Last resort fallback
+    try:
+        from enki.gates.uru import inject_enforcement_context
+        print(inject_enforcement_context())
+    except Exception:
+        print('Enki: Context unavailable after compaction. Continue with current task.')
+" 2>/dev/null || echo "Enki: Context unavailable after compaction. Continue with current task.")
 
 echo "$CONTEXT"

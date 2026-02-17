@@ -350,6 +350,110 @@ class Orchestrator:
         update_task_status(self.project, task_id, TaskStatus.HITL)
         return msg_id
 
+    # ── HITL Resolution ──
+
+    def resolve_hitl(self, task_id: str, decision: str, reason: str = "") -> dict:
+        """Resolve a HITL escalation with human's decision.
+
+        Args:
+            task_id: The escalated task.
+            decision: "approve", "reject", "retry", or "skip".
+            reason: Optional reason for the decision.
+
+        Returns dict with updated task status and next actions.
+        """
+        task = get_task(self.project, task_id)
+        if not task:
+            return {"error": f"Task {task_id} not found"}
+
+        if task["status"] != TaskStatus.HITL.value:
+            return {"error": f"Task is not in HITL state (current: {task['status']})"}
+
+        # Record the decision via mail
+        thread_id = create_thread(self.project, "hitl_resolution")
+        send(
+            project=self.project,
+            thread_id=thread_id,
+            from_agent="Human",
+            to_agent="EM",
+            body=f"HITL decision for task {task_id}: {decision}. {reason}".strip(),
+            subject=f"HITL Resolution: {task_id}",
+            importance="high",
+        )
+
+        if decision == "approve":
+            update_task_status(self.project, task_id, TaskStatus.COMPLETED)
+            return {"task_id": task_id, "status": "completed", "decision": decision}
+        elif decision == "retry":
+            update_task_status(self.project, task_id, TaskStatus.PENDING)
+            return {
+                "task_id": task_id,
+                "status": "pending",
+                "decision": decision,
+                "next": "Task will be re-queued in next wave",
+            }
+        elif decision in ("reject", "skip"):
+            update_task_status(self.project, task_id, TaskStatus.FAILED)
+            return {"task_id": task_id, "status": "failed", "decision": decision}
+        else:
+            return {"error": f"Unknown decision: {decision}. Use approve/reject/retry/skip."}
+
+    # ── Spec Decomposition ──
+
+    def decompose_spec(self, spec_id: str = None) -> dict:
+        """Generate task graph from the approved spec.
+
+        Reads the approved spec from pm_decisions, parses it,
+        and delegates to build_dag for DAG creation.
+
+        If spec_id is None, uses the most recently approved spec.
+        """
+        with em_db(self.project) as conn:
+            if spec_id:
+                row = conn.execute(
+                    "SELECT id, spec_content FROM pm_decisions "
+                    "WHERE project_id = ? AND id = ? "
+                    "AND decision_type = 'spec_approval' AND human_response = 'approved'",
+                    (self.project, spec_id),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT id, spec_content FROM pm_decisions "
+                    "WHERE project_id = ? "
+                    "AND decision_type = 'spec_approval' AND human_response = 'approved' "
+                    "ORDER BY created_at DESC LIMIT 1",
+                    (self.project,),
+                ).fetchone()
+
+        if not row:
+            return {"error": "No approved spec found"}
+
+        spec_content = row["spec_content"] if row["spec_content"] else ""
+
+        # Try parsing as JSON spec format
+        import json
+        try:
+            spec = json.loads(spec_content)
+        except (json.JSONDecodeError, TypeError):
+            # If not JSON, treat as text and create a single-sprint DAG
+            spec = {
+                "sprints": [{
+                    "name": "Sprint 1",
+                    "number": 1,
+                    "dependencies": [],
+                    "tasks": [{
+                        "name": "Implement spec",
+                        "files": [],
+                        "dependencies": [],
+                        "work_type": "implementation",
+                    }],
+                }],
+            }
+
+        result = self.build_dag(spec)
+        result["spec_id"] = row["id"]
+        return result
+
     # ── Sprint Management ──
 
     def advance_sprint(self) -> dict:
