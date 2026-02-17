@@ -5,7 +5,7 @@ set -euo pipefail
 INPUT=$(cat)
 
 # Uru: End enforcement session
-RESULT=$(echo "$INPUT" | python -m enki.gates.uru --hook session-end 2>/dev/null || true)
+RESULT=$(echo "$INPUT" | /home/partha/.enki-venv/bin/python -m enki.gates.uru --hook session-end 2>/dev/null || true)
 
 # Uru: Generate feedback proposals
 python -c "

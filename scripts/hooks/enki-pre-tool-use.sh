@@ -34,7 +34,7 @@ if [[ "$TOOL_NAME" == "Write" || "$TOOL_NAME" == "Edit" || \
     fi
 fi
 
-if [[ "$TOOL_NAME" == "Bash" ]]; then
+if [[ "$TOOL_NAME" == "Bash" || "$TOOL_NAME" == "Task" ]]; then
     CMD=$(echo "$INPUT" | jq -r '.tool_input.command // empty')
 
     # Layer 0.5: sqlite3 targeting .db files
@@ -49,7 +49,7 @@ if [[ "$TOOL_NAME" == "Bash" ]]; then
 fi
 
 # ── Layer 1+: Python handles the rest ──
-RESULT=$(echo "$INPUT" | python -m enki.gates.uru --hook pre-tool-use 2>/dev/null)
+RESULT=$(echo "$INPUT" | /home/partha/.enki-venv/bin/python -m enki.gates.uru --hook pre-tool-use 2>/dev/null)
 
 if [[ -n "$RESULT" ]]; then
     echo "$RESULT"
@@ -57,7 +57,7 @@ else
     # Fail closed for mutations, open for reads
     if [[ "$TOOL_NAME" == "Write" || "$TOOL_NAME" == "Edit" || \
           "$TOOL_NAME" == "MultiEdit" || "$TOOL_NAME" == "NotebookEdit" || \
-          "$TOOL_NAME" == "Bash" ]]; then
+          "$TOOL_NAME" == "Bash" || "$TOOL_NAME" == "Task" ]]; then
         echo '{"decision":"block","reason":"Uru unavailable. Blocking mutation for safety."}'
     else
         echo '{"decision":"allow"}'

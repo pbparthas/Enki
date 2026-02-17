@@ -4,7 +4,7 @@ set -euo pipefail
 
 INPUT=$(cat)
 
-RESULT=$(echo "$INPUT" | python -m enki.gates.uru --hook post-tool-use 2>/dev/null)
+RESULT=$(echo "$INPUT" | /home/partha/.enki-venv/bin/python -m enki.gates.uru --hook post-tool-use 2>/dev/null)
 
 if [[ -n "$RESULT" ]]; then
     echo "$RESULT"

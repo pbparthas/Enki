@@ -25,7 +25,7 @@ if [[ -z "$TIER" ]]; then
 fi
 
 # Initialize enforcement state (Uru)
-echo "$INPUT" | python -m enki.gates.uru --hook session-start 2>/dev/null || true
+echo "$INPUT" | /home/partha/.enki-venv/bin/python -m enki.gates.uru --hook session-start 2>/dev/null || true
 
 # Inject combined context: Uru enforcement + Abzu memory
 CONTEXT=$(python -c "
