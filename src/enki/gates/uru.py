@@ -49,11 +49,6 @@ def check_pre_tool_use(tool_name: str, tool_input: dict) -> dict:
         if tool_name not in MUTATION_TOOLS and tool_name != "Bash":
             return {"decision": "allow"}
         if tool_name == "Task":
-<<<<<<< HEAD
-            project = str(Path.cwd())
-            if not _get_active_goal(project):
-                return {"decision": "block", "reason": "Set a goal with enki_goal before spawning agents."}
-=======
             project = _get_current_project() or str(Path.cwd())
             goal = _get_active_goal(project)
             if not goal:
@@ -67,7 +62,6 @@ def check_pre_tool_use(tool_name: str, tool_input: dict) -> dict:
                 if tier == "full":
                     if not _is_spec_approved(project):
                         return {"decision": "block", "reason": "Spec not approved. Full tier requires approved spec before agent spawning."}
->>>>>>> phase4
         if tool_name in MUTATION_TOOLS:
             filepath = tool_input.get("file_path") or tool_input.get("path", "")
             targets = [filepath] if filepath else []

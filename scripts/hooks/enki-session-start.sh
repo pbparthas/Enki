@@ -9,7 +9,7 @@ GOAL=$(echo "$INPUT" | jq -r '.goal // empty')
 TIER=$(echo "$INPUT" | jq -r '.tier // empty')
 
 if [[ -z "$SESSION_ID" ]]; then
-    SESSION_ID=$(python -c "import uuid; print(uuid.uuid4())")
+    SESSION_ID=$(/home/partha/.enki-venv/bin/python -c "import uuid; print(uuid.uuid4())")
 fi
 if [[ -z "$PROJECT" && -f "$HOME/.enki/PROJECT" ]]; then
     PROJECT=$(cat "$HOME/.enki/PROJECT")
@@ -28,7 +28,7 @@ fi
 echo "$INPUT" | /home/partha/.enki-venv/bin/python -m enki.gates.uru --hook session-start 2>/dev/null || true
 
 # Inject combined context: Uru enforcement + Abzu memory
-CONTEXT=$(python -c "
+CONTEXT=$(/home/partha/.enki-venv/bin/python -c "
 import sys
 sys.path.insert(0, 'src')
 
