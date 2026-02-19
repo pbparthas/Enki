@@ -29,8 +29,9 @@ from enki.gates.layer0 import (
 
 MUTATION_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit", "Task"}
 
-# Phases where code changes are allowed
-IMPLEMENT_PHASES = {"implement", "review", "ship"}
+# Phase order and phases where code changes are allowed
+PHASE_ORDER = ["intake", "debate", "spec", "approve", "implement", "review", "complete"]
+IMPLEMENT_PHASES = {"implement", "review", "complete"}
 
 # Decision language patterns for nudge 1
 DECISION_PATTERNS = [
@@ -54,11 +55,11 @@ def check_pre_tool_use(tool_name: str, tool_input: dict) -> dict:
             if not goal:
                 return {"decision": "block", "reason": "Set a goal with enki_goal before spawning agents."}
             # For Standard/Full, also check phase and spec
-            tier = _get_tier(project)
+            tier = _get_tier(project) or "minimal"
             if tier in ("standard", "full"):
                 phase = _get_current_phase(project)
-                if phase and phase not in IMPLEMENT_PHASES:
-                    return {"decision": "block", "reason": f"Phase is '{phase}'. Agent spawning needs phase >= implement."}
+                if not phase or phase not in IMPLEMENT_PHASES:
+                    return {"decision": "block", "reason": f"Phase is '{phase or 'not set'}'. Agent spawning needs phase >= implement. Progress through the workflow first."}
                 if tier == "full":
                     if not _is_spec_approved(project):
                         return {"decision": "block", "reason": "Spec not approved. Full tier requires approved spec before agent spawning."}
@@ -239,7 +240,7 @@ def inject_enforcement_context() -> str:
 
     goal = _get_active_goal(project)
     phase = _get_current_phase(project)
-    tier = _get_tier(project)
+    tier = _get_tier(project) or "minimal"
 
     lines = ["## Uru Enforcement State"]
     lines.append(f"- Project: {project}")
@@ -249,11 +250,14 @@ def inject_enforcement_context() -> str:
 
     if not goal:
         lines.append("- Gate 1: ACTIVE — set goal before editing code")
-    if phase and phase not in IMPLEMENT_PHASES:
-        lines.append(f"- Gate 3: ACTIVE — phase '{phase}' blocks code changes")
-    if tier in ("standard", "full") and not _is_spec_approved(project):
-        lines.append("- Gate 2: ACTIVE — spec needs approval")
-
+    if tier in ("standard", "full"):
+        if not phase or phase not in IMPLEMENT_PHASES:
+            lines.append(f"- Gate 3: ACTIVE — phase '{phase or 'NOT SET'}' blocks code changes")
+        if not _is_spec_approved(project):
+            lines.append("- Gate 2: ACTIVE — spec needs approval")
+    else:
+        if phase and phase not in IMPLEMENT_PHASES:
+            lines.append(f"- Gate 3: ACTIVE — phase '{phase}' blocks code changes")
     return "\n".join(lines)
 
 
@@ -278,23 +282,25 @@ def _check_gates(filepath: str) -> dict:
         }
 
     phase = _get_current_phase(project)
-    if phase not in IMPLEMENT_PHASES:
-        return {
-            "decision": "block",
-            "reason": f"Gate 3: Phase is '{phase}'. Code changes need phase >= implement.",
-        }
+    tier = _get_tier(project) or "minimal"
 
-    tier = _get_tier(project)
-    if tier is None:
-        return {
-            "decision": "block",
-            "reason": "Gate 2: Cannot determine tier. Blocking by default.",
-        }
     if tier in ("standard", "full"):
+        if not phase or phase not in IMPLEMENT_PHASES:
+            next_steps = "Progress through: intake → debate → spec → approve → implement"
+            return {
+                "decision": "block",
+                "reason": f"Phase is '{phase or 'not set'}'. Code changes require phase >= implement. {next_steps}",
+            }
         if not _is_spec_approved(project):
             return {
                 "decision": "block",
                 "reason": "Gate 2: No approved spec. Needs human approval before implementation.",
+            }
+    else:
+        if phase and phase not in IMPLEMENT_PHASES:
+            return {
+                "decision": "block",
+                "reason": f"Gate 3: Phase is '{phase}'. Code changes require phase >= implement.",
             }
 
     return {"decision": "allow"}

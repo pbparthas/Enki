@@ -12,6 +12,9 @@ from enki.orch.tiers import (
     set_phase,
     get_project_state,
     triage,
+    advance_phase,
+    PHASE_ORDER,
+    IMPLEMENT_PHASES,
 )
 from enki.orch.pm import (
     validate_intake,
@@ -61,8 +64,8 @@ def enki_goal(description: str, project: str = ".") -> dict:
     Auto-detects tier from description.
     Surfaces relevant past decisions as nudges.
     """
-    tier = detect_tier(description)
-    result = set_goal(project, description, tier)
+    result = set_goal(project, description, "auto")
+    tier = result.get("tier")
 
     # Nudge: surface relevant past decisions (read-only, fail-safe)
     nudge_text = ""
@@ -74,10 +77,11 @@ def enki_goal(description: str, project: str = ".") -> dict:
     except Exception:
         pass  # Nudge failure must never block goal setting
 
+    state = get_project_state(project)
     response = {
         "goal": description,
         "tier": tier,
-        "phase": "intake",
+        "phase": state.get("phase") or "not set",
         "next_step": _next_step_hint(tier),
     }
     if nudge_text:
@@ -105,18 +109,35 @@ def enki_quick(description: str, project: str = ".") -> dict:
     return quick(description, project)
 
 
-def enki_phase(phase: str, project: str = ".") -> dict:
-    """Set current phase. Satisfies Uru Gate 3 for implement+.
+def enki_phase(action: str, to: str | None = None, project: str = ".") -> dict:
+    """Advance phase or return phase status.
 
-    Valid phases: intake, debate, plan, implement, review, ship.
+    Actions: advance, status
     """
-    result = set_phase(project, phase)
-    if "error" in result:
-        return result
-    return {
-        "phase": phase,
-        "next_step": _phase_hint(phase),
-    }
+    if action == "status":
+        state = get_project_state(project)
+        phase = state.get("phase")
+        tier = state.get("tier")
+        goal = state.get("goal")
+        current_idx = PHASE_ORDER.index(phase) if phase in PHASE_ORDER else -1
+        next_phase = (
+            PHASE_ORDER[current_idx + 1]
+            if current_idx + 1 < len(PHASE_ORDER)
+            else "done"
+        )
+        return {
+            "phase": phase or "not set",
+            "tier": tier or "not set",
+            "goal": goal or "not set",
+            "next_phase": next_phase,
+            "pipeline": " → ".join(PHASE_ORDER),
+        }
+    if action == "advance":
+        if not to:
+            return {"error": "Specify target phase with 'to' parameter"}
+        return advance_phase(project, to)
+
+    return {"error": f"Unknown action: {action}. Use 'advance' or 'status'."}
 
 
 # ── PM ──
@@ -203,7 +224,7 @@ def enki_orchestrate(project: str = ".") -> dict:
         return {"error": "No goal set. Use enki_goal first."}
 
     phase = state.get("phase")
-    if phase not in ("implement", "review", "ship"):
+    if phase not in IMPLEMENT_PHASES:
         return {"error": f"Phase must be implement+, currently: {phase}"}
 
     tier = state.get("tier", "minimal")
@@ -359,10 +380,10 @@ def enki_profile(
 def _next_step_hint(tier: str) -> str:
     """Hint for what to do after setting goal."""
     if tier == "minimal":
-        return "Use enki_quick for fast-path, or enki_phase('implement')"
+        return "Phase auto-advanced to implement. You can code now, then enki_phase(action='advance', to='review'/'complete')"
     if tier == "standard":
-        return "Run enki_phase('intake'), then PM intake checklist"
-    return "Run enki_phase('intake'), then full PM intake + debate"
+        return "Run enki_phase(action='advance', to='intake'), then PM intake checklist"
+    return "Run enki_phase(action='advance', to='intake'), then full PM intake + debate"
 
 
 def _phase_hint(phase: str) -> str:
@@ -370,9 +391,10 @@ def _phase_hint(phase: str) -> str:
     hints = {
         "intake": "Answer PM intake checklist: outcome, audience, constraints, scope, risks",
         "debate": "Run multi-perspective analysis on approach",
-        "plan": "Create specs (product + implementation)",
+        "spec": "Create product and implementation specs",
+        "approve": "Human approves spec",
         "implement": "Gate 3 satisfied — code changes allowed",
         "review": "Sprint-level review of all changes",
-        "ship": "Qualify, deploy, verify",
+        "complete": "Qualify, deploy, verify",
     }
     return hints.get(phase, "")

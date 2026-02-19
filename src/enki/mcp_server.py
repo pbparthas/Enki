@@ -99,18 +99,23 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="enki_phase",
-            description="Set current phase (intake/debate/plan/implement/review/ship). Gate 3 satisfied at implement+.",
+            description="Advance phase sequentially or return phase status.",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "phase": {
+                    "action": {
                         "type": "string",
-                        "enum": ["intake", "debate", "plan", "implement", "review", "ship"],
-                        "description": "Phase to set",
+                        "enum": ["advance", "status"],
+                        "description": "Advance phase or return status",
+                    },
+                    "to": {
+                        "type": "string",
+                        "enum": ["intake", "debate", "spec", "approve", "implement", "review", "complete"],
+                        "description": "Target phase for advance",
                     },
                     "project": {"type": "string", "default": "."},
                 },
-                "required": ["phase"],
+                "required": ["action"],
             },
         ),
         Tool(
@@ -243,7 +248,11 @@ def _handle_goal(args: dict) -> str:
 
 def _handle_phase(args: dict) -> str:
     from .mcp.orch_tools import enki_phase
-    result = enki_phase(args["phase"], args.get("project", "."))
+    result = enki_phase(
+        args["action"],
+        args.get("to"),
+        args.get("project", "."),
+    )
     return json.dumps(result, indent=2)
 
 

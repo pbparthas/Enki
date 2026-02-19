@@ -1,7 +1,7 @@
 """devops.py — DevOps agent: CI, deploy, verify per user configuration.
 
 Reads deploy config from .enki/deploy.yaml.
-Spawned at ship phase (qualify/deploy/verify) or plan phase (CI setup).
+Spawned at complete phase (qualify/deploy/verify) or spec phase (CI setup).
 """
 
 from pathlib import Path

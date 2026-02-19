@@ -11,6 +11,10 @@ import uuid
 from datetime import datetime
 
 from enki.db import em_db
+from enki.orch.pm import is_spec_approved
+
+PHASE_ORDER = ["intake", "debate", "spec", "approve", "implement", "review", "complete"]
+IMPLEMENT_PHASES = {"implement", "review", "complete"}
 
 # Heuristic signals for tier detection
 MINIMAL_SIGNALS = [
@@ -85,7 +89,7 @@ def quick(description: str, project: str) -> dict:
         "goal": description,
         "tier": "minimal",
         "phase": "implement",
-        "message": "Quick mode active. Edit files, then enki_phase('ship') when done.",
+        "message": "Quick mode active. Edit files, then enki_phase(action='advance', to='complete') when done.",
     }
 
 
@@ -95,14 +99,23 @@ def set_goal(project: str, description: str, tier: str = "auto") -> dict:
         tier = detect_tier(description)
 
     _set_goal(project, description, tier)
+
+    # Set initial phase
+    _set_phase(project, "intake")
+
+    # Minimal tier: skip ceremony, auto-advance to implement
+    if tier == "minimal":
+        _set_phase(project, "implement")
+
     return {"goal": description, "tier": tier, "project": project}
 
 
 def set_phase(project: str, phase: str) -> dict:
     """Set project phase."""
-    valid_phases = ["intake", "debate", "plan", "implement", "review", "ship"]
-    if phase not in valid_phases:
-        return {"error": f"Invalid phase: {phase}. Must be one of {valid_phases}"}
+    if phase not in PHASE_ORDER:
+        return {
+            "error": f"Invalid phase: {phase}. Must be one of {PHASE_ORDER}"
+        }
 
     _set_phase(project, phase)
     return {"phase": phase, "project": project}
@@ -129,6 +142,56 @@ def get_project_state(project: str) -> dict:
         "tier": goal_row["tier"] if goal_row else None,
         "phase": phase_row["task_name"] if phase_row else None,
     }
+
+
+def advance_phase(project: str, to_phase: str) -> dict:
+    """Advance project phase. Enforces sequential progression — no skipping.
+
+    Returns: {"success": True, "phase": "debate"} or {"success": False, "reason": "..."}
+    """
+    state = get_project_state(project)
+    current = state.get("phase")
+
+    if to_phase not in PHASE_ORDER:
+        return {
+            "success": False,
+            "reason": f"Unknown phase: {to_phase}. Valid phases: {', '.join(PHASE_ORDER)}",
+        }
+
+    current_idx = PHASE_ORDER.index(current) if current in PHASE_ORDER else -1
+    target_idx = PHASE_ORDER.index(to_phase)
+
+    # Can only advance by 1 step
+    if target_idx > current_idx + 1:
+        next_phase = (
+            PHASE_ORDER[current_idx + 1]
+            if current_idx + 1 < len(PHASE_ORDER)
+            else "complete"
+        )
+        return {
+            "success": False,
+            "reason": f"Cannot skip from '{current}' to '{to_phase}'. Next phase is '{next_phase}'.",
+        }
+
+    # Can't go backwards
+    if target_idx < current_idx:
+        return {
+            "success": False,
+            "reason": f"Cannot go backwards from '{current}' to '{to_phase}'.",
+        }
+
+    # "implement" requires human-approved spec for Standard/Full
+    if to_phase == "implement":
+        tier = state.get("tier") or "minimal"
+        if tier in ("standard", "full"):
+            if not is_spec_approved(project):
+                return {
+                    "success": False,
+                    "reason": "Cannot enter implement phase. Spec requires human approval first.",
+                }
+
+    _set_phase(project, to_phase)
+    return {"success": True, "phase": to_phase}
 
 
 def triage(description: str) -> dict:

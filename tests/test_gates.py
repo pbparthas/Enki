@@ -339,7 +339,7 @@ class TestGateChecks:
 
         _, _, db_path = mock_project
         self._set_goal(db_path)
-        self._set_phase(db_path, "ship")
+        self._set_phase(db_path, "complete")
 
         result = check_pre_tool_use("Write", {"file_path": "/project/src/main.py"})
         assert result["decision"] == "allow"
