@@ -200,7 +200,7 @@ def assemble_agent_context(
         knowledge_lines = []
         for note in knowledge:
             content = note.get("content", "")[:200]
-            category = note.get("category", "unknown")
+            category = sanitize_content(note.get("category", "unknown"), "manual")
             safe = sanitize_content(content, "em_distill")
             knowledge_lines.append(f"- [{category}] {safe}")
         knowledge_text = "\n".join(knowledge_lines)
@@ -224,8 +224,10 @@ def assemble_agent_context(
         for msg in mail_context[-10:]:
             sanitized = sanitize_mail_message(msg)
             body = sanitized.get("body", sanitized.get("content", ""))[:300]
+            safe_from = sanitize_content(str(msg.get("from_agent", "?")), "manual")
+            safe_to = sanitize_content(str(msg.get("to_agent", "?")), "manual")
             mail_lines.append(
-                f"**{msg.get('from_agent', '?')} → {msg.get('to_agent', '?')}**: {body}"
+                f"**{safe_from} → {safe_to}**: {body}"
             )
         mail_text = "\n".join(mail_lines)
         mail_text = truncate_to_budget(mail_text, budget["mail"])

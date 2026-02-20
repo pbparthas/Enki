@@ -220,8 +220,9 @@ def assemble_prompt(
         historical_lines = []
         parts.append("\n---\n## HISTORICAL CONTEXT\n")
         for bead in historical_context:
+            safe_category = sanitize_content(bead.get("category", "unknown"), "manual")
             historical_lines.append(
-                f"- [{bead.get('category', 'unknown')}] "
+                f"- [{safe_category}] "
                 f"{sanitize_content(bead.get('content', '')[:200], 'em_distill')}"
             )
         parts.append(wrap_context("\n".join(historical_lines), "recalled_knowledge"))
@@ -236,8 +237,10 @@ def assemble_prompt(
         parts.append("\n---\n## RELEVANT MAIL\n")
         for msg in filtered_mail[-10:]:  # Last 10 messages
             sanitized_msg = sanitize_mail_message(msg)
+            safe_from = sanitize_content(str(msg.get("from_agent", "?")), "manual")
+            safe_to = sanitize_content(str(msg.get("to_agent", "?")), "manual")
             mail_lines.append(
-                f"**{msg.get('from_agent', '?')} → {msg.get('to_agent', '?')}**: "
+                f"**{safe_from} → {safe_to}**: "
                 f"{sanitized_msg.get('body', sanitized_msg.get('content', ''))[:300]}"
             )
         parts.append(wrap_context("\n".join(mail_lines), "mail_message"))

@@ -11,6 +11,7 @@ Spawn authority:
 - InfoSec, UI/UX, DevOps, Performance, Researcher: EM (conditional)
 """
 
+import json
 import os
 import re
 import subprocess
@@ -57,7 +58,7 @@ from enki.orch.validation import validate_agent_output
 from enki.orch.bugs import file_bug, has_blocking_bugs
 from enki.orch.onboarding import detect_entry_point
 from enki.config import get_config
-from enki.sanitization import sanitize_mail_message
+from enki.sanitization import sanitize_content, sanitize_mail_message
 from enki.verification import (
     MAX_VERIFICATION_RETRIES,
     format_verification_errors,
@@ -247,17 +248,22 @@ class Orchestrator:
         for msg in parsed.get("messages", []):
             if msg.get("to") and msg.get("content"):
                 sanitized_msg = sanitize_mail_message(msg)
+                to_agent = self._sanitize_header(sanitized_msg.get("to", ""))
+                if not to_agent:
+                    continue
+                from_agent = self._sanitize_header(parsed.get("agent", "Unknown")) or "Unknown"
+                subject = sanitize_content(
+                    str(sanitized_msg.get("subject", f"From {from_agent}")),
+                    "manual",
+                )
                 thread_id = create_thread(self.project, "agent_output")
                 send(
                     project=self.project,
                     thread_id=thread_id,
-                    from_agent=parsed.get("agent", "Unknown"),
-                    to_agent=sanitized_msg["to"],
+                    from_agent=from_agent,
+                    to_agent=to_agent,
                     body=sanitized_msg["content"],
-                    subject=sanitized_msg.get(
-                        "subject",
-                        f"From {parsed.get('agent', 'Unknown')}",
-                    ),
+                    subject=subject,
                     importance=sanitized_msg.get("importance", "normal"),
                 )
                 messages_routed += 1
@@ -388,16 +394,24 @@ class Orchestrator:
                 )
 
         tests_run = int(parsed.get("tests_run", 0) or 0)
-        if tests_run > 0:
-            gate = can_execute_tests(task_id, project=self.project)
-            if gate.blocked:
-                attempt = increment_retry(self.project, task_id)
-                return {
-                    "status": "test_execution_blocked",
-                    "task_id": task_id,
-                    "attempt": attempt,
-                    "reason": gate.reason,
-                }
+        if tests_run <= 0:
+            attempt = increment_retry(self.project, task_id)
+            return {
+                "status": "test_execution_blocked",
+                "task_id": task_id,
+                "attempt": attempt,
+                "reason": "Test execution blocked: QA reported 0 tests run.",
+            }
+
+        gate = can_execute_tests(task_id, project=self.project)
+        if gate.blocked:
+            attempt = increment_retry(self.project, task_id)
+            return {
+                "status": "test_execution_blocked",
+                "task_id": task_id,
+                "attempt": attempt,
+                "reason": gate.reason,
+            }
         return None
 
     def _is_test_authoring_update(self, parsed: dict) -> bool:
@@ -450,6 +464,20 @@ class Orchestrator:
 
     def mark_task_done(self, task_id: str, output: dict) -> dict:
         """Mark task complete and trigger next wave."""
+        task = get_task(self.project, task_id) or {}
+        payload = output if isinstance(output, dict) else {}
+        agent_role = str(
+            payload.get("agent") or task.get("work_type") or "dev"
+        ).lower()
+        verification_outcome = self._handle_agent_completion(
+            agent_role=agent_role,
+            agent_output=payload,
+            task=task,
+            task_id=task_id,
+        )
+        if verification_outcome["status"] != "pass":
+            return verification_outcome
+
         update_task_status(self.project, task_id, TaskStatus.COMPLETED)
 
         # Check if sprint is complete
@@ -640,15 +668,18 @@ class Orchestrator:
 
     def inject_session_state(self) -> str:
         """Return state for post-compact injection."""
+        def _safe(value) -> str:
+            return sanitize_content(str(value or ""), "session_end")
+
         state = get_project_state(self.project)
         if not state.get("goal"):
             return ""
 
         lines = [
-            f"Active project: {self.project}",
-            f"Goal: {state.get('goal', 'None')}",
-            f"Tier: {state.get('tier', 'Unknown')}",
-            f"Phase: {state.get('phase', 'Unknown')}",
+            f"Active project: {_safe(self.project)}",
+            f"Goal: {_safe(state.get('goal', 'None'))}",
+            f"Tier: {_safe(state.get('tier', 'Unknown'))}",
+            f"Phase: {_safe(state.get('phase', 'Unknown'))}",
         ]
 
         # Sprint status
@@ -668,10 +699,11 @@ class Orchestrator:
                 ).fetchall()
 
                 task_summary = ", ".join(
-                    f"{t['task_name']} ({t['status']})" for t in tasks
+                    f"{_safe(t['task_name'])} ({_safe(t['status'])})" for t in tasks
                 )
                 lines.append(
-                    f"{sprint['sprint_id']} ({sprint['status']}): {task_summary or 'no tasks'}"
+                    f"{_safe(sprint['sprint_id'])} ({_safe(sprint['status'])}): "
+                    f"{task_summary or 'no tasks'}"
                 )
 
         # Unread mail count
@@ -687,11 +719,12 @@ class Orchestrator:
         Mail wins on discrepancies.
         """
         reconciled = []
+        issues = []
 
         with em_db(self.project) as conn:
             # Find tasks marked as running but with no recent mail
             running = conn.execute(
-                "SELECT task_id, task_name FROM task_state "
+                "SELECT * FROM task_state "
                 "WHERE project_id = ? AND status = 'active' "
                 "AND work_type = 'task'",
                 (self.project,),
@@ -700,27 +733,35 @@ class Orchestrator:
             for task in running:
                 # Check if there's a completion message in mail
                 completion = conn.execute(
-                    "SELECT content FROM mail_messages "
-                    "WHERE thread_id LIKE ? "
-                    "AND content LIKE '%DONE%' "
+                    "SELECT body FROM mail_messages "
+                    "WHERE project_id = ? AND task_id = ? "
+                    "AND body LIKE '%DONE%' "
                     "ORDER BY created_at DESC LIMIT 1",
-                    (f"%{task['task_id']}%",),
+                    (self.project, task["task_id"]),
                 ).fetchone()
 
                 if completion:
-                    conn.execute(
-                        "UPDATE task_state SET status = 'completed', "
-                        "completed_at = datetime('now') "
-                        "WHERE task_id = ? AND project_id = ?",
-                        (task["task_id"], self.project),
-                    )
-                    reconciled.append({
-                        "task_id": task["task_id"],
-                        "action": "marked_complete",
-                        "reason": "completion message found in mail",
-                    })
+                    verification = self._run_reconcile_verification(dict(task))
+                    if verification["passed"]:
+                        conn.execute(
+                            "UPDATE task_state SET status = 'completed', "
+                            "completed_at = datetime('now') "
+                            "WHERE task_id = ? AND project_id = ?",
+                            (task["task_id"], self.project),
+                        )
+                        reconciled.append({
+                            "task_id": task["task_id"],
+                            "action": "marked_complete",
+                            "reason": "completion message found in mail + verification passed",
+                        })
+                    else:
+                        issues.append({
+                            "task_id": task["task_id"],
+                            "action": "not_completed",
+                            "reason": verification["reason"],
+                        })
 
-        return {"reconciled": reconciled, "count": len(reconciled)}
+        return {"reconciled": reconciled, "issues": issues, "count": len(reconciled)}
 
     # ── Tier-Specific Flows ──
 
@@ -1089,15 +1130,23 @@ class Orchestrator:
                 ).fetchone()
 
                 if completion:
-                    update_task_status(
-                        self.project, task["task_id"], TaskStatus.COMPLETED
-                    )
-                    reconciled.append({
-                        "task_id": task["task_id"],
-                        "task_name": task["task_name"],
-                        "action": "marked_complete",
-                        "reason": "completion message found in mail",
-                    })
+                    verification = self._run_reconcile_verification(dict(task))
+                    if verification["passed"]:
+                        update_task_status(
+                            self.project, task["task_id"], TaskStatus.COMPLETED
+                        )
+                        reconciled.append({
+                            "task_id": task["task_id"],
+                            "task_name": task["task_name"],
+                            "action": "marked_complete",
+                            "reason": "completion message found in mail + verification passed",
+                        })
+                    else:
+                        issues.append({
+                            "task_id": task["task_id"],
+                            "task_name": task["task_name"],
+                            "issue": verification["reason"],
+                        })
                 elif failure:
                     update_task_status(
                         self.project, task["task_id"], TaskStatus.FAILED
@@ -1144,6 +1193,34 @@ class Orchestrator:
             "critical_unread": critical,
             "count": len(reconciled),
         }
+
+    def _sanitize_header(self, value: str) -> str:
+        """Sanitize mail header fields before context/message routing."""
+        return sanitize_content(str(value or ""), "manual").strip()
+
+    def _run_reconcile_verification(self, task: dict) -> dict:
+        """Run verification from stored task output before forced completion."""
+        raw_outputs = task.get("agent_outputs")
+        parsed_output: dict = {}
+        if isinstance(raw_outputs, str) and raw_outputs.strip():
+            try:
+                loaded = json.loads(raw_outputs)
+                if isinstance(loaded, dict):
+                    parsed_output = loaded
+            except json.JSONDecodeError:
+                pass
+
+        commands = self._extract_verification_commands(task, parsed_output)
+        if not commands:
+            return {
+                "passed": False,
+                "reason": "No verification commands available for reconciliation.",
+            }
+
+        verification = run_verification(commands, cwd=os.getcwd())
+        if verification.passed:
+            return {"passed": True, "reason": verification.summary}
+        return {"passed": False, "reason": verification.summary}
 
 
 # ── Sharpener + HITL Prompt Review (Phase 4, Item 9) ──

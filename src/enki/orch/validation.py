@@ -6,6 +6,8 @@ Dev never sees tests. Tests verify, don't drive.
 
 import json
 
+from enki.sanitization import sanitize_content
+
 
 def validate_agent_output(output: str) -> dict:
     """Validate that agent output matches expected JSON format.
@@ -270,6 +272,15 @@ def prepare_sprint_reviewer_context(
     """
     from enki.orch.task_graph import get_sprint_tasks
 
+    def _sanitize_nested(value):
+        if isinstance(value, dict):
+            return {k: _sanitize_nested(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [_sanitize_nested(v) for v in value]
+        if isinstance(value, str):
+            return sanitize_content(value, "manual")
+        return value
+
     tasks = get_sprint_tasks(project, sprint_id)
     completed_tasks = [t for t in tasks if t["status"] == "completed"]
 
@@ -281,27 +292,29 @@ def prepare_sprint_reviewer_context(
         if isinstance(files, str):
             import json as _json
             files = _json.loads(files)
-        all_files.update(files)
+        all_files.update(
+            sanitize_content(str(f), "manual") for f in files
+        )
 
         # Extract decisions from agent output
         outputs = task.get("agent_outputs")
         if outputs:
             try:
                 parsed = json.loads(outputs)
-                all_decisions.extend(parsed.get("decisions", []))
+                all_decisions.extend(_sanitize_nested(parsed.get("decisions", [])))
             except (json.JSONDecodeError, TypeError):
                 pass
 
     return {
-        "role": "SprintReviewer",
-        "project": project,
-        "sprint_id": sprint_id,
-        "review_type": "cross_task_consistency",
+        "role": sanitize_content("SprintReviewer", "manual"),
+        "project": sanitize_content(project, "manual"),
+        "sprint_id": sanitize_content(sprint_id, "manual"),
+        "review_type": sanitize_content("cross_task_consistency", "manual"),
         "completed_tasks": [
             {
-                "task_id": t["task_id"],
-                "task_name": t["task_name"],
-                "files": t.get("assigned_files", []),
+                "task_id": sanitize_content(str(t["task_id"]), "manual"),
+                "task_name": sanitize_content(str(t["task_name"]), "manual"),
+                "files": _sanitize_nested(t.get("assigned_files", [])),
             }
             for t in completed_tasks
         ],
