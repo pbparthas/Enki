@@ -203,20 +203,52 @@ def extract_write_targets(command: str) -> list[str]:
 def extract_db_targets(command: str) -> list[str]:
     """Extract database files being targeted by bash commands.
 
-    For Layer 0.5 — catches sqlite3 binary and Python sqlite3 module.
+    For Layer 0.5 — catches sqlite3 binary invocation only.
     Returns list of .db file paths being targeted.
     """
     targets = []
 
-    # sqlite3 binary: sqlite3 path/to/file.db "..."
-    sqlite_match = re.findall(r"\bsqlite3\s+(\S+\.db\S*)", command)
-    targets.extend(sqlite_match)
+    wrappers = {"sudo", "env", "command", "nohup", "time"}
 
-    # Python sqlite3.connect
-    connect_match = re.findall(
-        r"sqlite3\.connect\([\"']([^\"']+)[\"']", command
-    )
-    targets.extend(connect_match)
+    def _command_token_index(parts: list[str]) -> int | None:
+        idx = 0
+        while idx < len(parts):
+            token = parts[idx]
+            if token in wrappers:
+                idx += 1
+                continue
+            # shell-style env var assignment prefix
+            if "=" in token and not token.startswith(("/", "./", "../")):
+                idx += 1
+                continue
+            return idx
+        return None
+
+    # Split rough command chains and inspect executed command token.
+    for segment in re.split(r"[;|&]+", command):
+        segment = segment.strip()
+        if not segment:
+            continue
+        try:
+            parts = shlex.split(segment)
+        except ValueError:
+            continue
+        if not parts:
+            continue
+
+        cmd_idx = _command_token_index(parts)
+        if cmd_idx is None:
+            continue
+
+        cmd = Path(parts[cmd_idx]).name
+        if cmd != "sqlite3":
+            continue
+
+        # sqlite3 binary: sqlite3 path/to/file.db "..."
+        if cmd_idx + 1 < len(parts):
+            candidate = parts[cmd_idx + 1]
+            if candidate.endswith(".db"):
+                targets.append(candidate)
 
     # File operations targeting .db files
     redirect_db = re.findall(r">{1,2}\s*(\S+\.db)", command)

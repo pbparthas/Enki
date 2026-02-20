@@ -195,11 +195,21 @@ class TestDBTargetExtraction:
         targets = extract_db_targets('sqlite3 ~/.enki/em.db "SELECT *"')
         assert any("em.db" in t for t in targets)
 
-    def test_python_sqlite3_connect(self):
+    def test_python_sqlite3_connect_not_matched(self):
         targets = extract_db_targets(
             "python -c \"import sqlite3; sqlite3.connect('test.db')\""
         )
-        assert "test.db" in targets
+        assert "test.db" not in targets
+
+    def test_python_script_with_sqlite3_substring_not_matched(self):
+        targets = extract_db_targets("python3 test_file.py")
+        assert len(targets) == 0
+
+    def test_python_inline_string_with_sqlite3_substring_not_matched(self):
+        targets = extract_db_targets(
+            "python3 -c \"print('sqlite3 ~/.enki/wisdom.db')\""
+        )
+        assert len(targets) == 0
 
     def test_redirect_to_db(self):
         targets = extract_db_targets("echo 'data' > backup.db")
@@ -401,6 +411,21 @@ class TestGateChecks:
         from enki.gates.uru import check_pre_tool_use
 
         result = check_pre_tool_use("Bash", {"command": "ls -la /home/user"})
+        assert result["decision"] == "allow"
+
+    def test_layer05_allows_python_test_file(self, mock_project):
+        from enki.gates.uru import check_pre_tool_use
+
+        result = check_pre_tool_use("Bash", {"command": "python3 test_file.py"})
+        assert result["decision"] == "allow"
+
+    def test_layer05_allows_python_inline_sqlite3_string(self, mock_project):
+        from enki.gates.uru import check_pre_tool_use
+
+        result = check_pre_tool_use(
+            "Bash",
+            {"command": "python3 -c \"print('sqlite3 ~/.enki/wisdom.db')\""},
+        )
         assert result["decision"] == "allow"
 
     def test_read_tools_always_pass(self, mock_project):

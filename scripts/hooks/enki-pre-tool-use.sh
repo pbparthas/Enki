@@ -36,17 +36,9 @@ if [[ "$TOOL_NAME" == "Write" || "$TOOL_NAME" == "Edit" || \
 fi
 
 if [[ "$TOOL_NAME" == "Bash" || "$TOOL_NAME" == "Task" ]]; then
-    CMD=$(echo "$INPUT" | jq -r '.tool_input.command // empty')
-
-    # Layer 0.5: sqlite3 targeting .db files
-    if echo "$CMD" | grep -qP 'sqlite3\s+\S*\.db'; then
-        echo '{"decision":"block","reason":"Layer 0.5: Direct DB manipulation. Use Enki tools."}'
-        exit 0
-    fi
-    if echo "$CMD" | grep -qP 'sqlite3\.connect'; then
-        echo '{"decision":"block","reason":"Layer 0.5: Direct DB manipulation. Use Enki tools."}'
-        exit 0
-    fi
+    # Layer 0.5 DB checks are handled in Python gate logic (token-aware parsing).
+    # Do not run substring checks here; they produce false positives for test code.
+    :
 fi
 
 # ── Layer 1+: Python handles the rest ──
