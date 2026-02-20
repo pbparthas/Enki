@@ -57,9 +57,22 @@ from enki.orch.validation import validate_agent_output
 from enki.orch.bugs import file_bug, has_blocking_bugs
 from enki.orch.onboarding import detect_entry_point
 from enki.config import get_config
+from enki.sanitization import sanitize_mail_message
+from enki.verification import (
+    MAX_VERIFICATION_RETRIES,
+    format_verification_errors,
+    run_verification,
+)
+from enki.gates.test_approval import (
+    can_execute_tests,
+    mark_tests_written,
+    mark_validator_result,
+    validate_test_suite,
+)
 
 
 MAX_RETRIES = 3
+EXECUTION_AGENTS = {"dev", "qa", "devops"}
 
 
 class Orchestrator:
@@ -210,24 +223,46 @@ class Orchestrator:
                 "parsed": parsed,
             }
 
+        status = str(parsed.get("status", "DONE")).upper()
+        agent_role = str(parsed.get("agent", "")).lower()
+        task = get_task(self.project, task_id) or {}
+
+        if agent_role == "qa":
+            qa_gate = self._handle_qa_test_approval(task_id, parsed, task)
+            if qa_gate:
+                return qa_gate
+
+        if status == "DONE" and agent_role in EXECUTION_AGENTS:
+            verification_outcome = self._handle_agent_completion(
+                agent_role=agent_role,
+                agent_output=parsed,
+                task=task,
+                task_id=task_id,
+            )
+            if verification_outcome["status"] != "pass":
+                return verification_outcome
+
         # Route mail messages
         messages_routed = 0
         for msg in parsed.get("messages", []):
             if msg.get("to") and msg.get("content"):
+                sanitized_msg = sanitize_mail_message(msg)
                 thread_id = create_thread(self.project, "agent_output")
                 send(
                     project=self.project,
                     thread_id=thread_id,
                     from_agent=parsed.get("agent", "Unknown"),
-                    to_agent=msg["to"],
-                    body=msg["content"],
-                    subject=msg.get("subject", f"From {parsed.get('agent', 'Unknown')}"),
-                    importance=msg.get("importance", "normal"),
+                    to_agent=sanitized_msg["to"],
+                    body=sanitized_msg["content"],
+                    subject=sanitized_msg.get(
+                        "subject",
+                        f"From {parsed.get('agent', 'Unknown')}",
+                    ),
+                    importance=sanitized_msg.get("importance", "normal"),
                 )
                 messages_routed += 1
 
         # Update task status
-        status = parsed.get("status", "DONE")
         if status == "DONE":
             update_task_status(self.project, task_id, TaskStatus.COMPLETED)
         elif status == "BLOCKED":
@@ -269,6 +304,112 @@ class Orchestrator:
             update_task_status(self.project, task_id, TaskStatus.HITL)
         else:
             update_task_status(self.project, task_id, TaskStatus.FAILED)
+
+    def _handle_agent_completion(
+        self,
+        agent_role: str,
+        agent_output: dict,
+        task: dict,
+        task_id: str,
+    ) -> dict:
+        """Objective verification before accepting DONE from execution agents."""
+        verification_commands = self._extract_verification_commands(task, agent_output)
+        verification = run_verification(verification_commands, cwd=os.getcwd())
+        if verification.passed:
+            return {
+                "status": "pass",
+                "summary": verification.summary,
+                "results": verification.results,
+            }
+
+        attempt = increment_retry(self.project, task_id)
+        error_context = format_verification_errors(verification)
+        if attempt >= MAX_VERIFICATION_RETRIES:
+            update_task_status(self.project, task_id, TaskStatus.HITL)
+            self.escalate_to_human(
+                task_id,
+                (
+                    f"Verification failed after {MAX_VERIFICATION_RETRIES} attempts.\n\n"
+                    f"{error_context}"
+                ),
+            )
+            return {
+                "status": "hitl_escalation",
+                "task_id": task_id,
+                "attempt": attempt,
+                "verification_summary": verification.summary,
+                "error_context": error_context,
+            }
+
+        return {
+            "status": "verification_failed",
+            "task_id": task_id,
+            "attempt": attempt,
+            "max_retries": MAX_VERIFICATION_RETRIES,
+            "retry_prompt": error_context,
+            "verification_summary": verification.summary,
+            "results": verification.results,
+        }
+
+    def _extract_verification_commands(self, task: dict, agent_output: dict) -> list[str]:
+        """Merge architect task commands and agent-reported commands."""
+        combined: list[str] = []
+        sources = [
+            task.get("verification_commands", []) if isinstance(task, dict) else [],
+            agent_output.get("verification_commands", []),
+        ]
+        for source in sources:
+            if not isinstance(source, list):
+                continue
+            for command in source:
+                if isinstance(command, str) and command.strip() and command not in combined:
+                    combined.append(command.strip())
+        return combined
+
+    def _handle_qa_test_approval(self, task_id: str, parsed: dict, task: dict) -> dict | None:
+        """Run HITL test-approval pipeline checks for QA outputs."""
+        if self._is_test_authoring_update(parsed):
+            mark_tests_written(task_id, project=self.project, written=True)
+            spec_path = task.get("spec_path", "") if isinstance(task, dict) else ""
+            test_dir = task.get("test_dir", "") if isinstance(task, dict) else ""
+            if spec_path and test_dir:
+                validator = validate_test_suite(task_id, spec_path=spec_path, test_dir=test_dir)
+                mark_validator_result(task_id, validator.issues, project=self.project)
+            else:
+                mark_validator_result(
+                    task_id,
+                    [{
+                        "severity": "error",
+                        "description": "Validator missing spec_path/test_dir in task metadata.",
+                        "file": "",
+                        "tc_id": "",
+                    }],
+                    project=self.project,
+                )
+
+        tests_run = int(parsed.get("tests_run", 0) or 0)
+        if tests_run > 0:
+            gate = can_execute_tests(task_id, project=self.project)
+            if gate.blocked:
+                attempt = increment_retry(self.project, task_id)
+                return {
+                    "status": "test_execution_blocked",
+                    "task_id": task_id,
+                    "attempt": attempt,
+                    "reason": gate.reason,
+                }
+        return None
+
+    def _is_test_authoring_update(self, parsed: dict) -> bool:
+        """Best-effort detection: QA created/modified test artifacts."""
+        touched = list(parsed.get("files_created", [])) + list(parsed.get("files_modified", []))
+        if not touched:
+            return False
+        for path in touched:
+            lowered = str(path).lower()
+            if "test" in lowered:
+                return True
+        return False
 
     # ── Task DAG & Execution ──
 

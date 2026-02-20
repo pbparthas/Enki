@@ -30,6 +30,11 @@ LAYER0_PROTECTED = {
     "uru.py",
     "layer0.py",
     "abzu.py",
+    "sanitization.py",
+    "sanitization_patterns.json",
+    "verification.py",
+    "hook_versioning.py",
+    "test_approval.py",
     # Identity
     "PERSONA.md",
     # Shared prompt templates

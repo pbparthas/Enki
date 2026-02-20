@@ -1,4 +1,5 @@
 #!/bin/bash
+# HOOK_VERSION=v4.0.1
 # hooks/post-tool-use.sh — Nudges + logging (non-blocking)
 set -euo pipefail
 

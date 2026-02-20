@@ -72,6 +72,26 @@ def cmd_setup(args):
     )
 
 
+def cmd_hooks_deploy(args):
+    """Deploy hook scripts to ~/.claude/hooks/."""
+    from pathlib import Path
+
+    from enki.hook_versioning import deploy_hooks
+
+    source_dir = args.source_dir
+    if not source_dir:
+        source_dir = str(
+            Path(__file__).resolve().parent.parent.parent / "scripts" / "hooks"
+        )
+    deployed = deploy_hooks(source_dir=source_dir, target_dir=args.target_dir)
+    if deployed:
+        print(f"Deployed {len(deployed)} hooks to {args.target_dir}:")
+        for hook in deployed:
+            print(f"  - {hook}")
+    else:
+        print(f"No expected hooks found in source directory: {source_dir}")
+
+
 def cmd_session_end(args):
     """Finalize current session: extract beads, run feedback loop, archive."""
     from pathlib import Path
@@ -502,6 +522,25 @@ def main():
     )
     setup_parser.set_defaults(func=cmd_setup)
 
+    # hooks (parent with subcommands)
+    hooks_parser = subparsers.add_parser(
+        "hooks", help="Hook lifecycle commands"
+    )
+    hooks_sub = hooks_parser.add_subparsers(dest="hooks_command")
+
+    hooks_deploy = hooks_sub.add_parser("deploy", help="Deploy Enki hooks")
+    hooks_deploy.add_argument(
+        "--source-dir",
+        default=None,
+        help="Source hooks directory (default: repo scripts/hooks)",
+    )
+    hooks_deploy.add_argument(
+        "--target-dir",
+        default=str((ENKI_ROOT.parent / ".claude" / "hooks").expanduser()),
+        help="Target hooks directory (default: ~/.claude/hooks)",
+    )
+    hooks_deploy.set_defaults(func=cmd_hooks_deploy)
+
     # session (parent with subcommands)
     session_parser = subparsers.add_parser(
         "session", help="Session lifecycle commands"
@@ -671,6 +710,8 @@ def main():
             digest_parser.print_help()
         elif args.command == "session":
             session_parser.print_help()
+        elif args.command == "hooks":
+            hooks_parser.print_help()
         sys.exit(1)
 
     args.func(args)

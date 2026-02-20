@@ -86,6 +86,30 @@ def em_db(project: str):
     return connect(path)
 
 
+def get_wisdom_db() -> sqlite3.Connection:
+    """Return a configured connection to wisdom.db.
+
+    Caller is responsible for closing. For context-managed use, prefer wisdom_db().
+    """
+    path = _db_path("wisdom.db")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(path))
+    _configure(conn)
+    return conn
+
+
+def get_abzu_db() -> sqlite3.Connection:
+    """Return a configured connection to abzu.db.
+
+    Caller is responsible for closing. For context-managed use, prefer abzu_db().
+    """
+    path = _db_path("abzu.db")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(path))
+    _configure(conn)
+    return conn
+
+
 def init_all():
     """Create all databases and tables. Idempotent."""
     ENKI_ROOT.mkdir(parents=True, exist_ok=True)
@@ -96,7 +120,7 @@ def init_all():
 
     with wisdom_db() as conn:
         create_memory(conn, "wisdom")
-        # Add synthesis_id column if not present (Item 16 migration)
+        # v3 migration: add synthesis_id column if not present
         try:
             conn.execute(
                 "ALTER TABLE beads ADD COLUMN synthesis_id TEXT DEFAULT NULL"

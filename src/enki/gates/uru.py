@@ -16,6 +16,7 @@ import json
 import re
 import sys
 import uuid
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -26,6 +27,7 @@ from enki.gates.layer0 import (
     is_exempt,
     is_layer0_protected,
 )
+from enki.hook_versioning import check_hook_versions, format_hook_warning
 
 MUTATION_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit", "Task"}
 
@@ -40,13 +42,114 @@ DECISION_PATTERNS = [
     re.compile(r"\b(?:trade-?off|instead of|rather than|over)\b", re.I),
 ]
 
+REASONING_BLOCK_PATTERNS = [
+    re.compile(r"\b(?:disable|weaken|bypass)\s+(?:uru|layer\s*0|enforcement)\b", re.I),
+    re.compile(r"\bmodify\s+(?:enforcement|gate|guard)\b", re.I),
+]
 
-def check_pre_tool_use(tool_name: str, tool_input: dict) -> dict:
+
+@dataclass
+class InspectionResult:
+    blocked: bool
+    reason: str | None = None
+    pattern: str | None = None
+
+
+def inspect_reasoning(reasoning_text: str | None) -> InspectionResult:
+    """Inspect reasoning text for direct enforcement-bypass intent."""
+    if not reasoning_text:
+        return InspectionResult(blocked=False)
+
+    for pattern in REASONING_BLOCK_PATTERNS:
+        if pattern.search(reasoning_text):
+            return InspectionResult(
+                blocked=True,
+                reason="Suspicious reasoning indicates enforcement bypass intent.",
+                pattern="reasoning_bypass",
+            )
+
+    return InspectionResult(blocked=False)
+
+
+def inspect_tool_input(tool_name: str, tool_input: dict) -> InspectionResult:
+    """Inspect tool payload for enforcement-targeting behavior."""
+    path = str(tool_input.get("file_path") or tool_input.get("path") or "")
+    path_lower = path.lower()
+    command = str(tool_input.get("command") or "")
+    command_lower = command.lower()
+
+    if tool_name in MUTATION_TOOLS:
+        if path and is_layer0_protected(path):
+            return InspectionResult(
+                blocked=True,
+                reason=f"Layer 0: Protected file {Path(path).name}",
+                pattern="enforcement_file_edit",
+            )
+        if ".claude/hooks/" in path_lower:
+            return InspectionResult(
+                blocked=True,
+                reason="Layer 0: Attempting to modify hook scripts in .claude/hooks.",
+                pattern="hook_modification",
+            )
+        if "sanitization" in path_lower:
+            return InspectionResult(
+                blocked=True,
+                reason="Layer 0: Attempting to modify sanitization module/rules.",
+                pattern="sanitization_bypass",
+            )
+
+    if tool_name == "Bash":
+        sensitive_targets = (
+            ".claude/hooks/",
+            "uru.py",
+            "sanitization",
+            "verification.py",
+            "layer0.py",
+        )
+        if re.search(r"\b(rm|chmod|mv|sed)\b", command_lower):
+            if any(target in command_lower for target in sensitive_targets):
+                return InspectionResult(
+                    blocked=True,
+                    reason="Suspicious bash command targets enforcement infrastructure.",
+                    pattern="suspicious_bash",
+                )
+
+    return InspectionResult(blocked=False)
+
+
+def check_pre_tool_use(
+    tool_name: str,
+    tool_input: dict,
+    reasoning_text: str = "",
+) -> dict:
     """Main gate check for pre-tool-use hook.
 
     Returns: {"decision": "allow"} or {"decision": "block", "reason": "..."}
     """
     try:
+        reasoning_result = inspect_reasoning(reasoning_text)
+        if reasoning_result.blocked:
+            _log_enforcement(
+                "pre-tool-use", "reasoning", tool_name,
+                None, "block", reasoning_result.reason
+            )
+            return {
+                "decision": "block",
+                "reason": reasoning_result.reason,
+            }
+
+        tool_input_result = inspect_tool_input(tool_name, tool_input)
+        if tool_input_result.blocked:
+            target = str(tool_input.get("file_path") or tool_input.get("path") or tool_input.get("command") or "")
+            _log_enforcement(
+                "pre-tool-use", "tool-input", tool_name,
+                target, "block", tool_input_result.reason
+            )
+            return {
+                "decision": "block",
+                "reason": tool_input_result.reason,
+            }
+
         if tool_name not in MUTATION_TOOLS and tool_name != "Bash":
             return {"decision": "allow"}
         if tool_name == "Task":
@@ -548,6 +651,22 @@ def main():
         session_id = hook_input.get("session_id", str(uuid.uuid4()))
         init_session(session_id)
         result = {"decision": "allow"}
+        version_result = check_hook_versions()
+        if not version_result.all_current:
+            warning = format_hook_warning(version_result)
+            _log_enforcement(
+                "session-start",
+                "hook-version",
+                None,
+                None,
+                "warn",
+                warning,
+            )
+            result["warning"] = warning
+            result["hook_version"] = {
+                "mismatches": version_result.mismatches,
+                "missing": version_result.missing,
+            }
     elif args.hook == "session-end":
         session_id = _get_session_id()
         result = end_session(session_id)

@@ -46,6 +46,7 @@ enki = [
     "prompts/**/*.md",
     "scripts/hooks/enki-*.sh",
     "templates/**",
+    "sanitization_patterns.json",
 ]
 
 [tool.pytest.ini_options]

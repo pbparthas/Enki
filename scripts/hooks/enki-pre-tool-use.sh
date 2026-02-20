@@ -1,4 +1,5 @@
 #!/bin/bash
+# HOOK_VERSION=v4.0.1
 # hooks/pre-tool-use.sh — Most critical hook
 # Layer 0 (bash fast-path) → Layer 0.5 → Layer 1 (Python)
 set -euo pipefail

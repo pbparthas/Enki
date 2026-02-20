@@ -1,4 +1,5 @@
 #!/bin/bash
+# HOOK_VERSION=v4.0.1
 # hooks/session-start.sh — Initialize Uru + Abzu, inject full context
 set -euo pipefail
 

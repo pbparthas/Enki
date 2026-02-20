@@ -85,6 +85,20 @@ def create_tables(conn) -> None:
     )
 
     conn.execute("""
+        CREATE TABLE IF NOT EXISTS test_approvals (
+            task_id TEXT PRIMARY KEY,
+            project TEXT NOT NULL,
+            tests_written INTEGER DEFAULT 0,
+            validator_checked INTEGER DEFAULT 0,
+            validator_issues TEXT,
+            hitl_approved INTEGER DEFAULT 0,
+            hitl_approved_at TIMESTAMP,
+            hitl_notes TEXT,
+            FOREIGN KEY (task_id) REFERENCES task_state(task_id)
+        )
+    """)
+
+    conn.execute("""
         CREATE TABLE IF NOT EXISTS sprint_state (
             sprint_id TEXT PRIMARY KEY,
             project_id TEXT NOT NULL,

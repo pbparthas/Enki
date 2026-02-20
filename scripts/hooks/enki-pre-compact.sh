@@ -1,4 +1,5 @@
 #!/bin/bash
+# HOOK_VERSION=v4.0.1
 # hooks/pre-compact.sh — Save enforcement state + Abzu pre-compact summary
 set -euo pipefail
 

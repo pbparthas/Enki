@@ -1,0 +1,16 @@
+{
+  "patterns": [
+    {"regex": "(?i)ignore\\s+(all\\s+)?previous\\s+instructions", "action": "remove_line"},
+    {"regex": "(?i)ignore\\s+(all\\s+)?instructions", "action": "remove_line"},
+    {"regex": "(?i)you\\s+are\\s+now\\s+", "action": "remove_line"},
+    {"regex": "(?i)new\\s+instructions?:", "action": "remove_line"},
+    {"regex": "(?i)system\\s*prompt:", "action": "remove_line"},
+    {"regex": "(?i)IMPORTANT:\\s*override", "action": "remove_line"},
+    {"regex": "(?i)<\\s*system\\s*>", "action": "remove_line"},
+    {"regex": "(?i)<\\s*/\\s*system\\s*>", "action": "remove_line"},
+    {"regex": "(?i)disregard\\s+(all\\s+)?(prior|previous|above)", "action": "remove_line"},
+    {"regex": "(?i)forget\\s+(all\\s+)?(prior|previous|above)\\s+instructions", "action": "remove_line"},
+    {"regex": "(?i)override\\s+(all\\s+)?safety", "action": "remove_line"},
+    {"regex": "(?i)bypass\\s+(all\\s+)?(security|enforcement|gates|checks)", "action": "remove_line"}
+  ]
+}

@@ -10,6 +10,7 @@ from enum import Enum
 from pathlib import Path
 
 from enki.db import ENKI_ROOT
+from enki.sanitization import sanitize_content, sanitize_mail_message, wrap_context
 
 PROMPTS_DIR = ENKI_ROOT / "prompts"
 
@@ -203,35 +204,56 @@ def assemble_prompt(
 
     # 4. Project context (dynamic — injected at runtime)
     if claude_md:
+        safe_claude_md = sanitize_content(claude_md, "onboarding")
         parts.append("\n---\n## PROJECT CONTEXT (CLAUDE.md)\n")
-        parts.append(claude_md)
+        parts.append(wrap_context(safe_claude_md, "code_knowledge"))
 
     if codebase_profile:
-        parts.append("\n---\n## CODEBASE PROFILE\n```json\n")
-        parts.append(json.dumps(codebase_profile, indent=2))
-        parts.append("\n```")
+        safe_profile = sanitize_content(
+            json.dumps(codebase_profile, indent=2),
+            "code_scan",
+        )
+        parts.append("\n---\n## CODEBASE PROFILE\n")
+        parts.append(wrap_context(safe_profile, "codebase_profile"))
 
     if historical_context:
+        historical_lines = []
         parts.append("\n---\n## HISTORICAL CONTEXT\n")
         for bead in historical_context:
-            parts.append(
+            historical_lines.append(
                 f"- [{bead.get('category', 'unknown')}] "
-                f"{bead.get('content', '')[:200]}"
+                f"{sanitize_content(bead.get('content', '')[:200], 'em_distill')}"
             )
+        parts.append(wrap_context("\n".join(historical_lines), "recalled_knowledge"))
 
     if task_context:
+        sanitized_context = _sanitize_task_context(task_context)
         parts.append("\n---\n## TASK ASSIGNMENT\n")
-        parts.append(json.dumps(task_context, indent=2))
+        parts.append(json.dumps(sanitized_context, indent=2))
 
     if filtered_mail:
+        mail_lines = []
         parts.append("\n---\n## RELEVANT MAIL\n")
         for msg in filtered_mail[-10:]:  # Last 10 messages
-            parts.append(
+            sanitized_msg = sanitize_mail_message(msg)
+            mail_lines.append(
                 f"**{msg.get('from_agent', '?')} → {msg.get('to_agent', '?')}**: "
-                f"{msg.get('body', '')[:300]}"
+                f"{sanitized_msg.get('body', sanitized_msg.get('content', ''))[:300]}"
             )
+        parts.append(wrap_context("\n".join(mail_lines), "mail_message"))
 
     return "\n".join(parts)
+
+
+def _sanitize_task_context(value):
+    """Recursively sanitize text values in task context payloads."""
+    if isinstance(value, dict):
+        return {k: _sanitize_task_context(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_task_context(v) for v in value]
+    if isinstance(value, str):
+        return sanitize_content(value, "manual")
+    return value
 
 
 def should_spawn(role: AgentRole, context: dict) -> bool:

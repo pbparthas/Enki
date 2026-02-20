@@ -1,7 +1,7 @@
-"""MCP server exposing Enki v3 tools.
+"""MCP server exposing Enki tools.
 
+v4: Updated memory tools for note model. enki_restore added.
 v3: Rewired to use Abzu (memory), Uru (gates), and EM (orchestration).
-Down from 1591 lines / 35 tools to clean dispatch against v3 modules.
 """
 
 import json
@@ -25,7 +25,7 @@ server = Server("enki")
 
 @server.list_tools()
 async def list_tools() -> list[Tool]:
-    """List available Enki v3 tools."""
+    """List available Enki tools."""
     return [
         # ── Memory (Abzu) ──
         Tool(
@@ -37,7 +37,7 @@ async def list_tools() -> list[Tool]:
                     "content": {"type": "string", "description": "The knowledge to remember"},
                     "category": {
                         "type": "string",
-                        "enum": ["decision", "learning", "pattern", "fix", "preference"],
+                        "enum": ["decision", "learning", "pattern", "fix", "preference", "code_knowledge"],
                         "description": "Category of knowledge",
                     },
                     "project": {"type": "string", "description": "Optional project ID"},
@@ -68,19 +68,29 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="enki_star",
-            description="Star a bead — starred beads never decay",
+            description="Star a note — starred notes never decay",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "bead_id": {"type": "string", "description": "Bead ID to star"},
+                    "bead_id": {"type": "string", "description": "Note or bead ID to star"},
                 },
                 "required": ["bead_id"],
             },
         ),
         Tool(
             name="enki_status",
-            description="Get memory system health: bead counts, staging depth, decay stats",
+            description="Get memory system health: note counts, staging depth, decay stats",
             inputSchema={"type": "object", "properties": {}},
+        ),
+        Tool(
+            name="enki_restore",
+            description="Recover session context after compaction. Returns persona + enforcement state + recent knowledge.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "project": {"type": "string", "description": "Optional project ID"},
+                },
+            },
         ),
 
         # ── Gates (Uru) ──
@@ -224,7 +234,8 @@ def _handle_recall(args: dict) -> str:
     lines = [f"Found {len(results)} results:\n"]
     for i, r in enumerate(results, 1):
         lines.append(f"{i}. [{r.get('category', '?')}] {r.get('summary') or r.get('content', '')[:150]}")
-        lines.append(f"   ID: {r.get('id', '?')}\n")
+        note_id = r.get('note_id') or r.get('id', '?')
+        lines.append(f"   ID: {note_id}\n")
     return "\n".join(lines)
 
 
@@ -237,6 +248,12 @@ def _handle_star(args: dict) -> str:
 def _handle_status(args: dict) -> str:
     from .mcp.memory_tools import enki_status
     result = enki_status()
+    return json.dumps(result, indent=2)
+
+
+def _handle_restore(args: dict) -> str:
+    from .mcp.memory_tools import enki_restore
+    result = enki_restore(project=args.get("project"))
     return json.dumps(result, indent=2)
 
 
@@ -302,6 +319,7 @@ TOOL_HANDLERS = {
     "enki_recall": _handle_recall,
     "enki_star": _handle_star,
     "enki_status": _handle_status,
+    "enki_restore": _handle_restore,
     "enki_goal": _handle_goal,
     "enki_phase": _handle_phase,
     "enki_triage": _handle_triage,

@@ -1,4 +1,5 @@
 #!/bin/bash
+# HOOK_VERSION=v4.0.1
 # hooks/session-end.sh — Finalize Uru + Abzu, generate proposals
 set -euo pipefail
 
