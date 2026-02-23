@@ -636,7 +636,8 @@ def main():
     parser.add_argument("--input", default="{}")
     args = parser.parse_args()
 
-    hook_input = json.loads(sys.stdin.read()) if not sys.stdin.isatty() else {}
+    raw = sys.stdin.read().strip() if not sys.stdin.isatty() else ""
+    hook_input = json.loads(raw) if raw else {}
     tool_name = args.tool or hook_input.get("tool_name", "")
     tool_input = (
         json.loads(args.input) if args.input != "{}" else hook_input.get("tool_input", {})
