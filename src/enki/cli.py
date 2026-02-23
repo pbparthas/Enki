@@ -454,6 +454,36 @@ def cmd_rejections_override(args):
         print(f"Rejection #{args.rejection_id} not found.")
 
 
+def cmd_batch_run(args):
+    """Run batch enrichment: enrich raw candidates, then generate links."""
+    from enki.memory.enrichment import enrich_raw_candidates, generate_links_batch
+
+    print("Phase 1: Enriching raw candidates...")
+    enrich = enrich_raw_candidates(limit=args.limit)
+    print(f"  Processed: {enrich['processed']}")
+    print(f"  Failed: {enrich['failed']}")
+    if enrich["errors"]:
+        for e in enrich["errors"][:5]:
+            print(f"  Error: {e}")
+
+    if args.enrich_only:
+        return
+
+    print("\nPhase 2: Generating links...")
+    links = generate_links_batch(limit=args.limit)
+    print(f"  Processed: {links['processed']}")
+    print(f"  Links created: {links['links_created']}")
+    if links["errors"]:
+        for e in links["errors"][:5]:
+            print(f"  Error: {e}")
+
+    print(f"\n{'─' * 40}")
+    total_processed = enrich["processed"] + links["processed"]
+    total_errors = enrich["failed"] + len(links.get("errors", []))
+    print(f"Batch complete: {total_processed} items, "
+          f"{links['links_created']} links, {total_errors} errors")
+
+
 def cmd_review(args):
     """Generate Gemini review package."""
     from enki.memory.gemini import generate_review_package
@@ -691,6 +721,25 @@ def main():
     )
     rej_override.set_defaults(func=cmd_rejections_override)
 
+    # batch (parent with subcommands)
+    batch_parser = subparsers.add_parser(
+        "batch", help="Batch enrichment operations"
+    )
+    batch_sub = batch_parser.add_subparsers(dest="batch_command")
+
+    batch_run = batch_sub.add_parser(
+        "run", help="Enrich raw candidates and generate links"
+    )
+    batch_run.add_argument(
+        "--limit", "-n", type=int, default=50,
+        help="Max candidates to process per phase (default: 50)",
+    )
+    batch_run.add_argument(
+        "--enrich-only", action="store_true",
+        help="Only enrich, skip link generation",
+    )
+    batch_run.set_defaults(func=cmd_batch_run)
+
     # review
     review_parser = subparsers.add_parser(
         "review", help="Generate Gemini review package"
@@ -712,6 +761,8 @@ def main():
             session_parser.print_help()
         elif args.command == "hooks":
             hooks_parser.print_help()
+        elif args.command == "batch":
+            batch_parser.print_help()
         sys.exit(1)
 
     args.func(args)

@@ -86,7 +86,7 @@ def _generate_json(prompt: str, model: str = DEFAULT_MODEL) -> Any:
                     f"{prompt}\n\n"
                     "IMPORTANT: Your response must be valid JSON only. "
                     "No markdown, no explanation, no text before or after the JSON. "
-                    "Start with {{ or [."
+                    "Start with { or [."
                 )
             raw = _generate(prompt, model)
             return _parse_json(raw)
@@ -129,26 +129,23 @@ def construct_note(content: str, category: str) -> dict:
 
     Returns:
         {
-            "keywords": "comma,separated,keywords",
+            "keywords": ["keyword1", "keyword2", ...],
             "context_description": "Brief description of when this note is useful",
-            "tags": "comma,separated,tags",
+            "tags": ["tag1", "tag2", ...],
             "summary": "One-line summary"
         }
     """
     prompt = f"""Analyze this {category} note and extract structured metadata.
 
-Note content:
----
-{content}
----
+Content: {content[:500]}
 
-Return a JSON object with exactly these fields:
-- "keywords": comma-separated technical keywords (3-8 keywords)
+Respond with ONLY a JSON object containing:
+- "keywords": array of 3-8 technical keywords
 - "context_description": one sentence describing when this knowledge is useful
-- "tags": comma-separated categorization tags (2-5 tags)
-- "summary": one-line summary (max 80 chars)
+- "tags": array of 2-5 categorization tags
+- "summary": one sentence summary
 
-JSON only, no other text:"""
+JSON:"""
 
     return _generate_json(prompt)
 
@@ -180,32 +177,23 @@ def classify_links(
             f"Content: {info}"
         )
 
-    prompt = f"""Given a new {source_category} note and a list of existing notes,
-determine which existing notes should be linked and what relationship type.
+    cand_text = " | ".join(
+        f"ID={c['note_id']} Content: {_get_candidate_content(c)[:100]}"
+        for c in candidates[:5]
+    )
 
-New note:
----
-{source_content}
----
+    prompt = f"""Determine which existing notes should be linked to a new note.
 
-Existing notes:
-{chr(10).join(candidate_summaries)}
+New note ({source_category}): {source_content[:300]}
 
-Valid relationship types:
-- relates_to: general topical relationship
-- supersedes: new note replaces/updates the target
-- contradicts: new note conflicts with target
-- extends: new note adds detail to target
-- imports: new note uses concepts from target
-- uses: code/implementation relationship
-- implements: new note implements a decision/pattern from target
+Existing notes: {cand_text}
 
-Return a JSON array of links to create. Only include notes with a meaningful relationship.
-Each element: {{"target_id": "...", "relationship": "relates_to|supersedes|contradicts|extends|imports|uses|implements"}}
+Valid relationships: relates_to, supersedes, contradicts, extends, imports, uses, implements
 
-If no links should be created, return an empty array: []
+Respond with ONLY a JSON array of links. Each element has "target_id" and "relationship".
+If no links, return [].
 
-JSON only:"""
+JSON:"""
 
     result = _generate_json(prompt)
     if not isinstance(result, list):
@@ -275,27 +263,21 @@ def check_evolution(
         Dict with proposed changes, or None if no evolution needed.
         {"proposed_context": "...", "proposed_keywords": "...", "proposed_tags": "..."}
     """
-    prompt = f"""Compare these two notes and determine if the existing note's metadata
-should be updated based on the new note's information.
+    prompt = f"""Compare two notes. Should the existing note's metadata be updated based on the new note?
 
-New note ({new_category}):
-Content: {new_content}
-Keywords: {new_keywords or 'none'}
+New note ({new_category}): {new_content[:300]} Keywords: {new_keywords or 'none'}
 
-Existing note ({target_category}):
-Content: {target_content}
-Keywords: {target_keywords or 'none'}
+Existing note ({target_category}): {target_content[:300]} Keywords: {target_keywords or 'none'}
 
-Rules:
-- The content field NEVER changes
-- Only context_description, keywords, and tags can be updated
-- Only propose changes if the new note adds meaningful context
+Rules: content never changes. Only keywords, context, and tags can be updated.
 
-Return a JSON object:
-- If evolution needed: {{"should_update": true, "proposed_keywords": "merged,keywords", "proposed_context": "updated context description", "proposed_tags": "updated,tags"}}
-- If no evolution needed: {{"should_update": false}}
+Respond with ONLY a JSON object containing:
+- "should_update": true or false
+- "proposed_keywords": array of merged keywords (only if should_update is true)
+- "proposed_context": updated context sentence (only if should_update is true)
+- "proposed_tags": array of updated tags (only if should_update is true)
 
-JSON only:"""
+JSON:"""
 
     result = _generate_json(prompt)
     if not isinstance(result, dict) or not result.get("should_update"):
@@ -327,25 +309,21 @@ def extract_code_knowledge(file_content: str, file_path: str) -> list[dict]:
         List of extractable items:
         [{"content": "...", "category": "code_knowledge", "keywords": "...", "summary": "..."}]
     """
-    prompt = f"""Analyze this source file and extract important code knowledge.
+    prompt = f"""Extract important code knowledge from this file.
 
 File: {file_path}
----
-{file_content[:4000]}
----
+{file_content[:3000]}
 
-Extract items like:
-- Key architectural decisions visible in the code
-- Important patterns or conventions used
-- Non-obvious design choices that future developers should know
-- Critical configuration or setup requirements
+Extract: architectural decisions, patterns, non-obvious design choices, critical config.
 
-Return a JSON array of extracted items.
-Each element: {{"content": "description of the knowledge", "keywords": "relevant,keywords", "summary": "one-line summary"}}
+Respond with ONLY a JSON array. Each element has:
+- "content": description of the knowledge
+- "keywords": array of relevant keywords
+- "summary": one sentence summary
 
-If nothing notable, return an empty array: []
+If nothing notable, return [].
 
-JSON only:"""
+JSON:"""
 
     result = _generate_json(prompt)
     if not isinstance(result, list):
@@ -381,31 +359,19 @@ def extract_from_transcript(transcript_chunk: str, project: str = None) -> list[
         [{"content": "...", "category": "decision|learning|pattern|fix", "keywords": "...", "summary": "..."}]
     """
     project_ctx = f" for project '{project}'" if project else ""
-    prompt = f"""Analyze this conversation transcript{project_ctx} and extract
-noteworthy items that should be remembered for future sessions.
+    prompt = f"""Extract noteworthy items from this conversation transcript{project_ctx}. Only extract decisions, learnings, patterns, and fixes. Skip routine operations.
 
-Transcript:
----
-{transcript_chunk[:4000]}
----
+Transcript: {transcript_chunk[:3000]}
 
-Extract items like:
-- Decisions made (category: "decision")
-- Things learned (category: "learning")
-- Patterns identified (category: "pattern")
-- Bug fixes and their root causes (category: "fix")
+Respond with ONLY a JSON array. Each element has:
+- "content": what was decided or learned
+- "category": one of "decision", "learning", "pattern", "fix"
+- "keywords": array of relevant keywords
+- "summary": one sentence summary
 
-Do NOT extract:
-- Routine operations (file reads, simple edits)
-- Temporary context (current task status)
-- Already well-known information
+If nothing noteworthy, return [].
 
-Return a JSON array of extracted items.
-Each element: {{"content": "what was decided/learned/found", "category": "decision|learning|pattern|fix", "keywords": "relevant,keywords", "summary": "one-line summary"}}
-
-If nothing noteworthy, return an empty array: []
-
-JSON only:"""
+JSON:"""
 
     result = _generate_json(prompt)
     if not isinstance(result, list):
