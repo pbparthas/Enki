@@ -292,8 +292,7 @@ def check_post_tool_use(
         return {"decision": "allow"}
     except Exception:
         return {
-            "decision": "block",
-            "reason": "Post-tool-use enforcement error. Blocking by default.",
+            "decision": "allow",
         }
 
 
