@@ -15,6 +15,7 @@ import shlex
 from pathlib import Path
 
 ENKI_ROOT = Path.home() / ".enki"
+REPO_ROOT = Path(__file__).resolve().parents[3]
 
 # Layer 0 PROTECTED files — listed by basename.
 # If a file's basename is here, it cannot be written by CC. Period.
@@ -35,6 +36,8 @@ LAYER0_PROTECTED = {
     "verification.py",
     "hook_versioning.py",
     "test_approval.py",
+    "gemini.py",
+    "gemini_review.py",
     # Identity
     "PERSONA.md",
     # Shared prompt templates
@@ -60,6 +63,7 @@ LAYER0_PROTECTED = {
 LAYER0_PROTECTED_PATHS = [
     ENKI_ROOT / "hooks",
     ENKI_ROOT / "prompts",
+    REPO_ROOT / "scripts" / "hooks",
 ]
 
 

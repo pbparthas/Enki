@@ -9,6 +9,7 @@ No API keys stored. No external calls from codebase. No attack surface.
 
 import json
 import logging
+import os
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -23,6 +24,54 @@ if not GEMINI_CLI_AVAILABLE:
     logger.info("Gemini CLI not found — manual review package workflow only")
 from enki.memory.retention import get_decay_stats
 from enki.memory.staging import count_candidates, list_candidates
+
+
+def _load_google_api_key() -> str:
+    """Load GOOGLE_API_KEY from ~/.enki/.env, fallback to process env."""
+    env_path = ENKI_ROOT / ".env"
+    key = None
+
+    if env_path.exists():
+        for raw_line in env_path.read_text().splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("export "):
+                line = line[len("export "):].strip()
+            if "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            if k.strip() == "GOOGLE_API_KEY":
+                value = v.strip()
+                if (value.startswith('"') and value.endswith('"')) or (
+                    value.startswith("'") and value.endswith("'")
+                ):
+                    value = value[1:-1]
+                key = value
+                break
+
+    if not key:
+        key = os.environ.get("GOOGLE_API_KEY")
+
+    if not key:
+        raise RuntimeError(
+            "GOOGLE_API_KEY not found in ~/.enki/.env or environment variables."
+        )
+
+    return key
+
+
+def _extract_json_payload(text: str) -> str:
+    """Extract JSON object from model text output (handles fenced blocks)."""
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        lines = stripped.splitlines()
+        if lines:
+            lines = lines[1:]
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        stripped = "\n".join(lines).strip()
+    return stripped
 
 
 def generate_review_package(output_dir: str | None = None) -> str:
@@ -57,14 +106,21 @@ def generate_review_package(output_dir: str | None = None) -> str:
     sections.append(f"Total candidates awaiting review: {len(candidates)}\n")
 
     if candidates:
-        sections.append("| # | Category | Project | Content | Source |")
-        sections.append("|---|----------|---------|---------|--------|")
+        sections.append("| # | Candidate ID | Category | Project | Content | Source |")
+        sections.append("|---|--------------|----------|---------|---------|--------|")
         for i, c in enumerate(candidates, 1):
             content_preview = c["content"][:80].replace("|", "\\|")
+            short_id = c.get("id", "")[:8]
             sections.append(
-                f"| {i} | {c['category']} | {c.get('project', '-')} | "
+                f"| {i} | `{short_id}` | {c['category']} | {c.get('project', '-')} | "
                 f"{content_preview} | {c['source']} |"
             )
+        sections.append("")
+        sections.append("### Candidate ID Mapping (Full UUID)")
+        for c in candidates:
+            short_id = c.get("id", "")[:8]
+            full_id = c.get("id", "")
+            sections.append(f"- `{short_id}` => `{full_id}`")
     sections.append("")
 
     # Section 2: Wisdom.db stats
@@ -110,6 +166,16 @@ For each feedback proposal, decide:
 - **REJECT**: With reason
 - **MODIFY**: Suggest alternative
 
+Quality bar (strict):
+- **DISCARD** candidates that are test/placeholder data, generic statements without context
+  (for example: "WAL mode is important"), non-actionable content, or duplicates of content
+  already represented in wisdom.db.
+- **PROMOTE** only candidates with concrete, specific value: technical decisions with rationale,
+  concrete fixes/patterns with context, or learnings tied to a specific problem.
+- **CONSOLIDATE** aggressively when two candidates overlap the same topic.
+- Target a **promote rate of 40-60%**, not 90%+.
+- Provide detailed reasons (2+ sentences) for every decision.
+
 Output your decisions as JSON:
 ```json
 {
@@ -121,6 +187,10 @@ Output your decisions as JSON:
   ]
 }
 ```
+
+IMPORTANT:
+- Use the exact full candidate UUID from "Candidate ID Mapping (Full UUID)".
+- Do NOT use the row number in the "#" column as candidate_id.
 """)
 
     content = "\n".join(sections)
@@ -147,26 +217,33 @@ def prepare_mini_review(project: str) -> str:
     sections.append(f"Generated: {now.isoformat()}\n")
 
     # Project-scoped candidates only
-    candidates = list_candidates(project=project, limit=100)
+    candidates = list_candidates(project=project, limit=200)
     sections.append(f"## Candidates ({len(candidates)})")
 
     if candidates:
-        sections.append("| # | Category | Content | Source |")
-        sections.append("|---|----------|---------|--------|")
+        sections.append("| # | Candidate ID | Category | Content | Source |")
+        sections.append("|---|--------------|----------|---------|--------|")
         for i, c in enumerate(candidates, 1):
             content_preview = c["content"][:80].replace("|", "\\|")
+            short_id = c.get("id", "")[:8]
             sections.append(
-                f"| {i} | {c['category']} | {content_preview} | {c['source']} |"
+                f"| {i} | `{short_id}` | {c['category']} | {content_preview} | {c['source']} |"
             )
+        sections.append("")
+        sections.append("### Candidate ID Mapping (Full UUID)")
+        for c in candidates:
+            short_id = c.get("id", "")[:8]
+            full_id = c.get("id", "")
+            sections.append(f"- `{short_id}` => `{full_id}`")
     sections.append("")
 
     # Project bead stats
     with wisdom_db() as conn:
         bead_count = conn.execute(
-            "SELECT COUNT(*) FROM beads WHERE project = ?", (project,)
+            "SELECT COUNT(*) FROM notes WHERE project = ?", (project,)
         ).fetchone()[0]
         category_counts = conn.execute(
-            "SELECT category, COUNT(*) as cnt FROM beads "
+            "SELECT category, COUNT(*) as cnt FROM notes "
             "WHERE project = ? GROUP BY category",
             (project,),
         ).fetchall()
@@ -181,8 +258,14 @@ def prepare_mini_review(project: str) -> str:
     sections.append("## Instructions")
     sections.append(
         "For each candidate: PROMOTE, CONSOLIDATE, DISCARD, or FLAG.\n"
+        "Quality bar (strict): DISCARD test/placeholder data, non-actionable or generic "
+        "statements without context, and duplicates already covered in wisdom.db. PROMOTE only "
+        "specific technical decisions with rationale, concrete patterns/fixes with context, or "
+        "learnings tied to a specific problem. CONSOLIDATE aggressively for overlapping topics. "
+        "Target a promote rate of 40-60%, not 90%+. Reasons must be 2+ sentences.\n"
         "Output as JSON: `{\"bead_decisions\": [{\"candidate_id\": \"...\", "
-        "\"action\": \"promote|consolidate|discard|flag\", \"reason\": \"...\"}]}`"
+        "\"action\": \"promote|consolidate|discard|flag\", \"reason\": \"...\"}]}`\n"
+        "Use the exact full candidate UUID from Candidate ID Mapping (Full UUID), not row number."
     )
 
     content = "\n".join(sections)
@@ -257,21 +340,103 @@ def validate_gemini_response(response_json: str) -> dict:
     }
 
 
+def run_api_review(project: str | None = None) -> dict:
+    """Run full Gemini API review and return validated parsed response."""
+    api_key = _load_google_api_key()
+    from google import genai
+
+    client = genai.Client(api_key=api_key)
+
+    package_path = prepare_mini_review(project) if project else generate_review_package()
+    package_text = Path(package_path).read_text()
+
+    system_prompt = (
+        "You are Enki's review engine. Return ONLY valid JSON matching this schema:\n"
+        "{\n"
+        '  "bead_decisions": [\n'
+        '    {"candidate_id":"...", "action":"promote|consolidate|discard|flag", "reason":"..."}\n'
+        "  ],\n"
+        '  "proposal_decisions": [\n'
+        '    {"proposal_id":"...", "action":"approve|reject|modify", "reason":"..."}\n'
+        "  ]\n"
+        "}\n"
+        "Do not include markdown, prose, or code fences.\n"
+        "Use the exact candidate_id value from the package table/mapping, not row number.\n"
+        "Quality criteria:\n"
+        "- DISCARD test/placeholder data, generic or non-actionable statements without context, "
+        "and duplicates already represented in wisdom.db.\n"
+        "- PROMOTE only specific technical decisions with rationale, concrete patterns/fixes with "
+        "context, or learnings tied to a specific problem.\n"
+        "- CONSOLIDATE aggressively when candidates overlap topic/intent.\n"
+        "- Target promote rate of 40-60%, not 90%+.\n"
+        "- Every reason must be detailed (2+ sentences), never 'keep for now'."
+    )
+
+    prompt_text = (
+        f"{system_prompt}\n\n"
+        f"Review this package and produce decisions.\n\n{package_text}"
+    )
+    response = client.models.generate_content(
+        model="gemini-2.0-flash",
+        contents=prompt_text,
+    )
+
+    response_text = getattr(response, "text", "") or ""
+    if not response_text:
+        raise RuntimeError("Gemini API returned empty response text.")
+
+    response_json = _extract_json_payload(response_text)
+    validation = validate_gemini_response(response_json)
+    if not validation["valid"]:
+        raise ValueError(
+            "Gemini API response failed validation: "
+            + "; ".join(validation["errors"])
+        )
+
+    return validation["parsed"]
+
+
 def apply_promotions(actions: list[dict]) -> dict:
     """Bulk apply bead decisions from Gemini response (Abzu Spec §11).
 
     Each action: {"candidate_id": "...", "action": "promote|discard|flag", ...}
     Returns stats dict.
     """
-    from enki.memory.staging import discard, promote
+    from enki.memory.staging import discard, get_candidate, promote, resolve_candidate_id
+
+    def _resolve_bead_id(bead_id: str) -> str | None:
+        value = (bead_id or "").strip()
+        if not value:
+            return None
+
+        try:
+            import uuid
+            uuid.UUID(value)
+            return value
+        except (ValueError, AttributeError, TypeError):
+            pass
+
+        with wisdom_db() as conn:
+            rows = conn.execute(
+                "SELECT id FROM notes WHERE id LIKE ?",
+                (f"{value}%",),
+            ).fetchall()
+
+        if len(rows) == 1:
+            return rows[0]["id"]
+        return None
 
     stats = {"promoted": 0, "discarded": 0, "flagged": 0, "consolidated": 0, "errors": 0}
 
     for action in actions:
-        cid = action.get("candidate_id", "")
+        cid_raw = action.get("candidate_id", "")
+        cid = resolve_candidate_id(cid_raw)
         act = action.get("action", "")
 
         try:
+            if not cid:
+                stats["errors"] += 1
+                continue
             if act == "promote":
                 result = promote(cid)
                 if result:
@@ -288,30 +453,33 @@ def apply_promotions(actions: list[dict]) -> dict:
                 if bead_id:
                     with wisdom_db() as conn:
                         conn.execute(
-                            "UPDATE beads SET gemini_flagged = 1, "
-                            "flag_reason = ? WHERE id = ?",
-                            (action.get("reason", ""), bead_id),
+                            "UPDATE notes SET tags = ?, context_description = ? WHERE id = ?",
+                            ("gemini_flagged", action.get("reason", ""), bead_id),
                         )
                     stats["flagged"] += 1
                 # Also discard the candidate if it exists
                 discard(cid)
             elif act == "consolidate":
                 # Consolidate: merge candidate into existing bead
-                merge_target = action.get("merge_with")
+                merge_target_raw = (
+                    action.get("merge_with")
+                    or action.get("target")
+                    or action.get("candidate_id_to_consolidate_with")
+                )
+                merge_target = _resolve_bead_id(merge_target_raw or "")
                 if merge_target:
-                    from enki.memory.staging import get_candidate
                     candidate = get_candidate(cid)
                     if candidate:
                         with wisdom_db() as conn:
                             # Append content to existing bead
                             existing = conn.execute(
-                                "SELECT content FROM beads WHERE id = ?",
+                                "SELECT content FROM notes WHERE id = ?",
                                 (merge_target,),
                             ).fetchone()
                             if existing:
                                 merged = existing["content"] + "\n\n" + candidate["content"]
                                 conn.execute(
-                                    "UPDATE beads SET content = ?, "
+                                    "UPDATE notes SET content = ?, "
                                     "last_accessed = datetime('now') WHERE id = ?",
                                     (merged, merge_target),
                                 )
@@ -377,7 +545,7 @@ def generate_review_report(actions: list[dict]) -> str:
         for a in consolidated:
             lines.append(
                 f"- `{a.get('candidate_id', '?')[:8]}...` → "
-                f"`{a.get('merge_with', '?')[:8]}...`"
+                f"`{(a.get('merge_with') or a.get('target') or a.get('candidate_id_to_consolidate_with') or '?')[:8]}...`"
             )
         lines.append("")
 
@@ -394,7 +562,7 @@ def process_review_response(response_json: str) -> dict:
         Stats dict with counts of actions taken.
     """
     from enki.gates.feedback import apply_proposal, reject_proposal
-    from enki.memory.staging import discard, promote
+    from enki.memory.staging import discard, promote, resolve_candidate_id
 
     response = json.loads(response_json)
     stats = {"promoted": 0, "discarded": 0, "flagged": 0,
@@ -402,7 +570,9 @@ def process_review_response(response_json: str) -> dict:
 
     # Process bead decisions
     for decision in response.get("bead_decisions", []):
-        cid = decision["candidate_id"]
+        cid = resolve_candidate_id(decision["candidate_id"])
+        if not cid:
+            continue
         action = decision["action"]
 
         if action == "promote":
@@ -417,9 +587,8 @@ def process_review_response(response_json: str) -> dict:
             if bead_id:
                 with wisdom_db() as conn:
                     conn.execute(
-                        "UPDATE beads SET gemini_flagged = 1, "
-                        "flag_reason = ? WHERE id = ?",
-                        (decision.get("reason", ""), bead_id),
+                        "UPDATE notes SET tags = ?, context_description = ? WHERE id = ?",
+                        ("gemini_flagged", decision.get("reason", ""), bead_id),
                     )
                     stats["flagged"] += 1
 

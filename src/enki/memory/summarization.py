@@ -1,6 +1,6 @@
 """summarization.py — Weekly/monthly digests of knowledge activity.
 
-Heuristic grouping and reporting. Read-only — does not create or modify beads.
+Heuristic grouping and reporting. Read-only — does not create or modify notes.
 """
 
 import re
@@ -14,17 +14,17 @@ def generate_weekly_digest(project: str | None = None, as_json: bool = False) ->
     """Generate digest of knowledge activity for the past 7 days.
 
     Includes:
-    - New beads created (count + summaries)
-    - Beads promoted from staging (count + summaries)
-    - Beads decayed below threshold (count)
-    - Top 5 most recalled beads (most accessed)
+    - New notes created (count + summaries)
+    - Notes promoted from staging (count + summaries)
+    - Notes decayed below threshold (count)
+    - Top 5 most recalled notes (most accessed)
     - Staging rejections (count + common reasons)
     - Cross-project patterns (if multiple projects active)
     """
     cutoff = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
     data: dict = {}
 
-    # New beads in wisdom.db
+    # New notes in wisdom.db
     with wisdom_db() as conn:
         project_clause = " AND project = ?" if project else ""
         params: list = [cutoff]
@@ -33,40 +33,40 @@ def generate_weekly_digest(project: str | None = None, as_json: bool = False) ->
 
         new_beads = conn.execute(
             f"SELECT id, content, category, project, created_at "
-            f"FROM beads WHERE created_at >= ?{project_clause} "
+            f"FROM notes WHERE created_at >= ?{project_clause} "
             f"ORDER BY created_at DESC",
             params,
         ).fetchall()
         data["new_beads"] = [dict(r) for r in new_beads]
 
-        # Promoted beads (have promoted_at timestamp)
+        # Promoted notes (have promoted_at timestamp)
         promoted = conn.execute(
             f"SELECT id, content, category, promoted_at "
-            f"FROM beads WHERE promoted_at >= ?{project_clause} "
+            f"FROM notes WHERE promoted_at >= ?{project_clause} "
             f"ORDER BY promoted_at DESC",
             params,
         ).fetchall()
         data["promoted"] = [dict(r) for r in promoted]
 
-        # Decayed beads (weight dropped below 0.5)
+        # Decayed notes (weight dropped below 0.5)
         decayed = conn.execute(
-            f"SELECT COUNT(*) FROM beads WHERE weight < 0.5{project_clause}",
+            f"SELECT COUNT(*) FROM notes WHERE weight < 0.5{project_clause}",
             params[1:] if project else [],
         ).fetchone()
         data["decayed_count"] = decayed[0] if decayed else 0
 
-        # Top accessed beads
+        # Top accessed notes
         top_accessed = conn.execute(
             "SELECT id, content, category, last_accessed "
-            "FROM beads WHERE last_accessed >= ? "
+            "FROM notes WHERE last_accessed >= ? "
             "ORDER BY last_accessed DESC LIMIT 5",
             (cutoff,),
         ).fetchall()
         data["top_accessed"] = [dict(r) for r in top_accessed]
 
-        # Cross-project: count beads per project
+        # Cross-project: count notes per project
         project_counts = conn.execute(
-            "SELECT project, COUNT(*) as cnt FROM beads "
+            "SELECT project, COUNT(*) as cnt FROM notes "
             "WHERE created_at >= ? AND project IS NOT NULL "
             "GROUP BY project ORDER BY cnt DESC",
             (cutoff,),
@@ -94,7 +94,7 @@ def generate_weekly_digest(project: str | None = None, as_json: bool = False) ->
     # Format as text
     lines = ["# Weekly Digest", ""]
 
-    lines.append(f"**New beads:** {len(data['new_beads'])}")
+    lines.append(f"**New notes:** {len(data['new_beads'])}")
     for b in data["new_beads"][:10]:
         lines.append(f"  - [{b['category']}] {b['content'][:80]}")
 
@@ -102,7 +102,7 @@ def generate_weekly_digest(project: str | None = None, as_json: bool = False) ->
     for b in data["promoted"][:5]:
         lines.append(f"  - [{b['category']}] {b['content'][:80]}")
 
-    lines.append(f"\n**Beads below decay threshold:** {data['decayed_count']}")
+    lines.append(f"\n**Notes below decay threshold:** {data['decayed_count']}")
 
     if data["top_accessed"]:
         lines.append(f"\n**Most accessed (past 7 days):**")
@@ -117,7 +117,7 @@ def generate_weekly_digest(project: str | None = None, as_json: bool = False) ->
     if len(data["cross_project"]) > 1:
         lines.append(f"\n**Cross-project activity:**")
         for p in data["cross_project"]:
-            lines.append(f"  - {p['project']}: {p['cnt']} beads")
+            lines.append(f"  - {p['project']}: {p['cnt']} notes")
 
     if not data["new_beads"] and not data["promoted"]:
         lines.append("\nNo knowledge activity in the past 7 days.")
@@ -126,13 +126,13 @@ def generate_weekly_digest(project: str | None = None, as_json: bool = False) ->
 
 
 def generate_monthly_synthesis(project: str | None = None, as_json: bool = False) -> str | dict:
-    """Generate monthly synthesis — consolidate scattered beads into themes.
+    """Generate monthly synthesis — consolidate scattered notes into themes.
 
     Process:
-    1. Group beads created in last 30 days by category
+    1. Group notes created in last 30 days by category
     2. Within each category, cluster by keyword overlap
-    3. For clusters with 3+ beads, generate a synthesis title
-    4. Report only — does NOT create or modify beads.
+    3. For clusters with 3+ notes, generate a synthesis title
+    4. Report only — does NOT create or modify notes.
     """
     cutoff = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
 
@@ -144,7 +144,7 @@ def generate_monthly_synthesis(project: str | None = None, as_json: bool = False
 
         beads = conn.execute(
             f"SELECT id, content, category, project, created_at "
-            f"FROM beads WHERE created_at >= ?{project_clause} "
+            f"FROM notes WHERE created_at >= ?{project_clause} "
             f"ORDER BY category, created_at DESC",
             params,
         ).fetchall()
@@ -153,7 +153,7 @@ def generate_monthly_synthesis(project: str | None = None, as_json: bool = False
     if not beads:
         if as_json:
             return {"categories": {}, "themes": [], "total": 0}
-        return "# Monthly Synthesis\n\nNo beads created in the past 30 days."
+        return "# Monthly Synthesis\n\nNo notes created in the past 30 days."
 
     # Group by category
     by_category: dict[str, list[dict]] = defaultdict(list)
@@ -172,7 +172,7 @@ def generate_monthly_synthesis(project: str | None = None, as_json: bool = False
         words = re.findall(r"[a-zA-Z]{4,}", text.lower())
         return {w for w in words if w not in stopwords}
 
-    # Cluster beads by keyword overlap within each category
+    # Cluster notes by keyword overlap within each category
     themes = []
     for category, cat_beads in by_category.items():
         # Build keyword index
@@ -219,7 +219,7 @@ def generate_monthly_synthesis(project: str | None = None, as_json: bool = False
 
     # Format as text
     lines = ["# Monthly Synthesis", ""]
-    lines.append(f"**Total beads (past 30 days):** {len(beads)}")
+    lines.append(f"**Total notes (past 30 days):** {len(beads)}")
     lines.append("")
 
     lines.append("**By category:**")
@@ -230,11 +230,11 @@ def generate_monthly_synthesis(project: str | None = None, as_json: bool = False
         lines.append(f"\n**Themes detected ({len(themes)}):**")
         for t in themes:
             lines.append(
-                f"  - [{t['category']}] {t['theme']} ({t['count']} beads)"
+                f"  - [{t['category']}] {t['theme']} ({t['count']} notes)"
             )
             lines.append(f"    Sample: \"{t['sample']}\"")
     else:
-        lines.append("\nNo strong themes detected (need 3+ related beads).")
+        lines.append("\nNo strong themes detected (need 3+ related notes).")
 
     return "\n".join(lines)
 
@@ -244,19 +244,19 @@ def synthesize_knowledge(
     min_cluster_size: int = 3,
     auto_apply: bool = False,
 ) -> list[dict]:
-    """Consolidate clusters of related beads into synthesis candidates.
+    """Consolidate clusters of related notes into synthesis candidates.
 
     Process:
-    1. Get all beads from last 90 days
+    1. Get all notes from last 90 days
     2. Group by category
     3. Within each category, cluster by keyword overlap (3+ shared nouns)
     4. For clusters >= min_cluster_size:
        a. Generate synthesis title from shared keywords
        b. Concatenate key sentences from each bead
        c. Create a staging candidate (goes through normal staging → promotion)
-       d. Mark source beads with synthesis_id
+       d. Mark source notes with evolved_at timestamp
 
-    Synthesis beads go to staging (abzu.db), NOT directly to wisdom.db.
+    Synthesis notes go to staging (abzu.db), NOT directly to wisdom.db.
     Returns: list of synthesis dicts with cluster info.
     """
     from enki.memory.staging import add_candidate
@@ -271,7 +271,7 @@ def synthesize_knowledge(
 
         beads = conn.execute(
             f"SELECT id, content, category, project, weight, created_at "
-            f"FROM beads WHERE created_at >= ? AND synthesis_id IS NULL"
+            f"FROM notes WHERE created_at >= ? AND evolved_at IS NULL"
             f"{project_clause} "
             f"ORDER BY category, created_at DESC",
             params,
@@ -303,7 +303,7 @@ def synthesize_knowledge(
         words = re.findall(r'[a-zA-Z]{4,}', text.lower())
         return {w for w in words if w not in stopwords}
 
-    # Cluster beads by keyword overlap within each category
+    # Cluster notes by keyword overlap within each category
     syntheses = []
     for category, cat_beads in by_category.items():
         bead_nouns = [(b, extract_nouns(b["content"])) for b in cat_beads]
@@ -343,7 +343,7 @@ def synthesize_knowledge(
 
             # Build consolidated content
             synth_content = f"Synthesis: {theme}\n\n"
-            synth_content += f"Based on {len(cluster)} {category} beads:\n"
+            synth_content += f"Based on {len(cluster)} {category} notes:\n"
             for sent in sentences[:10]:
                 synth_content += f"- {sent}\n"
             synth_content += f"\nKeywords: {', '.join(top_keywords)}"
@@ -366,18 +366,18 @@ def synthesize_knowledge(
                     content=synth_content,
                     category="learning",  # synthesis stored as learning
                     project=project,
-                    summary=f"Synthesis: {theme} ({len(cluster)} beads)",
+                    summary=f"Synthesis: {theme} ({len(cluster)} notes)",
                     source="synthesis",
                 )
                 synthesis["candidate_id"] = candidate_id
 
-                # Mark source beads with a synthesis marker
+                # Mark source notes with an evolution marker
                 if candidate_id:
                     with wisdom_db() as conn:
                         for bead_id in source_ids:
                             conn.execute(
-                                "UPDATE beads SET synthesis_id = ? WHERE id = ?",
-                                (candidate_id, bead_id),
+                                "UPDATE notes SET evolved_at = datetime('now') WHERE id = ?",
+                                (bead_id,),
                             )
 
             syntheses.append(synthesis)

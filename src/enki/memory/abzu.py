@@ -5,6 +5,7 @@ Hooks, MCP tools, and other pillars call this module.
 """
 
 from pathlib import Path
+from datetime import datetime
 
 from enki.db import ENKI_ROOT
 
@@ -44,7 +45,7 @@ def inject_session_start(project: str, goal: str, tier: str) -> str:
     # Load relevant beads
     bead_limit = {"minimal": 0, "standard": 3, "full": 5}.get(tier, 3)
     if bead_limit > 0 and goal:
-        from enki.memory.beads import search
+        from enki.memory.notes import search
         beads = search(goal, project=project, limit=bead_limit)
         if beads:
             parts.append("\n## Relevant Knowledge")
@@ -219,7 +220,7 @@ def remember(
 ) -> dict:
     """Store a bead. Preference -> wisdom.db direct. Others -> staging."""
     if category == "preference":
-        from enki.memory.beads import create
+        from enki.memory.notes import create
         bead = create(
             content=content,
             category=category,
@@ -250,7 +251,7 @@ def recall(
     limit: int = 5,
 ) -> list[dict]:
     """Search beads. Searches both wisdom.db and staging, ranks appropriately."""
-    from enki.memory.beads import search
+    from enki.memory.notes import search
     from enki.memory.staging import search_candidates
 
     # Search wisdom.db
@@ -308,7 +309,7 @@ def promote_candidate(
         if not candidate:
             return {"error": "Candidate not found", "promoted": False}
 
-        from enki.memory.beads import create
+        from enki.memory.notes import create
         bead = create(
             content=consolidated_content,
             category=candidate["category"],
@@ -342,7 +343,7 @@ def consolidate_beads(bead_ids: list[str], merged_content: str) -> dict:
     Creates a new bead with merged_content, marks originals as superseded.
     Returns the new bead.
     """
-    from enki.memory.beads import create, get, update
+    from enki.memory.notes import create, get, update
     from enki.db import wisdom_db as _wisdom_db
 
     if not bead_ids or not merged_content:
@@ -360,9 +361,9 @@ def consolidate_beads(bead_ids: list[str], merged_content: str) -> dict:
         summary=f"Consolidated from {len(bead_ids)} beads",
     )
 
-    # Mark originals as superseded
+    # Mark originals as evolved after consolidation
     for bid in bead_ids:
-        update(bid, superseded_by=new_bead["id"])
+        update(bid, evolved_at=datetime.now().isoformat())
 
     return {
         "new_bead_id": new_bead["id"],
@@ -377,8 +378,15 @@ def flag_for_deletion(bead_id: str, reason: str) -> dict:
     Only sets gemini_flagged=1. Actual deletion is via
     retention.process_flagged_deletions().
     """
-    from enki.memory.beads import update
-    result = update(bead_id, gemini_flagged=1, flag_reason=reason)
+    from enki.memory.notes import get, update
+    note = get(bead_id)
+    if note:
+        tags = note.get("tags") or ""
+        if "gemini_flagged" not in tags:
+            tags = f"{tags},gemini_flagged".strip(",")
+        result = update(bead_id, tags=tags, context_description=reason)
+    else:
+        result = None
     if result:
         return {"flagged": True, "bead_id": bead_id, "reason": reason}
     return {"flagged": False, "error": "Bead not found"}
@@ -441,7 +449,7 @@ def recall_for_nudge(goal_text: str, limit: int = 3) -> list[dict]:
     Returns top beads most relevant to the goal text.
     Read-only: never creates, modifies, or deletes beads.
     """
-    from enki.memory.beads import search
+    from enki.memory.notes import search
     from enki.db import wisdom_db as _wisdom_db
 
     if not goal_text or not goal_text.strip():
@@ -463,7 +471,7 @@ def recall_for_nudge(goal_text: str, limit: int = 3) -> list[dict]:
         with _wisdom_db() as conn:
             starred = conn.execute(
                 "SELECT id, content, summary, category, starred, created_at "
-                "FROM beads WHERE starred = 1 ORDER BY created_at DESC LIMIT ?",
+                "FROM notes WHERE starred = 1 ORDER BY created_at DESC LIMIT ?",
                 (limit * 2,),
             ).fetchall()
 
@@ -547,7 +555,7 @@ def format_nudge(beads: list[dict]) -> str:
 
 def star(bead_id: str) -> None:
     """Mark bead as permanent (never decays)."""
-    from enki.memory.beads import star as _star
+    from enki.memory.notes import star as _star
     _star(bead_id, starred=True)
 
 
@@ -555,7 +563,7 @@ def status() -> dict:
     """Health check: DB sizes, bead counts, staging depth, decay stats."""
     import os
 
-    from enki.memory.beads import count
+    from enki.memory.notes import count
     from enki.memory.retention import get_decay_stats
     from enki.memory.staging import count_candidates
 
@@ -570,7 +578,7 @@ def status() -> dict:
             "total": count(),
             "by_category": {
                 cat: count(category=cat)
-                for cat in ("decision", "learning", "pattern", "fix", "preference")
+                for cat in ("decision", "learning", "pattern", "fix", "preference", "code_knowledge")
             },
         },
         "staging": {

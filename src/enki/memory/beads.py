@@ -1,4 +1,8 @@
-"""beads.py — Bead CRUD + FTS5 search + dedup + ranking.
+"""DEPRECATED — v3 legacy module. All active code uses notes.py (v4).
+Retained for backward compatibility and legacy data access only.
+Do not import or call from new code.
+
+Original: beads.py — Bead CRUD + FTS5 search + dedup + ranking.
 
 Beads are the atomic unit of knowledge in Abzu. Five categories:
 - decision: Architectural choice with reasoning

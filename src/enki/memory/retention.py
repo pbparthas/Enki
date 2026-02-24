@@ -21,9 +21,9 @@ from enki.db import wisdom_db
 
 
 def run_decay() -> dict:
-    """Run decay pass on all beads in wisdom.db.
+    """Run decay pass on all notes in wisdom.db.
 
-    Returns stats dict with counts of beads affected at each threshold.
+    Returns stats dict with counts of notes affected at each threshold.
     """
     config = get_config()
     thresholds = config["memory"]["decay_thresholds"]
@@ -33,7 +33,7 @@ def run_decay() -> dict:
 
     with wisdom_db() as conn:
         beads = conn.execute(
-            "SELECT id, last_accessed, starred, category, weight FROM beads"
+            "SELECT id, last_accessed, starred, category, weight FROM notes"
         ).fetchall()
 
         for bead in beads:
@@ -84,7 +84,7 @@ def refresh_weight(bead_id: str) -> None:
     """Reset weight to 1.0 when a bead is recalled."""
     with wisdom_db() as conn:
         conn.execute(
-            "UPDATE beads SET weight = 1.0, last_accessed = datetime('now') "
+            "UPDATE notes SET weight = 1.0, last_accessed = datetime('now') "
             "WHERE id = ?",
             (bead_id,),
         )
@@ -93,21 +93,21 @@ def refresh_weight(bead_id: str) -> None:
 def get_decay_stats() -> dict:
     """Get current decay distribution stats."""
     with wisdom_db() as conn:
-        total = conn.execute("SELECT COUNT(*) FROM beads").fetchone()[0]
+        total = conn.execute("SELECT COUNT(*) FROM notes").fetchone()[0]
         hot = conn.execute(
-            "SELECT COUNT(*) FROM beads WHERE weight >= 0.9"
+            "SELECT COUNT(*) FROM notes WHERE weight >= 0.9"
         ).fetchone()[0]
         warm = conn.execute(
-            "SELECT COUNT(*) FROM beads WHERE weight >= 0.4 AND weight < 0.9"
+            "SELECT COUNT(*) FROM notes WHERE weight >= 0.4 AND weight < 0.9"
         ).fetchone()[0]
         cold = conn.execute(
-            "SELECT COUNT(*) FROM beads WHERE weight >= 0.1 AND weight < 0.4"
+            "SELECT COUNT(*) FROM notes WHERE weight >= 0.1 AND weight < 0.4"
         ).fetchone()[0]
         frozen = conn.execute(
-            "SELECT COUNT(*) FROM beads WHERE weight < 0.1"
+            "SELECT COUNT(*) FROM notes WHERE weight < 0.1"
         ).fetchone()[0]
         starred = conn.execute(
-            "SELECT COUNT(*) FROM beads WHERE starred = 1"
+            "SELECT COUNT(*) FROM notes WHERE starred = 1"
         ).fetchone()[0]
 
     return {
@@ -121,16 +121,13 @@ def get_decay_stats() -> dict:
 
 
 def process_flagged_deletions() -> dict:
-    """Delete beads where gemini_flagged=1 (Abzu Spec §9).
-
-    Only Gemini can flag for deletion. This function executes the deletions.
-    Returns stats dict with count of deleted beads and their categories.
-    """
+    """Delete notes tagged with gemini_flagged (Abzu Spec §9)."""
     stats = {"deleted": 0, "by_category": {}}
 
     with wisdom_db() as conn:
         flagged = conn.execute(
-            "SELECT id, category, flag_reason FROM beads WHERE gemini_flagged = 1"
+            "SELECT id, category, context_description FROM notes "
+            "WHERE tags LIKE '%gemini_flagged%'"
         ).fetchall()
 
         for bead in flagged:
@@ -139,7 +136,7 @@ def process_flagged_deletions() -> dict:
             if category in ("enforcement", "gate", "pattern"):
                 continue
             stats["by_category"][category] = stats["by_category"].get(category, 0) + 1
-            conn.execute("DELETE FROM beads WHERE id = ?", (bead["id"],))
+            conn.execute("DELETE FROM notes WHERE id = ?", (bead["id"],))
             stats["deleted"] += 1
 
     return stats
@@ -275,7 +272,7 @@ def _extract_project_versions(project_path: Path | None) -> dict[str, str]:
 
 
 def check_freshness(project_path: Path | None = None) -> list[dict]:
-    """Scan beads for versioned references and flag potentially stale ones.
+    """Scan notes for versioned references and flag potentially stale ones.
 
     Cross-references against project files (package.json, requirements.txt, etc.)
     to detect outdated version references.
@@ -287,7 +284,7 @@ def check_freshness(project_path: Path | None = None) -> list[dict]:
 
     with wisdom_db() as conn:
         beads = conn.execute(
-            "SELECT id, content, category FROM beads"
+            "SELECT id, content, category FROM notes"
         ).fetchall()
 
         # Load previous checks
@@ -380,5 +377,5 @@ def dismiss_freshness(bead_id: str, detected_version: str | None = None) -> bool
 def _set_weight(conn, bead_id: str, weight: float) -> None:
     """Set weight for a bead."""
     conn.execute(
-        "UPDATE beads SET weight = ? WHERE id = ?", (weight, bead_id)
+        "UPDATE notes SET weight = ? WHERE id = ?", (weight, bead_id)
     )

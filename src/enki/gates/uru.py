@@ -101,6 +101,7 @@ def inspect_tool_input(tool_name: str, tool_input: dict) -> InspectionResult:
     if tool_name == "Bash":
         sensitive_targets = (
             ".claude/hooks/",
+            "scripts/hooks/",
             "uru.py",
             "sanitization",
             "verification.py",

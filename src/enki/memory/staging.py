@@ -13,6 +13,25 @@ from datetime import datetime
 
 from enki.db import abzu_db, wisdom_db
 
+ALLOWED_NOTE_SOURCES = frozenset({
+    "manual",
+    "session_end",
+    "code_scan",
+    "onboarding",
+    "rescan",
+    "em_distill",
+})
+
+SOURCE_ALIASES = {
+    "session": "session_end",
+    "enki_remember": "manual",
+    "synthesis": "manual",
+    "em.db": "em_distill",
+    "em.db bugs": "em_distill",
+    "em.db pm_decisions": "em_distill",
+    "v1/v2 migration": "manual",
+}
+
 
 # Filler phrases that indicate no actionable content
 FILLER_PHRASES = frozenset({
@@ -64,13 +83,21 @@ def bouncer_check(content: str) -> tuple[bool, str]:
     content_hash = hashlib.sha256(stripped.encode()).hexdigest()
     with abzu_db() as conn:
         existing = conn.execute(
-            "SELECT id FROM bead_candidates WHERE content_hash = ?",
+            "SELECT id FROM note_candidates WHERE content_hash = ?",
             (content_hash,),
         ).fetchone()
         if existing:
             return (False, "Duplicate")
 
     return (True, "")
+
+
+def _normalize_source(source: str) -> str:
+    """Normalize legacy source labels to note_candidates v4 allowed values."""
+    normalized = SOURCE_ALIASES.get(source, source)
+    if normalized in ALLOWED_NOTE_SOURCES:
+        return normalized
+    return "manual"
 
 
 def _log_rejection(content: str, reason: str, source: str = "session") -> None:
@@ -109,13 +136,13 @@ def override_rejection(rejection_id: int) -> str | None:
 
     # Add directly to staging, bypassing bouncer
     content = row["content"]
-    source = row["source"] or "session"
+    source = _normalize_source(row["source"] or "session")
     content_hash = hashlib.sha256(content.strip().encode()).hexdigest()
 
     candidate_id = str(uuid.uuid4())
     with abzu_db() as conn:
         conn.execute(
-            "INSERT INTO bead_candidates "
+            "INSERT INTO note_candidates "
             "(id, content, summary, category, project, content_hash, source, session_id) "
             "VALUES (?, ?, NULL, 'learning', NULL, ?, ?, NULL)",
             (candidate_id, content, content_hash, source),
@@ -148,11 +175,12 @@ def add_candidate(
         return None
 
     content_hash = hashlib.sha256(content.encode()).hexdigest()
+    source = _normalize_source(source)
 
     # Check for duplicates in staging
     with abzu_db() as conn:
         existing = conn.execute(
-            "SELECT id FROM bead_candidates WHERE content_hash = ?",
+            "SELECT id FROM note_candidates WHERE content_hash = ?",
             (content_hash,),
         ).fetchone()
         if existing:
@@ -161,7 +189,7 @@ def add_candidate(
     # Also check wisdom.db for already-promoted duplicates
     with wisdom_db() as conn:
         existing = conn.execute(
-            "SELECT id FROM beads WHERE content_hash = ?",
+            "SELECT id FROM notes WHERE content_hash = ?",
             (content_hash,),
         ).fetchone()
         if existing:
@@ -170,7 +198,7 @@ def add_candidate(
     candidate_id = str(uuid.uuid4())
     with abzu_db() as conn:
         conn.execute(
-            "INSERT INTO bead_candidates "
+            "INSERT INTO note_candidates "
             "(id, content, summary, category, project, content_hash, source, session_id) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (candidate_id, content, summary, category, project,
@@ -186,7 +214,7 @@ def list_candidates(
     limit: int = 50,
 ) -> list[dict]:
     """List staged candidates."""
-    query = "SELECT * FROM bead_candidates WHERE 1=1"
+    query = "SELECT * FROM note_candidates WHERE 1=1"
     params: list = []
     if project:
         query += " AND project = ?"
@@ -206,10 +234,42 @@ def get_candidate(candidate_id: str) -> dict | None:
     """Get a single candidate."""
     with abzu_db() as conn:
         row = conn.execute(
-            "SELECT * FROM bead_candidates WHERE id = ?",
+            "SELECT * FROM note_candidates WHERE id = ?",
             (candidate_id,),
         ).fetchone()
         return dict(row) if row else None
+
+
+def resolve_candidate_id(short_id: str) -> str | None:
+    """Resolve short candidate ID prefix to full UUID in note_candidates.
+
+    Rules:
+    - Full UUID input returns as-is.
+    - Prefix input returns full UUID only if exactly one match.
+    - No match or ambiguous prefix returns None.
+    """
+    if not short_id:
+        return None
+
+    value = short_id.strip()
+    if not value:
+        return None
+
+    try:
+        uuid.UUID(value)
+        return value
+    except (ValueError, AttributeError, TypeError):
+        pass
+
+    with abzu_db() as conn:
+        rows = conn.execute(
+            "SELECT id FROM note_candidates WHERE id LIKE ?",
+            (f"{value}%",),
+        ).fetchall()
+
+    if len(rows) == 1:
+        return rows[0]["id"]
+    return None
 
 
 def search_candidates(query: str, limit: int = 10) -> list[dict]:
@@ -217,9 +277,9 @@ def search_candidates(query: str, limit: int = 10) -> list[dict]:
     with abzu_db() as conn:
         rows = conn.execute(
             "SELECT bc.*, rank AS fts_score "
-            "FROM candidates_fts "
-            "JOIN bead_candidates bc ON candidates_fts.rowid = bc.rowid "
-            "WHERE candidates_fts MATCH ? "
+            "FROM candidates_v4_fts "
+            "JOIN note_candidates bc ON candidates_v4_fts.rowid = bc.rowid "
+            "WHERE candidates_v4_fts MATCH ? "
             "ORDER BY rank LIMIT ?",
             (query, limit),
         ).fetchall()
@@ -235,7 +295,7 @@ def promote(candidate_id: str) -> str | None:
     if not candidate:
         return None
 
-    from enki.memory.beads import create
+    from enki.memory.notes import create
 
     bead = create(
         content=candidate["content"],
@@ -247,7 +307,7 @@ def promote(candidate_id: str) -> str | None:
     # Update promoted_at
     with wisdom_db() as conn:
         conn.execute(
-            "UPDATE beads SET promoted_at = datetime('now') WHERE id = ?",
+            "UPDATE notes SET promoted_at = datetime('now') WHERE id = ?",
             (bead["id"],),
         )
 
@@ -261,7 +321,7 @@ def discard(candidate_id: str) -> bool:
     """Remove a candidate from staging."""
     with abzu_db() as conn:
         cursor = conn.execute(
-            "DELETE FROM bead_candidates WHERE id = ?",
+            "DELETE FROM note_candidates WHERE id = ?",
             (candidate_id,),
         )
         return cursor.rowcount > 0
@@ -269,7 +329,7 @@ def discard(candidate_id: str) -> bool:
 
 def count_candidates(project: str | None = None) -> int:
     """Count staged candidates."""
-    query = "SELECT COUNT(*) FROM bead_candidates"
+    query = "SELECT COUNT(*) FROM note_candidates"
     params = []
     if project:
         query += " WHERE project = ?"

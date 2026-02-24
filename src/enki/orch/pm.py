@@ -255,7 +255,7 @@ def pm_debate_round(
         # Check historical context from beads if available
         if perspective["name"] == "Historical Context":
             try:
-                from enki.memory.beads import search
+                from enki.memory.notes import search
                 related = search(product_spec[:200], project=project, limit=3)
                 entry["historical_beads"] = [
                     {"category": b["category"], "content": b["content"][:200]}

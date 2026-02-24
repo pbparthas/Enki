@@ -10,18 +10,22 @@ Usage:
     python -m enki.scripts.gemini_review --validate resp.json  # Validate response format
     python -m enki.scripts.gemini_review --apply resp.json     # Apply review decisions
     python -m enki.scripts.gemini_review --report resp.json    # Generate markdown report
+    python -m enki.scripts.gemini_review --run [project]       # Run Gemini API review
 """
 
 import json
 import sys
+from datetime import datetime
 from pathlib import Path
 
+from enki.db import ENKI_ROOT
 from enki.memory.gemini import (
     apply_promotions,
     generate_review_package,
     generate_review_report,
     prepare_mini_review,
     process_review_response,
+    run_api_review,
     validate_gemini_response,
 )
 
@@ -122,6 +126,20 @@ def cmd_report(response_path: str):
     print(report)
 
 
+def cmd_run(project: str | None = None):
+    """Run API-based review, print JSON, and save response for manual apply."""
+    parsed = run_api_review(project=project)
+    response_text = json.dumps(parsed, indent=2)
+    print(response_text)
+
+    reviews_dir = ENKI_ROOT / "reviews"
+    reviews_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    out_path = reviews_dir / f"response-{timestamp}.json"
+    out_path.write_text(response_text)
+    print(f"Saved response to: {out_path}")
+
+
 def main():
     args = sys.argv[1:]
 
@@ -151,6 +169,9 @@ def main():
             print("Usage: gemini_review --report <response.json>", file=sys.stderr)
             sys.exit(1)
         cmd_report(args[1])
+    elif command == "--run":
+        project = args[1] if len(args) > 1 else None
+        cmd_run(project)
     elif command == "--output-dir":
         if len(args) < 2:
             print("Usage: gemini_review --output-dir <dir>", file=sys.stderr)
