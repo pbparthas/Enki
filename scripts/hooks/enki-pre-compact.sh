@@ -1,25 +1,34 @@
 #!/bin/bash
 # HOOK_VERSION=v4.0.1
+LOG="$HOME/.enki/hook-errors.log"
+mkdir -p "$(dirname "$LOG")" 2>/dev/null || true
+if ! (echo "" >> "$LOG") 2>/dev/null; then
+    LOG="/tmp/enki-hook-errors.log"
+    (echo "" >> "$LOG") 2>/dev/null || true
+fi
 # hooks/pre-compact.sh — Save enforcement state + Abzu pre-compact summary
 set -euo pipefail
 
 INPUT=$(cat)
+TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name // empty')
 
 # Extract fields from stdin JSON
-TRANSCRIPT_PATH=$(echo "$INPUT" | jq -r '.transcript_path // empty' 2>/dev/null || echo "")
-SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty' 2>/dev/null || echo "")
-CWD=$(echo "$INPUT" | jq -r '.cwd // empty' 2>/dev/null || echo "")
+TRANSCRIPT_PATH=$(echo "$INPUT" | jq -r '.transcript_path // empty' 2>>"$LOG" || echo "")
+SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty' 2>>"$LOG" || echo "")
+CWD=$(echo "$INPUT" | jq -r '.cwd // empty' 2>>"$LOG" || echo "")
 
 # Uru: Log enforcement state snapshot
+echo "$(date -Iseconds) [enki-pre-compact] tool=$TOOL_NAME" >> "$LOG" 2>/dev/null || true
 /home/partha/.enki-venv/bin/python -c "
 import sys
 sys.path.insert(0, 'src')
 from enki.gates.uru import _get_session_id, _log_enforcement
 session_id = _get_session_id()
 _log_enforcement('pre-compact', 'system', None, None, 'snapshot', 'Pre-compact state capture')
-" 2>/dev/null || true
+" 2>>"$LOG" || true
 
 # Abzu: Save pre-compact summary with real JSONL extraction
+echo "$(date -Iseconds) [enki-pre-compact] tool=$TOOL_NAME" >> "$LOG" 2>/dev/null || true
 /home/partha/.enki-venv/bin/python -c "
 import sys
 sys.path.insert(0, 'src')
@@ -44,6 +53,6 @@ try:
             )
 except Exception:
     pass
-" 2>/dev/null || true
+" 2>>"$LOG" || true
 
 echo '{"decision":"allow"}'

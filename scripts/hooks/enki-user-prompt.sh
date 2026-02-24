@@ -1,5 +1,11 @@
 #!/bin/bash
 HOOK_VERSION="2026-02-10-v3"
+LOG="$HOME/.enki/hook-errors.log"
+mkdir -p "$(dirname "$LOG")" 2>/dev/null || true
+if ! (echo "" >> "$LOG") 2>/dev/null; then
+    LOG="/tmp/enki-hook-errors.log"
+    (echo "" >> "$LOG") 2>/dev/null || true
+fi
 # Enki User Prompt Submit Hook
 # Called when user sends a message in Claude Code
 #
@@ -16,6 +22,7 @@ ENKI_BIN="/home/partha/Desktop/Enki/.venv/bin/enki"
 INPUT=$(cat)
 
 # Extract prompt and cwd
+TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name // empty')
 PROMPT=$(echo "$INPUT" | jq -r '.prompt // ""')
 CWD=$(echo "$INPUT" | jq -r '.cwd // "."')
 
@@ -42,7 +49,8 @@ fi
 if [[ "$HAS_ERROR" == "true" ]]; then
     # Search for solutions to similar errors (limit query length)
     QUERY=$(echo "$PROMPT" | head -c 200)
-    SEARCH_RESULT=$("$ENKI_BIN" recall "$QUERY" --type solution --limit 3 --project "$CWD" 2>/dev/null)
+    echo "$(date -Iseconds) [enki-user-prompt] tool=$TOOL_NAME" >> "$LOG" 2>/dev/null || true
+    SEARCH_RESULT=$("$ENKI_BIN" recall "$QUERY" --type solution --limit 3 --project "$CWD" 2>>"$LOG" || true)
     
     if [[ -n "$SEARCH_RESULT" ]] && [[ "$SEARCH_RESULT" != "No results found." ]]; then
         # Output context injection

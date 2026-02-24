@@ -1,5 +1,11 @@
 #!/bin/bash
 # HOOK_VERSION=v4.0.1
+LOG="$HOME/.enki/hook-errors.log"
+mkdir -p "$(dirname "$LOG")" 2>/dev/null || true
+if ! (echo "" >> "$LOG") 2>/dev/null; then
+    LOG="/tmp/enki-hook-errors.log"
+    (echo "" >> "$LOG") 2>/dev/null || true
+fi
 # hooks/pre-tool-use.sh — Most critical hook
 # Layer 0 (bash fast-path) → Layer 0.5 → Layer 1 (Python)
 set -euo pipefail
@@ -12,7 +18,7 @@ if [[ "$TOOL_NAME" == "Write" || "$TOOL_NAME" == "Edit" || \
       "$TOOL_NAME" == "MultiEdit" || "$TOOL_NAME" == "NotebookEdit" ]]; then
 
     TARGET=$(echo "$INPUT" | jq -r '.tool_input.file_path // .tool_input.path // empty')
-    BASENAME=$(basename "$TARGET" 2>/dev/null || echo "")
+    BASENAME=$(basename "$TARGET" 2>>"$LOG" || echo "")
 
     case "$BASENAME" in
         session-start.sh|pre-tool-use.sh|post-tool-use.sh|\
@@ -28,7 +34,7 @@ if [[ "$TOOL_NAME" == "Write" || "$TOOL_NAME" == "Edit" || \
     esac
 
     # Check if target is under ~/.enki/hooks/ or ~/.enki/prompts/
-    RESOLVED=$(realpath "$TARGET" 2>/dev/null || echo "$TARGET")
+    RESOLVED=$(realpath "$TARGET" 2>>"$LOG" || echo "$TARGET")
     if [[ "$RESOLVED" == "$HOME/.enki/hooks/"* || "$RESOLVED" == "$HOME/.enki/prompts/"* ]]; then
         echo '{"decision":"block","reason":"Layer 0: Protected directory"}'
         exit 0
@@ -42,17 +48,33 @@ if [[ "$TOOL_NAME" == "Bash" || "$TOOL_NAME" == "Task" ]]; then
 fi
 
 # ── Layer 1+: Python handles the rest ──
-RESULT=$(echo "$INPUT" | /home/partha/.enki-venv/bin/python -m enki.gates.uru --hook pre-tool-use 2>/dev/null)
+echo "$(date -Iseconds) [enki-pre-tool-use] tool=$TOOL_NAME" >> "$LOG" 2>/dev/null || true
+RESULT=$(echo "$INPUT" | /home/partha/.enki-venv/bin/python -m enki.gates.uru --hook pre-tool-use 2>>"$LOG" || true)
 
 if [[ -n "$RESULT" ]]; then
-    echo "$RESULT"
+    DECISION=$(echo "$RESULT" | jq -r '.decision // empty' 2>>"$LOG" || true)
+    if [[ "$DECISION" == "block" ]]; then
+        REASON=$(echo "$RESULT" | jq -r '.reason // "Blocked by Enki gate."' 2>>"$LOG" || true)
+        jq -n --arg reason "$REASON" '{
+          hookSpecificOutput: {
+            hookEventName: "PreToolUse",
+            permissionDecision: "deny",
+            permissionDecisionReason: $reason
+          }
+        }'
+    fi
 else
+    echo "$(date -Iseconds) [enki-pre-tool-use] EMPTY RESULT tool=$TOOL_NAME" >> "$LOG" 2>/dev/null || true
     # Fail closed for mutations, open for reads
     if [[ "$TOOL_NAME" == "Write" || "$TOOL_NAME" == "Edit" || \
           "$TOOL_NAME" == "MultiEdit" || "$TOOL_NAME" == "NotebookEdit" || \
           "$TOOL_NAME" == "Bash" || "$TOOL_NAME" == "Task" ]]; then
-        echo '{"decision":"block","reason":"Uru unavailable. Blocking mutation for safety."}'
-    else
-        echo '{"decision":"allow"}'
+        jq -n --arg reason "Uru unavailable. Blocking mutation for safety." '{
+          hookSpecificOutput: {
+            hookEventName: "PreToolUse",
+            permissionDecision: "deny",
+            permissionDecisionReason: $reason
+          }
+        }'
     fi
 fi

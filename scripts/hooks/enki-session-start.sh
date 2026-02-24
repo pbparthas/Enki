@@ -1,9 +1,16 @@
 #!/bin/bash
 # HOOK_VERSION=v4.0.1
+LOG="$HOME/.enki/hook-errors.log"
+mkdir -p "$(dirname "$LOG")" 2>/dev/null || true
+if ! (echo "" >> "$LOG") 2>/dev/null; then
+    LOG="/tmp/enki-hook-errors.log"
+    (echo "" >> "$LOG") 2>/dev/null || true
+fi
 # hooks/session-start.sh — Initialize Uru + Abzu, inject full context
 set -euo pipefail
 
 INPUT=$(cat)
+TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name // empty')
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
 PROJECT=$(echo "$INPUT" | jq -r '.project // empty')
 GOAL=$(echo "$INPUT" | jq -r '.goal // empty')
@@ -26,9 +33,11 @@ if [[ -z "$TIER" ]]; then
 fi
 
 # Initialize enforcement state (Uru)
-echo "$INPUT" | /home/partha/.enki-venv/bin/python -m enki.gates.uru --hook session-start 2>/dev/null || true
+echo "$(date -Iseconds) [enki-session-start] tool=$TOOL_NAME" >> "$LOG" 2>/dev/null || true
+echo "$INPUT" | /home/partha/.enki-venv/bin/python -m enki.gates.uru --hook session-start 2>>"$LOG" || true
 
 # Inject combined context: Uru enforcement + Abzu memory
+echo "$(date -Iseconds) [enki-session-start] tool=$TOOL_NAME" >> "$LOG" 2>/dev/null || true
 CONTEXT=$(/home/partha/.enki-venv/bin/python -c "
 import sys
 sys.path.insert(0, 'src')
@@ -57,6 +66,6 @@ except Exception:
     pass
 
 print('\n'.join(parts))
-" 2>/dev/null || echo "Uru: Enforcement context unavailable.")
+" 2>>"$LOG" || echo "Uru: Enforcement context unavailable.")
 
 echo "$CONTEXT"
