@@ -305,22 +305,20 @@ class TestGateChecks:
         # No goal set — should block
         result = check_pre_tool_use("Write", {"file_path": "/project/src/main.py"})
         assert result["decision"] == "block"
-        assert "Gate 1" in result["reason"]
+        assert "No active goal" in result["reason"]
 
-    def test_gate1_no_goal_allows_docs(self, mock_project):
+    def test_gate1_no_goal_read_allowed(self, mock_project):
         from enki.gates.uru import check_pre_tool_use
 
-        # No goal — but .md files are exempt
-        result = check_pre_tool_use("Write", {"file_path": "/project/docs/README.md"})
+        result = check_pre_tool_use("Read", {"file_path": "/project/src/main.py"})
         assert result["decision"] == "allow"
 
-    def test_gate1_no_goal_allows_enki_infra(self, mock_project):
+    def test_gate1_no_goal_bash_blocked(self, mock_project):
         from enki.gates.uru import check_pre_tool_use
 
-        enki_root, _, _ = mock_project
-        path = str(enki_root / "some_file.json")
-        result = check_pre_tool_use("Write", {"file_path": path})
-        assert result["decision"] == "allow"
+        result = check_pre_tool_use("Bash", {"command": "ls -la"})
+        assert result["decision"] == "block"
+        assert "No active goal" in result["reason"]
 
     def test_gate3_wrong_phase_blocks(self, mock_project):
         from enki.gates.uru import check_pre_tool_use
@@ -329,7 +327,11 @@ class TestGateChecks:
         self._set_goal(db_path)
         self._set_phase(db_path, "plan")
 
-        result = check_pre_tool_use("Write", {"file_path": "/project/src/main.py"})
+        result = check_pre_tool_use(
+            "Write",
+            {"file_path": "/project/src/main.py"},
+            hook_context={"subagent_type": "dev"},
+        )
         assert result["decision"] == "block"
         assert "Gate 3" in result["reason"]
 
@@ -340,7 +342,11 @@ class TestGateChecks:
         self._set_goal(db_path)
         self._set_phase(db_path, "implement")
 
-        result = check_pre_tool_use("Write", {"file_path": "/project/src/main.py"})
+        result = check_pre_tool_use(
+            "Write",
+            {"file_path": "/project/src/main.py"},
+            hook_context={"subagent_type": "dev"},
+        )
         assert result["decision"] == "allow"
 
     def test_gate3_review_phase_allows(self, mock_project):
@@ -370,7 +376,11 @@ class TestGateChecks:
         self._set_goal(db_path, tier="standard")
         self._set_phase(db_path, "implement")
 
-        result = check_pre_tool_use("Write", {"file_path": "/project/src/main.py"})
+        result = check_pre_tool_use(
+            "Write",
+            {"file_path": "/project/src/main.py"},
+            hook_context={"subagent_type": "dev"},
+        )
         assert result["decision"] == "block"
         assert "Gate 2" in result["reason"]
 
@@ -382,7 +392,11 @@ class TestGateChecks:
         self._set_phase(db_path, "implement")
         self._approve_spec(db_path)
 
-        result = check_pre_tool_use("Write", {"file_path": "/project/src/main.py"})
+        result = check_pre_tool_use(
+            "Write",
+            {"file_path": "/project/src/main.py"},
+            hook_context={"subagent_type": "dev"},
+        )
         assert result["decision"] == "allow"
 
     def test_gate2_minimal_tier_skips_spec_check(self, mock_project):
@@ -393,13 +407,67 @@ class TestGateChecks:
         self._set_phase(db_path, "implement")
         # No spec approval — but minimal tier skips Gate 2
 
+        result = check_pre_tool_use(
+            "Write",
+            {"file_path": "/project/src/main.py"},
+            hook_context={"subagent_type": "dev"},
+        )
+        assert result["decision"] == "allow"
+
+    def test_main_context_write_to_src_in_implement_blocks(self, mock_project):
+        from enki.gates.uru import check_pre_tool_use
+
+        _, _, db_path = mock_project
+        self._set_goal(db_path)
+        self._set_phase(db_path, "implement")
+
+        result = check_pre_tool_use("Write", {"file_path": "/project/src/main.py"})
+        assert result["decision"] == "block"
+        assert (
+            result["reason"]
+            == "Direct implementation blocked. Use spawn_agent() and Task tool."
+        )
+
+    def test_subagent_write_to_src_in_implement_allows(self, mock_project):
+        from enki.gates.uru import check_pre_tool_use
+
+        _, _, db_path = mock_project
+        self._set_goal(db_path)
+        self._set_phase(db_path, "implement")
+
+        result = check_pre_tool_use(
+            "Write",
+            {"file_path": "/project/src/main.py"},
+            hook_context={"subagent_type": "dev"},
+        )
+        assert result["decision"] == "allow"
+
+    def test_main_context_write_to_specs_in_implement_allows(self, mock_project):
+        from enki.gates.uru import check_pre_tool_use
+
+        _, _, db_path = mock_project
+        self._set_goal(db_path, tier="standard")
+        self._set_phase(db_path, "implement")
+
+        result = check_pre_tool_use("Write", {"file_path": "/project/specs/api.md"})
+        assert result["decision"] == "allow"
+
+    def test_main_context_write_to_src_in_planning_allows(self, mock_project):
+        from enki.gates.uru import check_pre_tool_use
+
+        _, _, db_path = mock_project
+        self._set_goal(db_path)
+        self._set_phase(db_path, "plan")
+
         result = check_pre_tool_use("Write", {"file_path": "/project/src/main.py"})
         assert result["decision"] == "allow"
 
     def test_layer0_blocks_hook_edit(self, mock_project):
         from enki.gates.uru import check_pre_tool_use
 
-        enki_root, _, _ = mock_project
+        enki_root, _, db_path = mock_project
+        self._set_goal(db_path)
+        self._set_phase(db_path, "implement")
         path = str(enki_root / "hooks" / "pre-tool-use.sh")
         result = check_pre_tool_use("Write", {"file_path": path})
         assert result["decision"] == "block"
@@ -408,6 +476,9 @@ class TestGateChecks:
     def test_layer0_blocks_repo_hook_source_edit(self, mock_project):
         from enki.gates.uru import check_pre_tool_use
 
+        _, _, db_path = mock_project
+        self._set_goal(db_path)
+        self._set_phase(db_path, "implement")
         result = check_pre_tool_use(
             "Edit", {"file_path": "scripts/hooks/enki-pre-tool-use.sh"}
         )
@@ -417,6 +488,9 @@ class TestGateChecks:
     def test_layer0_blocks_gemini_review_file_edits(self, mock_project):
         from enki.gates.uru import check_pre_tool_use
 
+        _, _, db_path = mock_project
+        self._set_goal(db_path)
+        self._set_phase(db_path, "implement")
         for path in [
             "src/enki/memory/gemini.py",
             "src/enki/scripts/gemini_review.py",
@@ -428,7 +502,9 @@ class TestGateChecks:
     def test_layer05_blocks_sqlite3(self, mock_project):
         from enki.gates.uru import check_pre_tool_use
 
-        enki_root, _, _ = mock_project
+        enki_root, _, db_path = mock_project
+        self._set_goal(db_path)
+        self._set_phase(db_path, "implement")
         em_path = str(enki_root / "projects" / "testproj" / "em.db")
         result = check_pre_tool_use(
             "Bash", {"command": f"sqlite3 {em_path} 'SELECT *'"}
@@ -439,12 +515,18 @@ class TestGateChecks:
     def test_layer05_allows_normal_bash(self, mock_project):
         from enki.gates.uru import check_pre_tool_use
 
+        _, _, db_path = mock_project
+        self._set_goal(db_path)
+        self._set_phase(db_path, "implement")
         result = check_pre_tool_use("Bash", {"command": "ls -la /home/user"})
         assert result["decision"] == "allow"
 
     def test_layer05_allows_read_access_to_repo_hooks(self, mock_project):
         from enki.gates.uru import check_pre_tool_use
 
+        _, _, db_path = mock_project
+        self._set_goal(db_path)
+        self._set_phase(db_path, "implement")
         result = check_pre_tool_use(
             "Bash", {"command": "cat scripts/hooks/enki-pre-tool-use.sh"}
         )
@@ -453,6 +535,9 @@ class TestGateChecks:
     def test_layer05_allows_read_access_to_gemini_review_files(self, mock_project):
         from enki.gates.uru import check_pre_tool_use
 
+        _, _, db_path = mock_project
+        self._set_goal(db_path)
+        self._set_phase(db_path, "implement")
         for command in [
             "cat src/enki/memory/gemini.py",
             "cat src/enki/scripts/gemini_review.py",
@@ -463,12 +548,18 @@ class TestGateChecks:
     def test_layer05_allows_python_test_file(self, mock_project):
         from enki.gates.uru import check_pre_tool_use
 
+        _, _, db_path = mock_project
+        self._set_goal(db_path)
+        self._set_phase(db_path, "implement")
         result = check_pre_tool_use("Bash", {"command": "python3 test_file.py"})
         assert result["decision"] == "allow"
 
     def test_layer05_allows_python_inline_sqlite3_string(self, mock_project):
         from enki.gates.uru import check_pre_tool_use
 
+        _, _, db_path = mock_project
+        self._set_goal(db_path)
+        self._set_phase(db_path, "implement")
         result = check_pre_tool_use(
             "Bash",
             {"command": "python3 -c \"print('sqlite3 ~/.enki/wisdom.db')\""},
@@ -478,7 +569,7 @@ class TestGateChecks:
     def test_read_tools_always_pass(self, mock_project):
         from enki.gates.uru import check_pre_tool_use
 
-        for tool in ["Read", "Glob", "Grep", "WebSearch", "WebFetch"]:
+        for tool in ["Read"]:
             result = check_pre_tool_use(tool, {})
             assert result["decision"] == "allow", f"{tool} should always pass"
 
@@ -494,6 +585,137 @@ class TestGateChecks:
             "Bash", {"command": 'echo "Fixed bug in uru.py" > log.txt'}
         )
         assert result["decision"] == "allow"
+
+    def test_task_with_authored_prompt_path_allowed(self, mock_project):
+        from enki.gates.uru import check_pre_tool_use
+
+        _, _, db_path = mock_project
+        self._set_goal(db_path, tier="standard")
+        self._set_phase(db_path, "implement")
+
+        result = check_pre_tool_use(
+            "Task",
+            {
+                "subagent_type": "pm",
+                "description": "Use ~/.enki/prompts/pm.md and execute task T1",
+            },
+        )
+        assert result["decision"] == "allow"
+
+    def test_task_without_prompt_path_blocked(self, mock_project):
+        from enki.gates.uru import check_pre_tool_use
+
+        _, _, db_path = mock_project
+        self._set_goal(db_path, tier="standard")
+        self._set_phase(db_path, "implement")
+
+        result = check_pre_tool_use(
+            "Task",
+            {
+                "subagent_type": "pm",
+                "description": "You are PM. Do planning now.",
+            },
+        )
+        assert result["decision"] == "block"
+        assert "authored prompt" in result["reason"]
+
+    def test_task_dev_before_pm_completes_blocked(self, mock_project):
+        from enki.gates.uru import check_pre_tool_use
+
+        _, _, db_path = mock_project
+        self._set_goal(db_path, tier="standard")
+        self._set_phase(db_path, "implement")
+
+        result = check_pre_tool_use(
+            "Task",
+            {
+                "subagent_type": "dev",
+                "description": "Use ~/.enki/prompts/dev.md for implementation",
+            },
+        )
+        assert result["decision"] == "block"
+        assert "Agent sequence violation" in result["reason"]
+
+    def test_task_dev_after_pm_and_architect_complete_allowed(self, mock_project):
+        from enki.gates.uru import check_pre_tool_use
+        from enki.gates.uru import _set_agent_status
+
+        _, _, db_path = mock_project
+        self._set_goal(db_path, tier="standard")
+        self._set_phase(db_path, "implement")
+        _set_agent_status("pm", "completed")
+        _set_agent_status("architect", "completed")
+
+        result = check_pre_tool_use(
+            "Task",
+            {
+                "subagent_type": "dev",
+                "description": "Use ~/.enki/prompts/dev.md for implementation",
+            },
+        )
+        assert result["decision"] == "allow"
+
+    def test_task_respawn_failed_dev_allowed(self, mock_project):
+        from enki.gates.uru import check_pre_tool_use
+        from enki.gates.uru import _set_agent_status
+
+        _, _, db_path = mock_project
+        self._set_goal(db_path, tier="standard")
+        self._set_phase(db_path, "implement")
+        _set_agent_status("pm", "completed")
+        _set_agent_status("architect", "completed")
+        _set_agent_status("dev", "failed")
+
+        result = check_pre_tool_use(
+            "Task",
+            {
+                "subagent_type": "dev",
+                "description": "Retry ~/.enki/prompts/dev.md for task T9",
+            },
+        )
+        assert result["decision"] == "allow"
+
+    def test_task_dev_and_qa_parallel_spawns_allowed(self, mock_project):
+        from enki.gates.uru import check_pre_tool_use
+        from enki.gates.uru import _set_agent_status
+
+        _, _, db_path = mock_project
+        self._set_goal(db_path, tier="standard")
+        self._set_phase(db_path, "implement")
+        _set_agent_status("pm", "completed")
+        _set_agent_status("architect", "completed")
+
+        dev_result = check_pre_tool_use(
+            "Task",
+            {
+                "subagent_type": "dev",
+                "description": "Use ~/.enki/prompts/dev.md for task D",
+            },
+        )
+        qa_result = check_pre_tool_use(
+            "Task",
+            {
+                "subagent_type": "qa",
+                "description": "Use ~/.enki/prompts/qa.md for task Q",
+            },
+        )
+        assert dev_result["decision"] == "allow"
+        assert qa_result["decision"] == "allow"
+
+    def test_mid_session_tier_change_attempt_blocked(self, mock_project):
+        from enki.gates.uru import check_pre_tool_use
+
+        _, _, db_path = mock_project
+        self._set_goal(db_path, tier="standard")
+        self._set_phase(db_path, "implement")
+
+        result = check_pre_tool_use(
+            "Write",
+            {"file_path": "/tmp/.enki/TIER", "content": "full"},
+            hook_context={"subagent_type": "dev"},
+        )
+        assert result["decision"] == "block"
+        assert "Tier is locked for this session" in result["reason"]
 
 
 # ── Nudges ──
@@ -555,6 +777,36 @@ class TestNudges:
             assistant_response="I decided going with approach X"
         )
         assert result["decision"] == "allow"
+
+    def test_task_post_tool_updates_agent_status(self, mock_nudge_env):
+        from enki.db import connect as _connect
+        from enki.gates.uru import check_post_tool_use
+        from enki.orch.schemas import create_tables as create_em
+
+        projects_dir = mock_nudge_env / "projects" / "testproj"
+        projects_dir.mkdir(parents=True)
+        em_path = projects_dir / "em.db"
+        with _connect(em_path) as conn:
+            create_em(conn)
+            conn.execute(
+                "INSERT INTO task_state "
+                "(task_id, project_id, sprint_id, task_name, tier, work_type, status, started_at) "
+                "VALUES ('g1', 'testproj', 's1', 'Build auth', 'standard', 'goal', 'active', datetime('now'))"
+            )
+
+        result = check_post_tool_use(
+            "Task",
+            {"subagent_type": "pm"},
+            hook_context={"subagent_type": "pm"},
+        )
+        assert result["decision"] == "allow"
+
+        with _connect(mock_nudge_env / "uru.db") as conn:
+            row = conn.execute(
+                "SELECT status FROM agent_status WHERE goal_id = 'g1' AND agent_role = 'pm'"
+            ).fetchone()
+        assert row is not None
+        assert row[0] == "completed"
 
 
 # ── Feedback proposals ──

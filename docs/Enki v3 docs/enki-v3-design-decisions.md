@@ -434,6 +434,12 @@ Static parts (1-6) in prompt file. Dynamic part (7) assembled by agents.py.
 
 **Decision**: Option C — all beads to abzu.db staging, preferences go directly to wisdom.db (skip review). External LLM reviews staging candidates, promotes valuable ones. One-time script (scripts/migrate_v1.py). Run after v3 fully built, before first real use. v1/v2 and v3 don't conflict (different schemas).
 
+### Decision: v3→v4 Memory Table Cutover (2026-02-24)
+
+**Why**: v4 introduced `notes` as the richer wisdom schema (embeddings, links, evolution), but runtime CRUD/query paths still pointed at legacy `beads`, creating split-brain behavior and stale review inputs.
+
+**Decision**: Active memory operations are now cut over to `notes` (not `beads`) across promote/search/recall/retention/summarization/consolidation/flagging paths. `beads` and `beads.py` remain as legacy artifacts (preserved, not dropped) but are no longer the active write target. Staging review flow remains intact and now resolves against v4 candidate/notes IDs.
+
 ---
 
 ## Resolved Questions
@@ -535,6 +541,45 @@ Architectural review of spec package identified 7 fundamental corrections:
 - Reason: avoid `JSONDecodeError` when hook stdin is empty or whitespace-only.
 - Non-change guarantee: no gate logic, blocking behavior, or decision outputs were modified.
 - Validation: `echo '' | PYTHONPATH=src python3 -m enki.gates.uru --hook pre-tool-use` returns `{"decision": "allow"}` with exit `0`.
+
+### 2026-02-24: Enforcement, Hook, Gemini, and Memory Migration Updates
+
+- Uru post-tool-use fail-open fix:
+  `check_post_tool_use()` exception fallback changed from block to allow. Post-tool-use enforcement remains non-blocking by design.
+- Uru pre-tool-use fail-closed verification:
+  pre-tool-use exception handlers were reviewed for inverse behavior; no unintended fail-open bare-except path was kept for blocking enforcement paths.
+- Hook error logging hardening:
+  all `scripts/hooks/enki-*.sh` now define `LOG="$HOME/.enki/hook-errors.log"`, redirect stderr to `2>>"$LOG"`, write timestamped hook invocation context, and log EMPTY RESULT cases.
+- Hook runtime interpreter fix:
+  `scripts/hooks/enki-session-end.sh` bare `python` calls replaced with `/home/partha/.enki-venv/bin/python`; all hook scripts scanned for remaining bare `python` references and corrected.
+- Hook redeploy:
+  updated hooks redeployed to `~/.claude/hooks/` and executable bit restored.
+- Layer 0 protection expansion:
+  repository hook sources in `scripts/hooks/` added to Layer 0 protected paths to close source-level bypass (deployed hook protection already existed).
+- Layer 0b bash mutation coverage:
+  bash mutation command inspection updated so mutating operations targeting `scripts/hooks/` are blocked consistently.
+- Gemini pipeline protection:
+  `src/enki/memory/gemini.py` and `src/enki/scripts/gemini_review.py` added to Layer 0 protected list; tests added for block-on-edit and allow-on-read.
+- Gemini CLI wiring fix:
+  `--run [project]` path in `src/enki/scripts/gemini_review.py` main argument handling now dispatches to `cmd_run()`; usage docs updated.
+- Gemini API modernization:
+  API client path migrated from deprecated `google.generativeai` to `google.genai` (`google-genai` package usage).
+- Gemini review package ID correctness:
+  review package and mini-review tables now include candidate IDs with full UUID mapping; prompt explicitly requires exact `candidate_id` (not row number).
+- Candidate source table fix:
+  staging candidate operations moved from legacy `bead_candidates` to `note_candidates` (v4), including list/count and related paths.
+- Prefix ID resolution for apply flow:
+  `resolve_candidate_id(short_id)` added in staging and used in review apply paths, including consolidation target resolution.
+- Consolidation target field fallback:
+  apply/report paths accept `merge_with`, `target`, or `candidate_id_to_consolidate_with`.
+- Prompt quality tightening:
+  review criteria now enforce stronger DISCARD/PROMOTE/CONSOLIDATE quality bar and reason detail requirements.
+- Comprehensive v3→v4 active-table cutover:
+  active memory CRUD/query/write paths migrated from `beads` to `notes` across `abzu.py`, `staging.py` (promotion + dedup context), `gemini.py` (consolidate/flag/resolve paths), `retention.py`, and `summarization.py`; new `src/enki/memory/notes.py` added for v4 CRUD/search utilities.
+- Data migration:
+  same-day promoted legacy records were copied from `beads` to `notes` with dedup-safe insertion; legacy `beads` table preserved unchanged.
+- Test status:
+  updated suites passed after migration and guardrail updates (including memory/session/MCP coverage and new regression cases for protected paths and ID resolution).
 
 ---
 

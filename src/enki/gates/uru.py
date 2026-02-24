@@ -122,12 +122,29 @@ def check_pre_tool_use(
     tool_name: str,
     tool_input: dict,
     reasoning_text: str = "",
+    hook_context: dict | None = None,
 ) -> dict:
     """Main gate check for pre-tool-use hook.
 
     Returns: {"decision": "allow"} or {"decision": "block", "reason": "..."}
     """
     try:
+        hook_context = hook_context or {}
+
+        goal_gate = _enforce_goal_gate(tool_name)
+        if goal_gate:
+            _log_enforcement(
+                "pre-tool-use", "layer1", tool_name, None, "block", goal_gate["reason"]
+            )
+            return goal_gate
+
+        tier_lock = _enforce_tier_immutability(tool_name, tool_input)
+        if tier_lock:
+            _log_enforcement(
+                "pre-tool-use", "layer1", tool_name, None, "block", tier_lock["reason"]
+            )
+            return tier_lock
+
         reasoning_result = inspect_reasoning(reasoning_text)
         if reasoning_result.blocked:
             _log_enforcement(
@@ -167,6 +184,21 @@ def check_pre_tool_use(
                 if tier == "full":
                     if not _is_spec_approved(project):
                         return {"decision": "block", "reason": "Spec not approved. Full tier requires approved spec before agent spawning."}
+                prompt_check = _check_task_prompt_integrity(tool_input, hook_context)
+                if prompt_check:
+                    _log_enforcement(
+                        "pre-tool-use", "layer1", tool_name, None, "block", prompt_check["reason"]
+                    )
+                    return prompt_check
+                sequence_check = _check_task_agent_sequence(tool_input, hook_context)
+                if sequence_check:
+                    _log_enforcement(
+                        "pre-tool-use", "layer1", tool_name, None, "block", sequence_check["reason"]
+                    )
+                    return sequence_check
+                role = _extract_task_role(tool_input, hook_context)
+                if role:
+                    _set_agent_status(role, "in_progress")
         if tool_name in MUTATION_TOOLS:
             filepath = tool_input.get("file_path") or tool_input.get("path", "")
             targets = [filepath] if filepath else []
@@ -219,6 +251,25 @@ def check_pre_tool_use(
             if is_exempt(target, tool_name):
                 continue
 
+            if _should_allow_main_context_non_implement_write(
+                tool_name=tool_name,
+                target=target,
+                tool_input=tool_input,
+                hook_context=hook_context or {},
+            ):
+                continue
+
+            if _should_block_main_context_implementation_write(
+                tool_name=tool_name,
+                target=target,
+                tool_input=tool_input,
+                hook_context=hook_context or {},
+            ):
+                return {
+                    "decision": "block",
+                    "reason": "Direct implementation blocked. Use spawn_agent() and Task tool.",
+                }
+
             try:
                 gate_result = _check_gates(target)
             except Exception:
@@ -245,11 +296,19 @@ def check_post_tool_use(
     tool_name: str,
     tool_input: dict,
     assistant_response: str = "",
+    hook_context: dict | None = None,
 ) -> dict:
     """Post-tool-use checks. Non-blocking. Returns nudge messages."""
     try:
+        hook_context = hook_context or {}
         nudges = []
         session_id = _get_session_id()
+
+        if tool_name == "Task":
+            role = _extract_task_role(tool_input, hook_context)
+            if role:
+                status = "failed" if _task_call_failed(hook_context, assistant_response) else "completed"
+                _set_agent_status(role, status)
 
         # Nudge 1: Unrecorded decision
         if assistant_response and _contains_decision_language(assistant_response):
@@ -407,6 +466,377 @@ def _check_gates(filepath: str) -> dict:
             }
 
     return {"decision": "allow"}
+
+
+def _enforce_goal_gate(tool_name: str) -> dict | None:
+    """Require an active goal before nearly all work begins."""
+    if _is_goal_bootstrap_tool(tool_name):
+        return None
+
+    if _has_active_goal():
+        return None
+
+    return {
+        "decision": "block",
+        "reason": "No active goal. Set a goal with enki_goal before starting work.",
+    }
+
+
+def _is_goal_bootstrap_tool(tool_name: str) -> bool:
+    """Allowlist tools before goal is set."""
+    if tool_name == "Read":
+        return True
+
+    lowered = (tool_name or "").lower()
+    return (
+        lowered.endswith("enki_goal")
+        or lowered.endswith("enki_recall")
+        or lowered.endswith("enki_status")
+    )
+
+
+def _has_active_goal() -> bool:
+    """Goal can come from session state or GOAL marker file."""
+    try:
+        project = _get_current_project()
+        if project and _get_active_goal(project):
+            return True
+    except Exception:
+        pass
+
+    goal_file = ENKI_ROOT / "GOAL"
+    if goal_file.exists() and goal_file.read_text().strip():
+        return True
+
+    return False
+
+
+def _enforce_tier_immutability(tool_name: str, tool_input: dict) -> dict | None:
+    """Tier cannot change mid-session once set by enki_goal."""
+    try:
+        project = _get_current_project()
+        if not project:
+            return None
+        current_tier = _get_tier(project)
+        if not current_tier:
+            return None
+    except Exception:
+        return None
+
+    candidate = None
+    if tool_name in {"Write", "Edit", "MultiEdit", "NotebookEdit"}:
+        target = str(tool_input.get("file_path") or tool_input.get("path") or "")
+        if Path(target).name == "TIER":
+            candidate = str(tool_input.get("content") or "").strip() or "<unknown>"
+    elif tool_name == "Bash":
+        command = str(tool_input.get("command") or "")
+        if re.search(r"\bTIER\b", command):
+            candidate = "<unknown>"
+    elif (tool_name or "").lower().endswith("enki_goal"):
+        candidate = str(tool_input.get("tier") or "").strip() or None
+
+    if candidate and candidate.lower() not in {current_tier.lower(), "auto"}:
+        return {
+            "decision": "block",
+            "reason": f"Tier is locked for this session. Cannot change from {current_tier}.",
+        }
+    return None
+
+
+def _check_task_prompt_integrity(tool_input: dict, hook_context: dict) -> dict | None:
+    """Standard/Full Task calls must reference authored prompts."""
+    prompt_blob = _collect_prompt_blob(tool_input, hook_context)
+    prompt_root = str((ENKI_ROOT / "prompts").expanduser())
+    normalized = prompt_blob.replace("~/.enki/prompts", prompt_root)
+
+    role = _extract_task_role(tool_input, hook_context)
+    if role:
+        expected = str(Path(prompt_root) / f"{role}.md")
+        if expected not in normalized:
+            return {
+                "decision": "block",
+                "reason": (
+                    "Task tool must reference an authored prompt from ~/.enki/prompts/. "
+                    "Ad-hoc agent prompts are not allowed."
+                ),
+            }
+        return None
+
+    if "/.enki/prompts/" not in normalized:
+        return {
+            "decision": "block",
+            "reason": (
+                "Task tool must reference an authored prompt from ~/.enki/prompts/. "
+                "Ad-hoc agent prompts are not allowed."
+            ),
+        }
+    return None
+
+
+def _collect_prompt_blob(tool_input: dict, hook_context: dict) -> str:
+    """Gather possible prompt/description fields for integrity checks."""
+    fields = []
+    for src in (tool_input or {}, hook_context or {}):
+        if not isinstance(src, dict):
+            continue
+        for key in ("prompt", "description", "task", "instructions", "input", "message"):
+            value = src.get(key)
+            if isinstance(value, str):
+                fields.append(value)
+        try:
+            fields.append(json.dumps(src))
+        except Exception:
+            continue
+    return "\n".join(fields)
+
+
+def _check_task_agent_sequence(tool_input: dict, hook_context: dict) -> dict | None:
+    """Enforce PM->Architect->(Dev/QA)->Validator ordering in Standard/Full."""
+    role = _extract_task_role(tool_input, hook_context)
+    if not role:
+        return None
+
+    try:
+        project = _get_current_project()
+        if not project:
+            return None
+        tier = _get_tier(project) or "minimal"
+    except Exception:
+        return None
+    if tier not in {"standard", "full"}:
+        return None
+
+    deps = {
+        "architect": ["pm"],
+        "dev": ["architect"],
+        "qa": ["architect"],
+        "validator": ["dev", "qa"],
+    }
+    required = deps.get(role, [])
+    if not required:
+        return None
+
+    # Retry logic: failed agents can be re-spawned.
+    current = _get_agent_status(role)
+    if current == "failed":
+        return None
+
+    for dep in required:
+        dep_status = _get_agent_status(dep)
+        if dep_status != "completed":
+            return {
+                "decision": "block",
+                "reason": (
+                    f"Agent sequence violation. {dep} must complete before {role} can be spawned."
+                ),
+            }
+    return None
+
+
+def _extract_task_role(tool_input: dict, hook_context: dict) -> str | None:
+    """Extract normalized agent role for Task calls."""
+    def _norm(value: str | None) -> str | None:
+        if not value:
+            return None
+        v = value.strip().lower().replace("-", "_").replace(" ", "_")
+        aliases = {
+            "general-purpose": None,
+            "general_purpose": None,
+        }
+        if v in aliases:
+            return aliases[v]
+        return v
+
+    for src in (tool_input or {}, hook_context or {}):
+        if not isinstance(src, dict):
+            continue
+        for key in ("subagent_type", "agent_role", "role", "agent"):
+            role = _norm(str(src.get(key) or ""))
+            if role:
+                return role
+
+    text = _collect_prompt_blob(tool_input, hook_context).lower()
+    match = re.search(r"/\.enki/prompts/([a-z_]+)\.md", text)
+    if match:
+        return _norm(match.group(1))
+    return None
+
+
+def _goal_id() -> str | None:
+    """Fetch active goal task ID for agent status tracking."""
+    try:
+        project = _get_current_project()
+        if not project:
+            return None
+        with em_db(project) as conn:
+            row = conn.execute(
+                "SELECT task_id FROM task_state "
+                "WHERE work_type = 'goal' AND status != 'completed' "
+                "ORDER BY started_at DESC LIMIT 1"
+            ).fetchone()
+            return row["task_id"] if row else None
+    except Exception as e:
+        raise RuntimeError("Failed to read active goal id") from e
+
+
+def _get_agent_status(agent_role: str) -> str | None:
+    """Read agent status for active goal."""
+    gid = _goal_id()
+    if not gid:
+        return None
+    try:
+        with uru_db() as conn:
+            row = conn.execute(
+                "SELECT status FROM agent_status WHERE goal_id = ? AND agent_role = ?",
+                (gid, agent_role),
+            ).fetchone()
+            return row["status"] if row else None
+    except Exception as e:
+        raise RuntimeError("Failed to read agent status") from e
+
+
+def _set_agent_status(agent_role: str, status: str) -> None:
+    """Upsert agent status for active goal."""
+    gid = _goal_id()
+    if not gid:
+        return
+    try:
+        with uru_db() as conn:
+            conn.execute(
+                "INSERT INTO agent_status (goal_id, agent_role, status, updated_at) "
+                "VALUES (?, ?, ?, datetime('now')) "
+                "ON CONFLICT(goal_id, agent_role) DO UPDATE SET "
+                "status = excluded.status, updated_at = datetime('now')",
+                (gid, agent_role, status),
+            )
+    except Exception as e:
+        raise RuntimeError("Failed to write agent status") from e
+
+
+def _task_call_failed(hook_context: dict, assistant_response: str) -> bool:
+    """Best-effort error detection for Task completion status."""
+    for key in ("error", "tool_error", "exception"):
+        value = hook_context.get(key)
+        if isinstance(value, str) and value.strip():
+            return True
+        if value is True:
+            return True
+
+    status = str(hook_context.get("status") or "").lower()
+    if status in {"error", "failed", "failure"}:
+        return True
+
+    response_text = assistant_response.lower()
+    if any(tok in response_text for tok in ("task failed", "error:", "exception")):
+        return True
+    return False
+
+
+def _should_block_main_context_implementation_write(
+    tool_name: str,
+    target: str,
+    tool_input: dict,
+    hook_context: dict,
+) -> bool:
+    """Block direct main-context implementation writes in implement phase."""
+    if tool_name not in {"Write", "Edit", "MultiEdit"}:
+        return False
+    if _is_main_impl_exempt_path(target):
+        return False
+    if not _is_src_or_test_path(target):
+        return False
+    if _is_subagent_context(tool_input, hook_context):
+        return False
+
+    project = _get_current_project()
+    if not project:
+        return False
+
+    phase = _get_current_phase(project)
+    return phase == "implement"
+
+
+def _should_allow_main_context_non_implement_write(
+    tool_name: str,
+    target: str,
+    tool_input: dict,
+    hook_context: dict,
+) -> bool:
+    """Allow direct main-context src/test writes outside implement phase."""
+    if tool_name not in {"Write", "Edit", "MultiEdit"}:
+        return False
+    if _is_main_impl_exempt_path(target):
+        return True
+    if not _is_src_or_test_path(target):
+        return False
+    if _is_subagent_context(tool_input, hook_context):
+        return False
+
+    project = _get_current_project()
+    if not project:
+        return False
+
+    phase = _get_current_phase(project)
+    return bool(phase and phase != "implement")
+
+
+def _is_main_impl_exempt_path(filepath: str) -> bool:
+    """Allow planning/spec/mail/config paths during any phase."""
+    path = Path(filepath)
+    parts = {p.lower() for p in path.parts}
+    name = path.name.lower()
+
+    try:
+        path.resolve().relative_to(ENKI_ROOT.resolve())
+        return True
+    except ValueError:
+        pass
+
+    if "mail" in parts:
+        return True
+
+    if "specs" in parts or "plans" in parts:
+        return True
+
+    if "spec" in name or "plan" in name:
+        return True
+
+    return False
+
+
+def _is_src_or_test_path(filepath: str) -> bool:
+    """Match implementation/test trees targeted by this policy."""
+    parts = {p.lower() for p in Path(filepath).parts}
+    return "src" in parts or "test" in parts or "tests" in parts
+
+
+def _is_subagent_context(tool_input: dict, hook_context: dict) -> bool:
+    """Detect whether this tool call originates from a Task subagent context."""
+    sources = [tool_input or {}, hook_context or {}]
+
+    for src in sources:
+        if src.get("subagent_type"):
+            return True
+        if src.get("agent_role"):
+            return True
+        if src.get("parent_tool_use_id") or src.get("parentToolUseId"):
+            return True
+        if src.get("task_id"):
+            return True
+
+        chain = src.get("tool_call_chain") or src.get("call_chain")
+        if isinstance(chain, str) and "task" in chain.lower():
+            return True
+        if isinstance(chain, list):
+            for item in chain:
+                if isinstance(item, str) and "task" in item.lower():
+                    return True
+                if isinstance(item, dict):
+                    tool = str(item.get("tool_name") or item.get("tool") or "")
+                    if tool.lower() == "task":
+                        return True
+
+    return False
 
 
 def _get_session_id() -> str:
@@ -644,10 +1074,14 @@ def main():
     )
 
     if args.hook == "pre-tool-use":
-        result = check_pre_tool_use(tool_name, tool_input)
+        result = check_pre_tool_use(
+            tool_name,
+            tool_input,
+            hook_context=hook_input,
+        )
     elif args.hook == "post-tool-use":
         response = hook_input.get("assistant_response", "")
-        result = check_post_tool_use(tool_name, tool_input, response)
+        result = check_post_tool_use(tool_name, tool_input, response, hook_context=hook_input)
     elif args.hook == "session-start":
         session_id = hook_input.get("session_id", str(uuid.uuid4()))
         init_session(session_id)

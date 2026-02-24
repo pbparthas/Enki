@@ -67,3 +67,17 @@ def create_tables(conn) -> None:
             PRIMARY KEY (nudge_type, session_id)
         )
     """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS agent_status (
+            goal_id TEXT NOT NULL,
+            agent_role TEXT NOT NULL,
+            status TEXT NOT NULL,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (goal_id, agent_role)
+        )
+    """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_status_goal "
+        "ON agent_status(goal_id)"
+    )
