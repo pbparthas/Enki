@@ -133,7 +133,7 @@ def get_project_state(project: str) -> dict:
         phase_row = conn.execute(
             "SELECT task_name FROM task_state "
             "WHERE work_type = 'phase' "
-            "ORDER BY started_at DESC LIMIT 1"
+            "ORDER BY started_at DESC, rowid DESC LIMIT 1"
         ).fetchone()
 
     return {

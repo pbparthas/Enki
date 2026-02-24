@@ -93,13 +93,14 @@ def cmd_hooks_deploy(args):
 
 
 def cmd_session_end(args):
-    """Finalize current session: extract beads, run feedback loop, archive."""
+    """Finalize current session: memory, enforcement, three-loop pipeline, archive."""
+    from datetime import datetime
     from pathlib import Path
 
     from enki.db import ENKI_ROOT
-    from enki.gates.feedback import generate_session_proposals
     from enki.gates.uru import end_session as uru_end_session
     from enki.memory.abzu import finalize_session
+    from enki.session_pipeline import handle_session_end
 
     # Read current session ID
     session_path = ENKI_ROOT / "SESSION_ID"
@@ -115,39 +116,82 @@ def cmd_session_end(args):
     print()
 
     # Step 1: Finalize memory — extract candidates, reconcile summaries, run decay
-    print("Memory finalization...")
-    mem_result = finalize_session(session_id, project)
-    candidates = mem_result.get("candidates_extracted", 0) if isinstance(mem_result, dict) else 0
-    summary_id = mem_result.get("summary_id") if isinstance(mem_result, dict) else None
-    print(f"  Candidates extracted: {candidates}")
-    if summary_id:
-        print(f"  Final summary: {summary_id[:12]}...")
+    print("Step 1: Memory finalization...")
+    candidates = 0
+    summary_id = None
+    try:
+        mem_result = finalize_session(session_id, project)
+        candidates = mem_result.get("candidates_extracted", 0) if isinstance(mem_result, dict) else 0
+        summary_id = mem_result.get("summary_id") if isinstance(mem_result, dict) else None
+        print(f"  Candidates extracted: {candidates}")
+        if summary_id:
+            print(f"  Final summary: {summary_id[:12]}...")
+    except Exception as e:
+        print(f"  Error (continuing): {e}")
 
     # Step 2: Enforcement summary
-    print("\nEnforcement summary...")
-    uru_result = uru_end_session(session_id)
-    enforcement = uru_result.get("enforcement", {})
-    if enforcement:
-        for action, count in enforcement.items():
-            print(f"  {action}: {count}")
-    else:
-        print("  No enforcement events this session")
+    print("\nStep 2: Enforcement summary...")
+    enforcement = {}
+    try:
+        uru_result = uru_end_session(session_id)
+        enforcement = uru_result.get("enforcement", {})
+        if enforcement:
+            for action, count in enforcement.items():
+                print(f"  {action}: {count}")
+        else:
+            print("  No enforcement events this session")
+    except Exception as e:
+        print(f"  Error (continuing): {e}")
 
-    # Step 3: Feedback loop — propose gate adjustments
-    print("\nFeedback loop...")
-    proposals = generate_session_proposals(session_id)
-    if proposals:
-        print(f"  Generated {len(proposals)} proposal(s) for review")
+    # Step 3: Three-loop pipeline (reflector → feedback → regression)
+    print("\nStep 3: Session pipeline...")
+    pipeline_result = handle_session_end(session_id, project)
+
+    # Loop 1: Reflector
+    reflector = pipeline_result.get("reflector") or {}
+    r_candidates = reflector.get("candidates_created", 0)
+    r_insights = reflector.get("insights", [])
+    print(f"  Reflector: {r_candidates} learning(s) extracted")
+    for insight in r_insights[:3]:
+        print(f"    - {insight[:80]}")
+
+    # Loop 2: Feedback cycle
+    feedback = pipeline_result.get("feedback") or {}
+    fb_analysis = feedback.get("analysis", {})
+    fb_proposal = feedback.get("proposal_id")
+    print(f"  Feedback: FP rate {fb_analysis.get('fp_rate', 0):.0%} "
+          f"({fb_analysis.get('total_overrides', 0)} overrides / "
+          f"{fb_analysis.get('total_blocks', 0)} blocks)")
+    if fb_proposal:
+        print(f"    Proposal created: {fb_proposal[:12]}... (requires HITL approval)")
     else:
-        print("  No adjustment proposals")
+        print(f"    No proposal needed")
+
+    # Loop 3: Regression checks
+    regression = pipeline_result.get("regression") or {}
+    reg_checked = regression.get("checked", 0)
+    reg_regressions = regression.get("regressions", [])
+    print(f"  Regression: {reg_checked} applied proposals checked")
+    if reg_regressions:
+        for r in reg_regressions:
+            print(f"    WARNING: {r['description']}")
+    else:
+        print(f"    No regressions detected")
+
+    # Pipeline errors
+    pipeline_errors = pipeline_result.get("errors", [])
+    if pipeline_errors:
+        print(f"  Pipeline errors (non-fatal):")
+        for err in pipeline_errors:
+            print(f"    - {err}")
 
     # Step 4: Archive session summary to .enki/sessions/
     sessions_dir = ENKI_ROOT / "sessions"
     sessions_dir.mkdir(parents=True, exist_ok=True)
-    from datetime import datetime
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     archive_path = sessions_dir / f"{timestamp}-{session_id[:8]}.md"
 
+    proposal_count = 1 if fb_proposal else 0
     archive_lines = [
         f"# Session {session_id[:12]}",
         f"**Date:** {datetime.now().strftime('%Y-%m-%d %H:%M')}",
@@ -155,8 +199,10 @@ def cmd_session_end(args):
         "",
         "## Summary",
         f"- Candidates extracted: {candidates}",
+        f"- Reflector learnings: {r_candidates}",
         f"- Enforcement events: {sum(enforcement.values()) if enforcement else 0}",
-        f"- Feedback proposals: {len(proposals)}",
+        f"- Feedback proposals: {proposal_count}",
+        f"- Regressions: {len(reg_regressions)}",
     ]
 
     # Add goal/phase if available
@@ -170,14 +216,22 @@ def cmd_session_end(args):
     except Exception:
         pass
 
+    if r_insights:
+        archive_lines.append("")
+        archive_lines.append("## Reflector Insights")
+        for insight in r_insights:
+            archive_lines.append(f"- {insight}")
+
     archive_path.write_text("\n".join(archive_lines) + "\n")
 
     # Print final summary table
     print(f"\n{'─' * 40}")
     print(f"Session archived: {archive_path.name}")
-    print(f"  Beads captured:    {candidates}")
+    print(f"  Candidates:        {candidates}")
+    print(f"  Reflector:         {r_candidates} learnings")
     print(f"  Enforcement:       {sum(enforcement.values()) if enforcement else 0} events")
-    print(f"  Proposals:         {len(proposals)}")
+    print(f"  Proposals:         {proposal_count}")
+    print(f"  Regressions:       {len(reg_regressions)}")
     print(f"{'─' * 40}")
 
 

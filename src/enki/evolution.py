@@ -340,6 +340,7 @@ def _heuristic_evolution(
 
 def _apply_direct_evolution(candidate_id: str, proposed: dict) -> None:
     """Apply evolution directly to an abzu.db candidate."""
+    import json as _json
     from enki.db import get_abzu_db
 
     conn = get_abzu_db()
@@ -351,10 +352,12 @@ def _apply_direct_evolution(candidate_id: str, proposed: dict) -> None:
             params.append(proposed["proposed_context"])
         if "proposed_keywords" in proposed and proposed["proposed_keywords"]:
             updates.append("keywords = ?")
-            params.append(proposed["proposed_keywords"])
+            val = proposed["proposed_keywords"]
+            params.append(",".join(val) if isinstance(val, list) else val)
         if "proposed_tags" in proposed and proposed["proposed_tags"]:
             updates.append("tags = ?")
-            params.append(proposed["proposed_tags"])
+            val = proposed["proposed_tags"]
+            params.append(_json.dumps(val) if isinstance(val, list) else val)
 
         if not updates:
             return
@@ -380,6 +383,14 @@ def _create_evolution_proposal(
     proposal_id = str(uuid.uuid4())
     reason = f"New related note {triggered_by} has additional context"
 
+    kw = proposed.get("proposed_keywords")
+    if isinstance(kw, list):
+        kw = ",".join(kw)
+    tags = proposed.get("proposed_tags")
+    if isinstance(tags, list):
+        import json as _json
+        tags = _json.dumps(tags)
+
     conn = get_abzu_db()
     try:
         conn.execute(
@@ -392,8 +403,8 @@ def _create_evolution_proposal(
                 target_note_id,
                 triggered_by,
                 proposed.get("proposed_context"),
-                proposed.get("proposed_keywords"),
-                proposed.get("proposed_tags"),
+                kw,
+                tags,
                 reason,
             ),
         )

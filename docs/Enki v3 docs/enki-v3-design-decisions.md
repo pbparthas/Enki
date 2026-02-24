@@ -2,7 +2,7 @@
 
 > **Purpose**: This document captures every architectural decision made during the Enki from-scratch redesign. It is the continuity artifact — when a new chat starts, reading this document should bring the reviewer up to speed on where we are, what was decided, and what's still open.
 >
-> **Last updated**: 2025-02-13
+> **Last updated**: 2026-02-24
 >
 > **Context**: Current Enki (v1/v2) is disabled. We are redesigning from scratch using a three-pillar model. This project (Claude.ai) is the external review channel — Claude Code never sees these conversations. Partha brings specs and decisions here for independent analysis, then takes refined outputs back to implementation.
 
@@ -522,6 +522,19 @@ Architectural review of spec package identified 7 fundamental corrections:
 | Implementation Spec | v1.2 | enki-v3-implementation-spec-v1.2.md |
 | Agent Prompt Spec | v1.0 | agent-prompt-spec.md |
 | Design Decisions (this doc) | — | enki-v3-design-decisions.md |
+
+---
+
+## Maintenance Updates
+
+### 2026-02-24: Uru hook stdin JSON parsing hardening
+
+- Scope: `src/enki/gates/uru.py` CLI hook entrypoint input parsing only.
+- Change: replaced direct `json.loads(sys.stdin.read())` with empty-safe parsing:
+  `raw = sys.stdin.read().strip() if not sys.stdin.isatty() else ""` and `hook_input = json.loads(raw) if raw else {}`.
+- Reason: avoid `JSONDecodeError` when hook stdin is empty or whitespace-only.
+- Non-change guarantee: no gate logic, blocking behavior, or decision outputs were modified.
+- Validation: `echo '' | PYTHONPATH=src python3 -m enki.gates.uru --hook pre-tool-use` returns `{"decision": "allow"}` with exit `0`.
 
 ---
 

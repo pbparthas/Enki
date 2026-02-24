@@ -15,6 +15,17 @@ import enki.db as db_mod
 PROJECT = "integration-test"
 
 
+def _create_prompt_stubs(enki_root):
+    """Create minimal prompt stubs for tests."""
+    prompts_dir = enki_root / "prompts"
+    prompts_dir.mkdir(exist_ok=True)
+    (prompts_dir / "_base.md").write_text("You are an Enki agent.")
+    (prompts_dir / "_coding_standards.md").write_text("Write clean code.")
+    for role in ("pm", "architect", "dba", "dev", "qa", "ui_ux", "validator",
+                 "reviewer", "infosec", "devops", "performance", "researcher", "em"):
+        (prompts_dir / f"{role}.md").write_text(f"You are the {role} agent.")
+
+
 @pytest.fixture
 def em_root(tmp_path):
     """Isolated ENKI_ROOT with all DBs initialized."""
@@ -22,12 +33,15 @@ def em_root(tmp_path):
     root.mkdir()
     db_dir = root / "db"
     db_dir.mkdir()
+    _create_prompt_stubs(root)
     old_initialized = db_mod._em_initialized.copy()
     db_mod._em_initialized.clear()
     import enki.gates.uru as uru_mod
+    import enki.orch.agents as agents_mod
     with patch.object(db_mod, "ENKI_ROOT", root), \
          patch.object(db_mod, "DB_DIR", db_dir), \
-         patch.object(uru_mod, "ENKI_ROOT", root):
+         patch.object(uru_mod, "ENKI_ROOT", root), \
+         patch.object(agents_mod, "PROMPTS_DIR", root / "prompts"):
         db_mod.init_all()
         yield root
     db_mod._em_initialized = old_initialized

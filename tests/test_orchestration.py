@@ -13,6 +13,17 @@ import pytest
 import enki.db as db_mod
 
 
+def _create_prompt_stubs(enki_root):
+    """Create minimal prompt stubs for tests."""
+    prompts_dir = enki_root / "prompts"
+    prompts_dir.mkdir(exist_ok=True)
+    (prompts_dir / "_base.md").write_text("You are an Enki agent.")
+    (prompts_dir / "_coding_standards.md").write_text("Write clean code.")
+    for role in ("pm", "architect", "dba", "dev", "qa", "ui_ux", "validator",
+                 "reviewer", "infosec", "devops", "performance", "researcher", "em"):
+        (prompts_dir / f"{role}.md").write_text(f"You are the {role} agent.")
+
+
 @pytest.fixture
 def em_root(tmp_path):
     """Provide isolated ENKI_ROOT with all DBs + em.db auto-init."""
@@ -20,10 +31,13 @@ def em_root(tmp_path):
     root.mkdir()
     db_dir = root / "db"
     db_dir.mkdir()
+    _create_prompt_stubs(root)
     old_init = db_mod._em_initialized.copy()
     db_mod._em_initialized.clear()
+    import enki.orch.agents as agents_mod
     with patch.object(db_mod, "ENKI_ROOT", root), \
-         patch.object(db_mod, "DB_DIR", db_dir):
+         patch.object(db_mod, "DB_DIR", db_dir), \
+         patch.object(agents_mod, "PROMPTS_DIR", root / "prompts"):
         from enki.db import init_all
         init_all()
         yield root
