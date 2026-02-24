@@ -38,6 +38,10 @@ class TestLayer0Protected:
     def test_blocks_layer0_py(self):
         assert is_layer0_protected("/home/user/src/enki/gates/layer0.py")
 
+    def test_blocks_gemini_review_files(self):
+        assert is_layer0_protected("/home/user/src/enki/memory/gemini.py")
+        assert is_layer0_protected("/home/user/src/enki/scripts/gemini_review.py")
+
     def test_blocks_persona_md(self):
         assert is_layer0_protected("/home/user/.enki/persona/PERSONA.md")
 
@@ -56,6 +60,11 @@ class TestLayer0Protected:
 
     def test_blocks_prompts_directory(self):
         path = str(ENKI_ROOT / "prompts" / "custom.md")
+        assert is_layer0_protected(path)
+
+    def test_blocks_repo_scripts_hooks_directory(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        path = str(repo_root / "scripts" / "hooks" / "enki-pre-tool-use.sh")
         assert is_layer0_protected(path)
 
     def test_blocks_uru_db(self):
@@ -396,6 +405,26 @@ class TestGateChecks:
         assert result["decision"] == "block"
         assert "Layer 0" in result["reason"]
 
+    def test_layer0_blocks_repo_hook_source_edit(self, mock_project):
+        from enki.gates.uru import check_pre_tool_use
+
+        result = check_pre_tool_use(
+            "Edit", {"file_path": "scripts/hooks/enki-pre-tool-use.sh"}
+        )
+        assert result["decision"] == "block"
+        assert "Layer 0" in result["reason"]
+
+    def test_layer0_blocks_gemini_review_file_edits(self, mock_project):
+        from enki.gates.uru import check_pre_tool_use
+
+        for path in [
+            "src/enki/memory/gemini.py",
+            "src/enki/scripts/gemini_review.py",
+        ]:
+            result = check_pre_tool_use("Edit", {"file_path": path})
+            assert result["decision"] == "block"
+            assert "Layer 0" in result["reason"]
+
     def test_layer05_blocks_sqlite3(self, mock_project):
         from enki.gates.uru import check_pre_tool_use
 
@@ -412,6 +441,24 @@ class TestGateChecks:
 
         result = check_pre_tool_use("Bash", {"command": "ls -la /home/user"})
         assert result["decision"] == "allow"
+
+    def test_layer05_allows_read_access_to_repo_hooks(self, mock_project):
+        from enki.gates.uru import check_pre_tool_use
+
+        result = check_pre_tool_use(
+            "Bash", {"command": "cat scripts/hooks/enki-pre-tool-use.sh"}
+        )
+        assert result["decision"] == "allow"
+
+    def test_layer05_allows_read_access_to_gemini_review_files(self, mock_project):
+        from enki.gates.uru import check_pre_tool_use
+
+        for command in [
+            "cat src/enki/memory/gemini.py",
+            "cat src/enki/scripts/gemini_review.py",
+        ]:
+            result = check_pre_tool_use("Bash", {"command": command})
+            assert result["decision"] == "allow"
 
     def test_layer05_allows_python_test_file(self, mock_project):
         from enki.gates.uru import check_pre_tool_use

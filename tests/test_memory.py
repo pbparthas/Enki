@@ -2,7 +2,9 @@
 
 import json
 import os
+import sys
 import tempfile
+import types
 from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
@@ -251,7 +253,7 @@ class TestStaging:
 
     def test_dedup_cross_db(self, mem_env):
         """Adding a candidate that already exists in wisdom.db returns None."""
-        from enki.memory.beads import create
+        from enki.memory.notes import create
         from enki.memory.staging import add_candidate
 
         create("Already in wisdom", "preference")
@@ -259,7 +261,7 @@ class TestStaging:
         assert cid is None
 
     def test_promote_candidate(self, mem_env):
-        from enki.memory.beads import get
+        from enki.memory.notes import get
         from enki.memory.staging import add_candidate, get_candidate, promote
 
         cid = add_candidate("Promote this", "decision")
@@ -307,6 +309,67 @@ class TestStaging:
 
         assert count_candidates() == 4
 
+    def test_list_and_count_use_note_candidates_not_legacy_v3(self, mem_env):
+        from enki.db import abzu_db
+        from enki.memory.staging import count_candidates, list_candidates
+
+        with abzu_db() as conn:
+            conn.execute(
+                "INSERT INTO bead_candidates "
+                "(id, content, summary, category, project, content_hash, source, session_id) "
+                "VALUES ('legacy-cand', 'legacy v3', NULL, 'learning', NULL, 'h-legacy', 'session', NULL)"
+            )
+            conn.execute(
+                "INSERT INTO note_candidates "
+                "(id, content, summary, category, project, content_hash, source, session_id) "
+                "VALUES ('v4-cand', 'fresh v4', NULL, 'learning', NULL, 'h-v4', 'manual', NULL)"
+            )
+
+        rows = list_candidates(limit=50)
+        ids = {r["id"] for r in rows}
+        assert "v4-cand" in ids
+        assert "legacy-cand" not in ids
+        assert count_candidates() == 1
+
+    def test_resolve_candidate_id_exact_match(self, mem_env):
+        from enki.memory.staging import add_candidate, resolve_candidate_id
+
+        cid = add_candidate("Exact match candidate id test", "learning")
+        assert cid is not None
+        assert resolve_candidate_id(cid) == cid
+
+    def test_resolve_candidate_id_prefix_match(self, mem_env):
+        from enki.memory.staging import add_candidate, resolve_candidate_id
+
+        cid = add_candidate("Prefix match candidate id test", "learning")
+        assert cid is not None
+        assert resolve_candidate_id(cid[:8]) == cid
+
+    def test_resolve_candidate_id_no_match(self, mem_env):
+        from enki.memory.staging import resolve_candidate_id
+
+        assert resolve_candidate_id("deadbeef") is None
+
+    def test_resolve_candidate_id_ambiguous_prefix(self, mem_env):
+        from enki.db import abzu_db
+        from enki.memory.staging import resolve_candidate_id
+
+        with abzu_db() as conn:
+            conn.execute(
+                "INSERT INTO note_candidates "
+                "(id, content, summary, category, project, content_hash, source, session_id) "
+                "VALUES (?, 'c1', NULL, 'learning', NULL, ?, 'manual', NULL)",
+                ("aaaaaaaa-1111-1111-1111-111111111111", "h-amb-1"),
+            )
+            conn.execute(
+                "INSERT INTO note_candidates "
+                "(id, content, summary, category, project, content_hash, source, session_id) "
+                "VALUES (?, 'c2', NULL, 'learning', NULL, ?, 'manual', NULL)",
+                ("aaaaaaaa-2222-2222-2222-222222222222", "h-amb-2"),
+            )
+
+        assert resolve_candidate_id("aaaaaaaa") is None
+
 
 # ── Retention ──
 
@@ -335,7 +398,7 @@ class TestRetention:
         old_date = (datetime.now() - timedelta(days=400)).isoformat()
         with wisdom_db() as conn:
             conn.execute(
-                "UPDATE beads SET last_accessed = ? WHERE id = ?",
+                "UPDATE notes SET last_accessed = ? WHERE id = ?",
                 (old_date, bead["id"]),
             )
 
@@ -353,7 +416,7 @@ class TestRetention:
         old_date = (datetime.now() - timedelta(days=400)).isoformat()
         with wisdom_db() as conn:
             conn.execute(
-                "UPDATE beads SET last_accessed = ? WHERE id = ?",
+                "UPDATE notes SET last_accessed = ? WHERE id = ?",
                 (old_date, bead["id"]),
             )
 
@@ -362,7 +425,7 @@ class TestRetention:
         assert updated["weight"] == 1.0
 
     def test_decay_reduces_weight(self, mem_env):
-        from enki.memory.beads import create, get
+        from enki.memory.notes import create, get
         from enki.memory.retention import run_decay
 
         bead = create("Will decay soon", "learning")
@@ -371,7 +434,7 @@ class TestRetention:
         old_date = (datetime.now() - timedelta(days=100)).isoformat()
         with wisdom_db() as conn:
             conn.execute(
-                "UPDATE beads SET last_accessed = ? WHERE id = ?",
+                "UPDATE notes SET last_accessed = ? WHERE id = ?",
                 (old_date, bead["id"]),
             )
 
@@ -380,7 +443,7 @@ class TestRetention:
         assert updated["weight"] < 1.0
 
     def test_decay_stats(self, mem_env):
-        from enki.memory.beads import create
+        from enki.memory.notes import create
         from enki.memory.retention import get_decay_stats
 
         create("Bead 1", "decision")
@@ -442,7 +505,7 @@ class TestAbzuFacade:
 
     def test_remember_preference_goes_to_wisdom(self, mem_env):
         from enki.memory.abzu import remember
-        from enki.memory.beads import count
+        from enki.memory.notes import count
 
         result = remember("Always use strict TS", "preference")
         assert result["stored"] == "wisdom"
@@ -467,7 +530,7 @@ class TestAbzuFacade:
 
     def test_star(self, mem_env):
         from enki.memory.abzu import remember, star
-        from enki.memory.beads import get
+        from enki.memory.notes import get
 
         result = remember("Critical pattern", "preference")
         star(result["id"])
@@ -520,6 +583,31 @@ class TestGeminiReview:
 
         content = Path(path).read_text()
         assert "Staged Bead Candidates" in content
+        assert "Candidate ID" in content
+        assert "Candidate ID Mapping (Full UUID)" in content
+        assert "Do NOT use the row number" in content
+        assert "Quality bar (strict)" in content
+        assert "promote rate of 40-60%" in content
+
+    def test_prepare_mini_review_includes_candidate_ids(self, mem_env):
+        from enki.memory.staging import add_candidate
+        from enki.memory.gemini import prepare_mini_review
+
+        cid = add_candidate(
+            "Mini review candidate with ID coverage",
+            "learning",
+            project="alpha",
+        )
+
+        path = prepare_mini_review("alpha")
+        content = Path(path).read_text()
+        assert "Candidate ID" in content
+        assert cid[:8] in content
+        assert cid in content
+        assert "Candidate ID Mapping (Full UUID)" in content
+        assert "not row number" in content
+        assert "Quality bar (strict)" in content
+        assert "promote rate of 40-60%" in content
 
     def test_process_review_response(self, mem_env):
         from enki.memory.gemini import process_review_response
@@ -536,3 +624,148 @@ class TestGeminiReview:
 
         stats = process_review_response(response)
         assert stats["promoted"] == 1
+
+    def test_process_review_response_resolves_prefix_ids(self, mem_env):
+        from enki.memory.gemini import process_review_response
+        from enki.memory.staging import add_candidate, get_candidate
+
+        cid = add_candidate("Prefix promotion candidate", "learning")
+        assert cid is not None
+
+        response = json.dumps({
+            "bead_decisions": [
+                {"candidate_id": cid[:8], "action": "discard", "reason": "Not needed"}
+            ],
+            "proposal_decisions": []
+        })
+
+        stats = process_review_response(response)
+        assert stats["discarded"] == 1
+        assert get_candidate(cid) is None
+
+    def test_apply_promotions_resolves_prefix_and_merge_target(self, mem_env):
+        from enki.memory.notes import create, get
+        from enki.memory.gemini import apply_promotions
+        from enki.memory.staging import add_candidate, get_candidate
+
+        cid = add_candidate("Needs consolidation", "learning")
+        assert cid is not None
+        target = create("Existing canonical bead", "learning")
+
+        stats = apply_promotions([{
+            "candidate_id": cid[:8],
+            "action": "consolidate",
+            "merge_with": target["id"][:8],
+            "reason": "Overlap with existing note.",
+        }])
+
+        assert stats["consolidated"] == 1
+        assert get_candidate(cid) is None
+        updated = get(target["id"])
+        assert "Needs consolidation" in updated["content"]
+
+    def test_apply_promotions_accepts_all_consolidate_target_field_names(self, mem_env):
+        from enki.memory.notes import create, get
+        from enki.memory.gemini import apply_promotions
+        from enki.memory.staging import add_candidate, get_candidate
+
+        def _run_with_field(field_name: str):
+            cid = add_candidate(f"Consolidate via {field_name}", "learning")
+            assert cid is not None
+            target = create(f"Target for {field_name}", "learning")
+            stats = apply_promotions([{
+                "candidate_id": cid[:8],
+                "action": "consolidate",
+                field_name: target["id"][:8],
+                "reason": "Overlap with existing note.",
+            }])
+            assert stats["consolidated"] == 1
+            assert get_candidate(cid) is None
+            updated = get(target["id"])
+            assert f"Consolidate via {field_name}" in updated["content"]
+
+        for field in ("merge_with", "target", "candidate_id_to_consolidate_with"):
+            _run_with_field(field)
+
+    def test_run_api_review_reads_key_from_env_file(self, mem_env):
+        from enki.memory import gemini
+
+        package = mem_env / "reviews" / "review.md"
+        package.parent.mkdir(parents=True, exist_ok=True)
+        package.write_text("review package")
+        (mem_env / ".env").write_text("GOOGLE_API_KEY=file-key\n")
+
+        captured = {}
+
+        class _Models:
+            def generate_content(self, *, model, contents):
+                captured["model_name"] = model
+                captured["prompt"] = contents
+                return types.SimpleNamespace(
+                    text='{"bead_decisions":[],"proposal_decisions":[]}'
+                )
+
+        class _Client:
+            def __init__(self, api_key):
+                captured["api_key"] = api_key
+                self.models = _Models()
+
+        genai_mod = types.ModuleType("google.genai")
+        genai_mod.Client = _Client
+
+        google_mod = types.ModuleType("google")
+        google_mod.genai = genai_mod
+
+        with patch("enki.memory.gemini.ENKI_ROOT", mem_env), \
+             patch("enki.memory.gemini.generate_review_package", return_value=str(package)), \
+             patch.dict(sys.modules, {"google": google_mod, "google.genai": genai_mod}, clear=False):
+            parsed = gemini.run_api_review()
+
+        assert parsed == {"bead_decisions": [], "proposal_decisions": []}
+        assert captured["api_key"] == "file-key"
+        assert captured["model_name"] == "gemini-2.0-flash"
+        assert "review package" in captured["prompt"]
+        assert "Use the exact candidate_id value" in captured["prompt"]
+        assert "Target promote rate of 40-60%" in captured["prompt"]
+        assert "2+ sentences" in captured["prompt"]
+
+    def test_run_api_review_falls_back_to_process_env(self, mem_env, monkeypatch):
+        from enki.memory import gemini
+
+        package = mem_env / "reviews" / "mini.md"
+        package.parent.mkdir(parents=True, exist_ok=True)
+        package.write_text("mini package")
+        monkeypatch.setenv("GOOGLE_API_KEY", "env-key")
+
+        class _Models:
+            def generate_content(self, *, model, contents):
+                return types.SimpleNamespace(
+                    text='```json\n{"bead_decisions":[],"proposal_decisions":[]}\n```'
+                )
+
+        class _Client:
+            def __init__(self, api_key):
+                self.models = _Models()
+
+        genai_mod = types.ModuleType("google.genai")
+        genai_mod.Client = _Client
+
+        google_mod = types.ModuleType("google")
+        google_mod.genai = genai_mod
+
+        with patch("enki.memory.gemini.ENKI_ROOT", mem_env), \
+             patch("enki.memory.gemini.prepare_mini_review", return_value=str(package)), \
+             patch.dict(sys.modules, {"google": google_mod, "google.genai": genai_mod}, clear=False):
+            parsed = gemini.run_api_review(project="alpha")
+
+        assert parsed == {"bead_decisions": [], "proposal_decisions": []}
+
+    def test_run_api_review_raises_when_key_missing(self, mem_env, monkeypatch):
+        from enki.memory import gemini
+
+        monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+        (mem_env / ".env").write_text("OTHER_KEY=1\n")
+
+        with patch("enki.memory.gemini.ENKI_ROOT", mem_env):
+            with pytest.raises(RuntimeError, match="GOOGLE_API_KEY"):
+                gemini.run_api_review()

@@ -45,6 +45,14 @@ def test_blocks_suspicious_bash_sed_uru():
     assert result.blocked is True
 
 
+def test_blocks_suspicious_bash_rm_repo_hooks():
+    result = inspect_tool_input(
+        "Bash",
+        {"command": "rm -rf scripts/hooks/"},
+    )
+    assert result.blocked is True
+
+
 def test_allows_normal_file_edit():
     result = inspect_tool_input(
         "Edit",
