@@ -173,63 +173,6 @@ async def list_tools() -> list[Tool]:
             inputSchema={"type": "object", "properties": {}},
         ),
         Tool(
-            name="enki_triage",
-            description="Auto-detect tier from description (minimal/standard/full)",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "description": {"type": "string", "description": "Task description to triage"},
-                },
-                "required": ["description"],
-            },
-        ),
-        Tool(
-            name="enki_quick",
-            description="Fast-path for Minimal tier. Combines goal + triage + phase in one call.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "description": {"type": "string", "description": "What to fix/change"},
-                    "project": {"type": "string", "default": "."},
-                },
-                "required": ["description"],
-            },
-        ),
-        Tool(
-            name="enki_orchestrate",
-            description="Begin execution — EM starts spawning tasks",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "project": {"type": "string", "default": "."},
-                },
-            },
-        ),
-        Tool(
-            name="enki_decompose",
-            description="Break spec into task DAG",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "tasks": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "name": {"type": "string"},
-                                "files": {"type": "array", "items": {"type": "string"}},
-                                "dependencies": {"type": "array", "items": {"type": "string"}},
-                            },
-                            "required": ["name"],
-                        },
-                        "description": "Task definitions",
-                    },
-                    "project": {"type": "string", "default": "."},
-                },
-                "required": ["tasks"],
-            },
-        ),
-        Tool(
             name="enki_bug",
             description="File or manage bugs",
             inputSchema={
@@ -357,30 +300,6 @@ def _handle_wrap(args: dict) -> str:
     return json.dumps(result, indent=2)
 
 
-def _handle_triage(args: dict) -> str:
-    from .mcp.orch_tools import enki_triage
-    result = enki_triage(args["description"])
-    return json.dumps(result, indent=2)
-
-
-def _handle_quick(args: dict) -> str:
-    from .mcp.orch_tools import enki_quick
-    result = enki_quick(args["description"], args.get("project", "."))
-    return json.dumps(result, indent=2)
-
-
-def _handle_orchestrate(args: dict) -> str:
-    from .mcp.orch_tools import enki_orchestrate
-    result = enki_orchestrate(args.get("project", "."))
-    return json.dumps(result, indent=2)
-
-
-def _handle_decompose(args: dict) -> str:
-    from .mcp.orch_tools import enki_decompose
-    result = enki_decompose(args["tasks"], args.get("project", "."))
-    return json.dumps(result, indent=2)
-
-
 def _handle_bug(args: dict) -> str:
     from .mcp.orch_tools import enki_bug
     result = enki_bug(
@@ -410,10 +329,6 @@ TOOL_HANDLERS = {
     "enki_wave": _handle_wave,
     "enki_complete": _handle_complete,
     "enki_wrap": _handle_wrap,
-    "enki_triage": _handle_triage,
-    "enki_quick": _handle_quick,
-    "enki_orchestrate": _handle_orchestrate,
-    "enki_decompose": _handle_decompose,
     "enki_bug": _handle_bug,
 }
 
