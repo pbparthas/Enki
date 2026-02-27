@@ -9,7 +9,6 @@ import hashlib
 import re
 import subprocess
 import uuid
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -304,61 +303,101 @@ def enki_spawn(
     context: dict | None = None,
     project: str = ".",
 ) -> dict:
-    """Spawn a single role with authored prompt, persist full output, return summary."""
+    """Prepare an agent run (step 1) and mark status in_progress."""
     active = _require_active_goal(project)
     if active.get("error"):
         return active
 
     goal_id = active["goal_id"]
     role_key = role.strip().lower()
-    status = "failed"
-    findings: list[str] = []
     try:
         prompt = _load_authored_prompt(role_key)
         task = get_task(project, task_id) or {}
         merged_context = {"task": task, **(context or {})}
         filtered_context = _apply_blind_wall(role_key, merged_context)
 
-        # Mechanical agent execution: prompt + filtered context snapshot.
-        execution = {
+        spawn_payload = {
             "role": role_key,
             "task_id": task_id,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "prompt_path": str(ENKI_ROOT / "prompts" / f"{role_key}.md"),
             "prompt": prompt,
             "context": filtered_context,
-            "result": {
-                "status": "completed",
-                "notes": "Execution delegated mechanically by enki_spawn.",
-            },
+            "instruction": "Execute this agent using Task tool with the prompt below.",
         }
-        artifact = _goal_artifacts_dir(goal_id) / f"{role_key}-{task_id}.md"
-        artifact.write_text(_format_md(execution))
+        artifact = _goal_artifacts_dir(goal_id) / f"spawn-{role_key}-{task_id}.md"
+        artifact.write_text(_format_md(spawn_payload))
 
-        findings = _summarize_findings(task, filtered_context)
-        status = "completed"
-        _upsert_agent_status(goal_id, role_key, status)
-        _upsert_agent_status(goal_id, f"{role_key}:{task_id}", status)
-        _mail_em(project, role_key, task_id, status, findings)
+        _upsert_agent_status(goal_id, role_key, "in_progress")
+        _upsert_agent_status(goal_id, f"{role_key}:{task_id}", "in_progress")
         return {
             "role": role_key,
-            "status": status,
-            "key_findings": findings[:10],
-            "artifact": str(artifact),
+            "status": "in_progress",
+            "instruction": "Execute this agent using Task tool with the prompt below.",
+            "prompt_path": f"~/.enki/prompts/{role_key}.md",
+            "context_artifact": str(artifact),
+            "task_id": task_id,
         }
     except Exception as e:
-        _upsert_agent_status(goal_id, role_key, "failed")
-        _upsert_agent_status(goal_id, f"{role_key}:{task_id}", "failed")
-        _mail_em(project, role_key, task_id, "failed", [str(e)])
         return {
             "role": role_key,
             "status": "failed",
-            "key_findings": [str(e)],
+            "task_id": task_id,
+            "message": str(e),
         }
 
 
+def enki_report(
+    role: str,
+    task_id: str,
+    summary: str,
+    status: str = "completed",
+    project: str = ".",
+) -> dict:
+    """Record agent completion/failure (step 2) after Task execution."""
+    active = _require_active_goal(project)
+    if active.get("error"):
+        return active
+    goal_id = active["goal_id"]
+    role_key = role.strip().lower()
+    normalized_status = (status or "completed").strip().lower()
+    if normalized_status not in {"completed", "failed"}:
+        return {"error": "status must be 'completed' or 'failed'"}
+
+    if not _has_agent_status(goal_id, f"{role_key}:{task_id}", "in_progress") and not _has_agent_status(goal_id, role_key, "in_progress"):
+        return {"error": f"Cannot report for {role_key}. Required: agent_status is in_progress."}
+
+    _upsert_agent_status(goal_id, role_key, normalized_status)
+    _upsert_agent_status(goal_id, f"{role_key}:{task_id}", normalized_status)
+
+    artifact = _goal_artifacts_dir(goal_id) / f"{role_key}-{task_id}.md"
+    artifact.write_text(
+        _format_md(
+            {
+                "role": role_key,
+                "task_id": task_id,
+                "status": normalized_status,
+                "summary": summary,
+                "reported_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+    )
+
+    findings = [summary]
+    if normalized_status == "failed":
+        findings.append("failure reported")
+    _mail_em(project, role_key, task_id, normalized_status, findings)
+
+    return {
+        "role": role_key,
+        "task_id": task_id,
+        "status": normalized_status,
+        "message": f"Agent {role_key} recorded as {normalized_status}.",
+    }
+
+
 def enki_wave(goal_id: str, project: str = ".") -> dict:
-    """Execute the next ready wave; always spawns both Dev and QA per task."""
+    """Prepare next wave's Dev+QA agent runs for external Task execution."""
     active = _require_active_goal(project)
     if active.get("error"):
         return active
@@ -376,44 +415,40 @@ def enki_wave(goal_id: str, project: str = ".") -> dict:
         return {"error": "No tasks ready for next wave."}
 
     wave_no = _next_wave_number(goal_id)
-    rows = []
-    failures = []
-
-    with ThreadPoolExecutor(max_workers=max(2, len(tasks) * 2)) as pool:
-        futures = []
-        for task in tasks:
-            ctx = {
-                "task_name": task.get("task_name"),
-                "assigned_files": task.get("assigned_files", []),
-                "dependencies": task.get("dependencies", []),
-            }
-            futures.append(pool.submit(enki_spawn, "dev", task["task_id"], ctx, project))
-            futures.append(pool.submit(enki_spawn, "qa", task["task_id"], ctx, project))
-
-        for fut in as_completed(futures):
-            result = fut.result()
-            rows.append(result)
-            if result.get("status") != "completed":
-                failures.append(result)
+    agents = []
+    for task in tasks:
+        ctx = {
+            "task_name": task.get("task_name"),
+            "assigned_files": task.get("assigned_files", []),
+            "dependencies": task.get("dependencies", []),
+        }
+        dev = enki_spawn("dev", task["task_id"], ctx, project)
+        qa = enki_spawn("qa", task["task_id"], ctx, project)
+        for item in (dev, qa):
+            agents.append({
+                "role": item.get("role"),
+                "task_id": item.get("task_id"),
+                "prompt_path": item.get("prompt_path"),
+                "context_artifact": item.get("context_artifact"),
+            })
 
     report_path = _goal_artifacts_dir(goal_id) / f"wave-{wave_no}.md"
-    report_path.write_text(_format_md({
-        "goal_id": goal_id,
-        "wave_number": wave_no,
-        "tasks": [t["task_id"] for t in tasks],
-        "results": rows,
-        "failures": failures,
-    }))
+    report_path.write_text(
+        _format_md(
+            {
+                "goal_id": goal_id,
+                "wave_number": wave_no,
+                "task_ids": [t["task_id"] for t in tasks],
+                "agents": agents,
+                "instruction": "Execute each agent via Task tool, then call enki_report for each when done.",
+            }
+        )
+    )
 
     return {
-        "wave": wave_no,
-        "task_count": len(tasks),
-        "agents": [
-            {"role": r.get("role"), "status": r.get("status")}
-            for r in rows
-        ],
-        "warnings": [f"{f.get('role')}:{f.get('status')}" for f in failures],
-        "artifact": str(report_path),
+        "wave_number": wave_no,
+        "agents": agents,
+        "instruction": "Execute each agent via Task tool, then call enki_report for each when done.",
     }
 
 

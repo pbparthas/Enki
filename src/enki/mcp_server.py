@@ -144,6 +144,21 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="enki_report",
+            description="Record agent completion after Task tool execution. Call after running an agent spawned by enki_spawn.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "role": {"type": "string"},
+                    "task_id": {"type": "string"},
+                    "summary": {"type": "string"},
+                    "status": {"type": "string", "enum": ["completed", "failed"], "default": "completed"},
+                    "project": {"type": "string", "default": "."},
+                },
+                "required": ["role", "task_id", "summary"],
+            },
+        ),
+        Tool(
             name="enki_wave",
             description="Run next ready wave; always spawns both Dev and QA for each task.",
             inputSchema={
@@ -275,6 +290,18 @@ def _handle_spawn(args: dict) -> str:
     return json.dumps(result, indent=2)
 
 
+def _handle_report(args: dict) -> str:
+    from .mcp.orch_tools import enki_report
+    result = enki_report(
+        role=args["role"],
+        task_id=args["task_id"],
+        summary=args["summary"],
+        status=args.get("status", "completed"),
+        project=args.get("project", "."),
+    )
+    return json.dumps(result, indent=2)
+
+
 def _handle_wave(args: dict) -> str:
     from .mcp.orch_tools import enki_wave
     result = enki_wave(
@@ -326,6 +353,7 @@ TOOL_HANDLERS = {
     "enki_goal": _handle_goal,
     "enki_phase": _handle_phase,
     "enki_spawn": _handle_spawn,
+    "enki_report": _handle_report,
     "enki_wave": _handle_wave,
     "enki_complete": _handle_complete,
     "enki_wrap": _handle_wrap,
