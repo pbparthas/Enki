@@ -29,6 +29,8 @@ When the user signals they want to end, close, or restart the session, **always 
 - "signing off" / "logging off" / "shutting down"
 - "take a break" / "stepping away"
 
+When the user says "let's wrap", "let's close", or "restart session", call `enki_wrap()` before ending or restarting.
+
 **What to run:**
 ```bash
 enki session end --project .

@@ -581,6 +581,23 @@ Architectural review of spec package identified 7 fundamental corrections:
 - Test status:
   updated suites passed after migration and guardrail updates (including memory/session/MCP coverage and new regression cases for protected paths and ID resolution).
 
+### 2026-02-26: Orchestration Entry + Agent Spawn Enforcement (Layer 1)
+
+- Goal-first gate:
+  if no active goal exists (session state or `~/.enki/GOAL`), all tools are blocked except `enki_goal`, `enki_recall`, `enki_status`, and `Read`. `Bash` is explicitly blocked in this state.
+- Agent prompt integrity gate (Standard/Full):
+  `Task` calls must reference authored prompts under `~/.enki/prompts/` (role-specific when role is detectable). Ad-hoc prompt-only Task calls are blocked. Minimal tier remains exempt.
+- Agent sequence gate (Standard/Full):
+  enforced order is `pm -> architect -> (dev/qa) -> validator`; failed-agent re-spawn is allowed; Dev and QA parallel spawn is allowed after Architect completes.
+- Agent status persistence:
+  `uru.db` now includes `agent_status(goal_id, agent_role, status, updated_at)`. Pre-Task marks role `in_progress`; post-Task marks `completed` or `failed`.
+- Tier immutability:
+  once tier is set for the active goal/session, mid-session tier changes are blocked (including direct `TIER` file edits and conflicting tier changes via goal reset attempts).
+- Safety boundary:
+  no Layer 0 file changes, no hook source changes, no prompt content changes.
+- Validation:
+  regression and new gate tests pass, including all requested scenarios for no-goal behavior, prompt-path enforcement, spawn sequence, failed-agent retry, parallel Dev/QA, and tier-lock behavior.
+
 ---
 
 ## How to Use This Document

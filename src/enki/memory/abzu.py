@@ -7,7 +7,7 @@ Hooks, MCP tools, and other pillars call this module.
 from pathlib import Path
 from datetime import datetime
 
-from enki.db import ENKI_ROOT
+from enki.db import ENKI_ROOT, uru_db, wisdom_db
 
 
 def inject_session_start(project: str, goal: str, tier: str) -> str:
@@ -60,6 +60,37 @@ def inject_session_start(project: str, goal: str, tier: str) -> str:
             parts.append("\n## Candidate Knowledge (unreviewed)")
             for c in candidates:
                 parts.append(f"- [{c['category']}] {c['content'][:200]}")
+
+    # Session history snapshot
+    try:
+        with uru_db() as conn:
+            sessions = conn.execute(
+                "SELECT session_id, "
+                "SUM(CASE WHEN action = 'block' THEN 1 ELSE 0 END) AS blocks "
+                "FROM enforcement_log "
+                "GROUP BY session_id "
+                "ORDER BY MAX(timestamp) DESC "
+                "LIMIT 5"
+            ).fetchall()
+        violations = sum(int(r["blocks"] or 0) for r in sessions)
+        clean = sum(1 for r in sessions if int(r["blocks"] or 0) == 0)
+    except Exception:
+        violations = 0
+        clean = 0
+
+    try:
+        with wisdom_db() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS c FROM notes WHERE project = ?",
+                (project,),
+            ).fetchone()
+            note_count = int(row["c"] if row else 0)
+    except Exception:
+        note_count = 0
+
+    parts.append("\n## Session History")
+    parts.append(f"Last 5 sessions: {violations} gate violations, {clean} clean completions.")
+    parts.append(f"Knowledge base: {note_count} notes for this project.")
 
     return "\n".join(parts)
 

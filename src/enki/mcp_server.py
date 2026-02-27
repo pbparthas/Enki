@@ -103,6 +103,7 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "description": {"type": "string", "description": "What we're building"},
                     "project": {"type": "string", "description": "Optional project ID", "default": "."},
+                    "spec_path": {"type": "string", "description": "Optional authored spec path"},
                 },
                 "required": ["description"],
             },
@@ -120,13 +121,56 @@ async def list_tools() -> list[Tool]:
                     },
                     "to": {
                         "type": "string",
-                        "enum": ["intake", "debate", "spec", "approve", "implement", "review", "complete"],
+                        "enum": ["planning", "spec", "approved", "implement", "validating", "complete"],
                         "description": "Target phase for advance",
                     },
                     "project": {"type": "string", "default": "."},
                 },
                 "required": ["action"],
             },
+        ),
+        Tool(
+            name="enki_spawn",
+            description="Spawn a single agent mechanically; persist full output to artifacts and return summary.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "role": {"type": "string"},
+                    "task_id": {"type": "string"},
+                    "context": {"type": "object"},
+                    "project": {"type": "string", "default": "."},
+                },
+                "required": ["role", "task_id"],
+            },
+        ),
+        Tool(
+            name="enki_wave",
+            description="Run next ready wave; always spawns both Dev and QA for each task.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "goal_id": {"type": "string"},
+                    "project": {"type": "string", "default": "."},
+                },
+                "required": ["goal_id"],
+            },
+        ),
+        Tool(
+            name="enki_complete",
+            description="Finalize a task only when validator/QA/wave preconditions are satisfied.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string"},
+                    "project": {"type": "string", "default": "."},
+                },
+                "required": ["task_id"],
+            },
+        ),
+        Tool(
+            name="enki_wrap",
+            description="Run session-end memory curation pipeline and return aggregate counts.",
+            inputSchema={"type": "object", "properties": {}},
         ),
         Tool(
             name="enki_triage",
@@ -259,7 +303,11 @@ def _handle_restore(args: dict) -> str:
 
 def _handle_goal(args: dict) -> str:
     from .mcp.orch_tools import enki_goal
-    result = enki_goal(args["description"], args.get("project", "."))
+    result = enki_goal(
+        args["description"],
+        args.get("project", "."),
+        args.get("spec_path"),
+    )
     return json.dumps(result, indent=2)
 
 
@@ -270,6 +318,42 @@ def _handle_phase(args: dict) -> str:
         args.get("to"),
         args.get("project", "."),
     )
+    return json.dumps(result, indent=2)
+
+
+def _handle_spawn(args: dict) -> str:
+    from .mcp.orch_tools import enki_spawn
+    result = enki_spawn(
+        role=args["role"],
+        task_id=args["task_id"],
+        context=args.get("context"),
+        project=args.get("project", "."),
+    )
+    return json.dumps(result, indent=2)
+
+
+def _handle_wave(args: dict) -> str:
+    from .mcp.orch_tools import enki_wave
+    result = enki_wave(
+        goal_id=args["goal_id"],
+        project=args.get("project", "."),
+    )
+    return json.dumps(result, indent=2)
+
+
+def _handle_complete(args: dict) -> str:
+    from .mcp.orch_tools import enki_complete
+    result = enki_complete(
+        task_id=args["task_id"],
+        project=args.get("project", "."),
+    )
+    return json.dumps(result, indent=2)
+
+
+def _handle_wrap(args: dict) -> str:
+    from .mcp.orch_tools import enki_wrap
+    _ = args
+    result = enki_wrap()
     return json.dumps(result, indent=2)
 
 
@@ -322,6 +406,10 @@ TOOL_HANDLERS = {
     "enki_restore": _handle_restore,
     "enki_goal": _handle_goal,
     "enki_phase": _handle_phase,
+    "enki_spawn": _handle_spawn,
+    "enki_wave": _handle_wave,
+    "enki_complete": _handle_complete,
+    "enki_wrap": _handle_wrap,
     "enki_triage": _handle_triage,
     "enki_quick": _handle_quick,
     "enki_orchestrate": _handle_orchestrate,

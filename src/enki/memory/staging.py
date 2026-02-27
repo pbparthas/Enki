@@ -20,6 +20,7 @@ ALLOWED_NOTE_SOURCES = frozenset({
     "onboarding",
     "rescan",
     "em_distill",
+    "transcript-extraction",
 })
 
 SOURCE_ALIASES = {

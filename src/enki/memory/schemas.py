@@ -399,12 +399,12 @@ def _create_abzu_v4_tables(conn) -> None:
                 'decision', 'learning', 'pattern', 'fix', 'code_knowledge'
             )),
             project TEXT,
-            status TEXT DEFAULT 'raw' CHECK (status IN ('raw', 'enriched')),
+            status TEXT DEFAULT 'raw' CHECK (status IN ('raw', 'enriched', 'discarded')),
             file_ref TEXT,
             file_hash TEXT,
             content_hash TEXT NOT NULL,
             source TEXT NOT NULL CHECK (source IN (
-                'manual', 'session_end', 'code_scan', 'onboarding', 'rescan', 'em_distill'
+                'manual', 'session_end', 'code_scan', 'onboarding', 'rescan', 'em_distill', 'transcript-extraction'
             )),
             session_id TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
