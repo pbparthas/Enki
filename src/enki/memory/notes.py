@@ -14,6 +14,7 @@ VALID_CATEGORIES = {
     "fix",
     "preference",
     "code_knowledge",
+    "challenge",
 }
 
 

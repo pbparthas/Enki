@@ -92,6 +92,15 @@ class TestEnkiRemember:
             )
             assert result["stored"] == "staging"
 
+    def test_stores_challenge_in_staging(self, tmp_enki):
+        with _patch_db(tmp_enki):
+            from enki.mcp.memory_tools import enki_remember
+            result = enki_remember(
+                content="Missing orchestrator for agent pipeline",
+                category="challenge",
+            )
+            assert result["stored"] == "staging"
+
     def test_rejects_empty_content(self, tmp_enki):
         with _patch_db(tmp_enki):
             from enki.mcp.memory_tools import enki_remember
@@ -487,3 +496,4 @@ class TestMCPDispatch:
             remember = [t for t in tools if t["name"] == "enki_remember"][0]
             cats = remember["inputSchema"]["properties"]["category"]["enum"]
             assert "code_knowledge" in cats
+            assert "challenge" in cats

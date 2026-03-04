@@ -289,7 +289,7 @@ def _create_wisdom_v4_tables(conn) -> None:
             keywords TEXT,
             tags TEXT,
             category TEXT NOT NULL CHECK (category IN (
-                'decision', 'learning', 'pattern', 'fix', 'preference', 'code_knowledge'
+                'decision', 'learning', 'pattern', 'fix', 'preference', 'code_knowledge', 'challenge'
             )),
             project TEXT,
             file_ref TEXT,
@@ -396,7 +396,7 @@ def _create_abzu_v4_tables(conn) -> None:
             keywords TEXT,
             tags TEXT,
             category TEXT NOT NULL CHECK (category IN (
-                'decision', 'learning', 'pattern', 'fix', 'code_knowledge'
+                'decision', 'learning', 'pattern', 'fix', 'code_knowledge', 'challenge'
             )),
             project TEXT,
             status TEXT DEFAULT 'raw' CHECK (status IN ('raw', 'enriched', 'discarded')),

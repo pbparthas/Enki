@@ -14,7 +14,7 @@ PROJECT = "pipeline-proj"
 def _make_prompts(root: Path) -> None:
     prompts = root / "prompts"
     prompts.mkdir(parents=True, exist_ok=True)
-    for role in ("pm", "architect", "dev", "qa", "validator"):
+    for role in ("pm", "architect", "dev", "qa", "validator", "igi"):
         (prompts / f"{role}.md").write_text(f"You are {role}.")
 
 
@@ -62,6 +62,8 @@ def test_enki_goal_sets_spec_review_and_locks_tier(tmp_path):
         assert result["phase"] == "spec-review"
         assert result["spec_path"] == "docs/spec.md"
         assert "goal_id" in result
+        assert "Challenge pass required" in result["challenge_prompt"]
+        assert "enki_spawn(\"igi\", \"challenge-review\")" in result["challenge_prompt"]
 
         locked = enki_goal("new system architecture redesign", project=PROJECT)
         assert "error" in locked
@@ -80,14 +82,26 @@ def test_enki_phase_enforces_db_preconditions(tmp_path):
         from enki.mcp.orch_tools import enki_goal, enki_phase
 
         init_all()
-        goal = enki_goal("build an auth flow", project=PROJECT)
+        goal = enki_goal("new system authentication authorization architecture redesign", project=PROJECT)
         goal_id = goal["goal_id"]
 
         blocked = enki_phase("advance", "spec", project=PROJECT)
         assert "error" in blocked
-        assert "PM agent completed" in blocked["error"]
+        assert "Igi (challenge review) not completed" in blocked["error"]
 
-        _insert_agent_status(goal_id, "pm", "completed")
+        _insert_agent_status(goal_id, "igi", "completed")
+        blocked_challenge = enki_phase("advance", "spec", project=PROJECT)
+        assert "error" in blocked_challenge
+        assert "No challenge notes found" in blocked_challenge["error"]
+
+        from enki.mcp.memory_tools import enki_remember
+        remember = enki_remember(
+            content="Missing orchestrator component in pipeline",
+            category="challenge",
+            project=PROJECT,
+        )
+        assert remember["stored"] in ("staging", "duplicate")
+
         to_spec = enki_phase("advance", "spec", project=PROJECT)
         assert to_spec["phase"] == "spec"
 
@@ -184,6 +198,90 @@ def test_enki_report_flow(tmp_path):
         assert fail_report["status"] == "failed"
         artifact = root / "artifacts" / goal["goal_id"] / f"qa-{task_id}.md"
         assert artifact.exists()
+    db_mod._em_initialized = old_init
+
+
+def test_phase_blocked_without_igi(tmp_path):
+    root = tmp_path / ".enki"
+    (root / "db").mkdir(parents=True)
+    _make_prompts(root)
+    old_init = db_mod._em_initialized.copy()
+    db_mod._em_initialized.clear()
+    with _patch_env(root):
+        from enki.db import init_all
+        from enki.mcp.orch_tools import enki_goal, enki_phase
+        from enki.mcp.memory_tools import enki_remember
+
+        init_all()
+        enki_goal("new system authentication authorization architecture redesign", project=PROJECT)
+        enki_remember(content="Unvalidated deployment assumptions", category="challenge", project=PROJECT)
+        blocked = enki_phase("advance", "spec", project=PROJECT)
+        assert "error" in blocked
+        assert "Igi (challenge review) not completed" in blocked["error"]
+    db_mod._em_initialized = old_init
+
+
+def test_phase_allowed_with_igi_and_challenges(tmp_path):
+    root = tmp_path / ".enki"
+    (root / "db").mkdir(parents=True)
+    _make_prompts(root)
+    old_init = db_mod._em_initialized.copy()
+    db_mod._em_initialized.clear()
+    with _patch_env(root), patch("enki.mcp.orch_tools.ENKI_ROOT", root):
+        from enki.db import init_all
+        from enki.mcp.orch_tools import enki_goal, enki_spawn, enki_report, enki_phase
+        from enki.mcp.memory_tools import enki_remember
+
+        init_all()
+        enki_goal("new system authentication authorization architecture redesign", project=PROJECT)
+        spawn = enki_spawn("igi", "challenge-review", context={}, project=PROJECT)
+        assert spawn["status"] == "in_progress"
+        report = enki_report("igi", "challenge-review", "Found 3 gaps", project=PROJECT)
+        assert report["status"] == "completed"
+        enki_remember(content="Missing orchestrator", category="challenge", project=PROJECT)
+        result = enki_phase("advance", "spec", project=PROJECT)
+        assert result["phase"] == "spec"
+    db_mod._em_initialized = old_init
+
+
+def test_igi_spawn_loads_prompt(tmp_path):
+    root = tmp_path / ".enki"
+    (root / "db").mkdir(parents=True)
+    _make_prompts(root)
+    old_init = db_mod._em_initialized.copy()
+    db_mod._em_initialized.clear()
+    with _patch_env(root), patch("enki.mcp.orch_tools.ENKI_ROOT", root):
+        from enki.db import init_all
+        from enki.mcp.orch_tools import enki_goal, enki_spawn
+
+        init_all()
+        goal = enki_goal("challenge run", project=PROJECT)
+        spawn = enki_spawn("igi", "challenge-review", context={"topic": "scope"}, project=PROJECT)
+        assert spawn["status"] == "in_progress"
+        artifact = Path(spawn["context_artifact"])
+        text = artifact.read_text()
+        assert "~/.enki/prompts/igi.md" in spawn["prompt_path"]
+        assert "You are igi." in text
+        assert goal["goal_id"] in str(artifact)
+    db_mod._em_initialized = old_init
+
+
+def test_igi_role_accepted(tmp_path):
+    root = tmp_path / ".enki"
+    (root / "db").mkdir(parents=True)
+    _make_prompts(root)
+    old_init = db_mod._em_initialized.copy()
+    db_mod._em_initialized.clear()
+    with _patch_env(root), patch("enki.mcp.orch_tools.ENKI_ROOT", root):
+        from enki.db import init_all
+        from enki.mcp.orch_tools import enki_goal, enki_spawn, enki_report
+
+        init_all()
+        enki_goal("igi role check", project=PROJECT)
+        spawn = enki_spawn("igi", "challenge-review", context={}, project=PROJECT)
+        assert spawn["role"] == "igi"
+        report = enki_report("igi", "challenge-review", "Done", project=PROJECT)
+        assert report["status"] == "completed"
     db_mod._em_initialized = old_init
 
 

@@ -55,4 +55,4 @@ except Exception:
     pass
 " 2>>"$LOG" || true
 
-echo '{"decision":"allow"}'
+exit 0

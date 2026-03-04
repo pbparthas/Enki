@@ -72,6 +72,11 @@ PHASE_ALIASES = {
     "approve": "approved",
     "review": "validating",
 }
+VALID_AGENT_ROLES = {
+    "pm", "architect", "dba", "dev", "qa", "ui_ux", "validator",
+    "reviewer", "infosec", "devops", "performance", "researcher", "em",
+    "igi",
+}
 
 
 # ── Goal & Triage ──
@@ -119,6 +124,29 @@ def enki_goal(
     result = {"goal_id": goal_id, "tier": tier, "phase": phase}
     if spec_path:
         result["spec_path"] = spec_path
+    challenge_prompt = """
+⚠ PLANNING PHASE ACTIVE — Challenge pass required before spec.
+
+After recording requirements, spawn Igi for independent challenge review:
+  enki_spawn("igi", "challenge-review")
+
+Then execute Igi via Task tool with the spawn artifact.
+Then call enki_report("igi", "challenge-review", summary).
+
+Igi will identify gaps, blind spots, assumptions, and failure modes.
+Present Igi's findings to HITL alongside your intake notes.
+
+Phase transition to spec WILL CHECK that:
+1. Igi has completed (enki_report called)
+2. Challenge notes exist (enki_remember with category="challenge")
+"""
+    result["challenge_prompt"] = challenge_prompt.strip()
+    result["message"] = (
+        f"Goal registered: {description}\n"
+        f"Tier: {tier}\n"
+        "Phase: planning\n\n"
+        f"{challenge_prompt.strip()}"
+    )
     return result
 
 
@@ -181,7 +209,14 @@ def enki_phase(action: str, to: str | None = None, project: str = ".") -> dict:
             missing = f"sequential transition from {current} to {PHASE_ORDER[current_idx + 1] if current_idx + 1 < len(PHASE_ORDER) else 'complete'}"
             return {"error": f"Cannot advance to {target}. Required: {missing}"}
 
-        missing = _phase_missing_preconditions(project, goal_id, current, target)
+        missing = _phase_missing_preconditions(
+            project,
+            goal_id,
+            current,
+            target,
+            active.get("tier") or "standard",
+            active.get("started_at"),
+        )
         if missing:
             return {"error": f"Cannot advance to {target}. Required: {missing}"}
 
@@ -310,6 +345,8 @@ def enki_spawn(
 
     goal_id = active["goal_id"]
     role_key = role.strip().lower()
+    if role_key not in VALID_AGENT_ROLES:
+        return {"error": f"Unknown role: {role_key}"}
     try:
         prompt = _load_authored_prompt(role_key)
         task = get_task(project, task_id) or {}
@@ -360,6 +397,8 @@ def enki_report(
         return active
     goal_id = active["goal_id"]
     role_key = role.strip().lower()
+    if role_key not in VALID_AGENT_ROLES:
+        return {"error": f"Unknown role: {role_key}"}
     normalized_status = (status or "completed").strip().lower()
     if normalized_status not in {"completed", "failed"}:
         return {"error": "status must be 'completed' or 'failed'"}
@@ -761,7 +800,7 @@ def _phase_hint(phase: str) -> str:
 def _get_active_goal(project: str) -> dict | None:
     with em_db(project) as conn:
         row = conn.execute(
-            "SELECT task_id, task_name, tier, agent_outputs FROM task_state "
+            "SELECT task_id, task_name, tier, agent_outputs, started_at FROM task_state "
             "WHERE project_id = ? AND work_type = 'goal' AND status != 'completed' "
             "ORDER BY started_at DESC LIMIT 1",
             (project,),
@@ -779,6 +818,7 @@ def _get_active_goal(project: str) -> dict | None:
         "goal": row["task_name"],
         "tier": row["tier"],
         "phase": phase_row["task_name"] if phase_row else None,
+        "started_at": row["started_at"],
     }
 
 
@@ -789,11 +829,31 @@ def _require_active_goal(project: str) -> dict:
     return active
 
 
-def _phase_missing_preconditions(project: str, goal_id: str, current: str, target: str) -> str | None:
-    _ = current
+def _phase_missing_preconditions(
+    project: str,
+    goal_id: str,
+    current: str,
+    target: str,
+    tier: str,
+    goal_started_at: str | None,
+) -> str | None:
     if target == "spec":
-        if not _has_agent_status(goal_id, "pm", "completed"):
-            return "PM agent completed in agent_status table"
+        if current == "planning" and tier != "minimal":
+            igi_status = _get_agent_status(goal_id, "igi")
+            if igi_status != "completed":
+                return (
+                    "BLOCKED. Igi (challenge review) not completed.\n\n"
+                    "Spawn Igi for independent challenge review:\n"
+                    "  enki_spawn('igi', 'challenge-review')\n"
+                    "Then execute via Task tool, then call enki_report."
+                )
+            challenge_count = _count_challenge_notes(project, goal_started_at)
+            if challenge_count == 0:
+                return (
+                    "BLOCKED. No challenge notes found.\n\n"
+                    "Record Igi's findings with enki_remember(category='challenge').\n"
+                    "Each gap, assumption, or risk should be a separate note."
+                )
     elif target == "approved":
         if not _has_hitl_approval(project):
             return "HITL approval record"
@@ -840,6 +900,35 @@ def _has_agent_status(goal_id: str, agent_role: str, status: str) -> bool:
             (goal_id, agent_role, status),
         ).fetchone()
     return row is not None
+
+
+def _get_agent_status(goal_id: str, agent_role: str) -> str | None:
+    with uru_db() as conn:
+        row = conn.execute(
+            "SELECT status FROM agent_status WHERE goal_id = ? AND agent_role = ? LIMIT 1",
+            (goal_id, agent_role),
+        ).fetchone()
+    return row["status"] if row else None
+
+
+def _count_challenge_notes(project: str, goal_started_at: str | None) -> int:
+    threshold = goal_started_at or "1970-01-01T00:00:00"
+    total = 0
+    with wisdom_db() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS c FROM notes "
+            "WHERE category = 'challenge' AND project = ? AND created_at >= ?",
+            (project, threshold),
+        ).fetchone()
+        total += int(row["c"] if row else 0)
+    with abzu_db() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS c FROM note_candidates "
+            "WHERE category = 'challenge' AND project = ? AND created_at >= ?",
+            (project, threshold),
+        ).fetchone()
+        total += int(row["c"] if row else 0)
+    return total
 
 
 def _has_hitl_approval(project: str) -> bool:

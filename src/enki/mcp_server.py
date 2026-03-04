@@ -37,7 +37,7 @@ async def list_tools() -> list[Tool]:
                     "content": {"type": "string", "description": "The knowledge to remember"},
                     "category": {
                         "type": "string",
-                        "enum": ["decision", "learning", "pattern", "fix", "preference", "code_knowledge"],
+                        "enum": ["decision", "learning", "pattern", "fix", "preference", "code_knowledge", "challenge"],
                         "description": "Category of knowledge",
                     },
                     "project": {"type": "string", "description": "Optional project ID"},
