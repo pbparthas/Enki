@@ -34,6 +34,7 @@ MUTATION_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit", "Task"}
 # Phase order and phases where code changes are allowed
 PHASE_ORDER = ["intake", "debate", "spec", "approve", "implement", "review", "complete"]
 IMPLEMENT_PHASES = {"implement", "review", "complete"}
+AGENT_SPAWN_PHASES = {"spec", "spec-review", "approved", "debate", "approve", "implement", "review", "complete"}
 
 # Decision language patterns for nudge 1
 DECISION_PATTERNS = [
@@ -179,7 +180,7 @@ def check_pre_tool_use(
             tier = _get_tier(project) or "minimal"
             if tier in ("standard", "full"):
                 phase = _get_current_phase(project)
-                if not phase or phase not in IMPLEMENT_PHASES:
+                if not phase or phase not in AGENT_SPAWN_PHASES:
                     return {"decision": "block", "reason": f"Phase is '{phase or 'not set'}'. Agent spawning needs phase >= implement. Progress through the workflow first."}
                 if tier == "full":
                     if not _is_spec_approved(project):
