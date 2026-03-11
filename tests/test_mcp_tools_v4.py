@@ -461,6 +461,7 @@ class TestMCPDispatch:
             tools = get_tools()
             names = [t["name"] for t in tools]
             assert "enki_restore" in names
+            assert "enki_approve" in names
 
     def test_restore_handler_works(self, tmp_enki):
         with _patch_db(tmp_enki):

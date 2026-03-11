@@ -13,59 +13,76 @@ INPUT=$(cat)
 TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name // empty')
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
 PROJECT=$(echo "$INPUT" | jq -r '.project // empty')
-GOAL=$(echo "$INPUT" | jq -r '.goal // empty')
-TIER=$(echo "$INPUT" | jq -r '.tier // empty')
 
 if [[ -z "$SESSION_ID" ]]; then
     SESSION_ID=$(/home/partha/.enki-venv/bin/python -c "import uuid; print(uuid.uuid4())")
 fi
-if [[ -z "$PROJECT" && -f "$HOME/.enki/PROJECT" ]]; then
-    PROJECT=$(cat "$HOME/.enki/PROJECT")
+
+# Migrate legacy PROJECT marker once (never used for resolution)
+/home/partha/.enki-venv/bin/python -c "
+from enki.project_state import deprecate_global_project_marker
+deprecate_global_project_marker()
+" 2>/dev/null || true
+
+# Try CWD resolution first
+if [[ -z "$PROJECT" ]]; then
+    CWD=$(pwd)
+    PROJECT=$(ENKI_CWD="$CWD" /home/partha/.enki-venv/bin/python -c "
+import os
+from enki.project_state import resolve_project_from_cwd
+result = resolve_project_from_cwd(os.environ.get('ENKI_CWD', ''))
+print(result or '')
+" 2>/dev/null || echo "")
 fi
-if [[ -z "$GOAL" && -f "$HOME/.enki/GOAL" ]]; then
-    GOAL=$(cat "$HOME/.enki/GOAL")
-fi
-if [[ -z "$TIER" && -f "$HOME/.enki/TIER" ]]; then
-    TIER=$(cat "$HOME/.enki/TIER")
-fi
-if [[ -z "$TIER" ]]; then
-    TIER="standard"
+
+# Fail closed if project cannot be resolved from this directory
+if [[ -z "$PROJECT" || "$PROJECT" == "." ]]; then
+    echo "No active Enki project for this directory. Call enki_goal to initialise."
+    exit 0
 fi
 
 # Initialize enforcement state (Uru)
 echo "$(date -Iseconds) [enki-session-start] tool=$TOOL_NAME" >> "$LOG" 2>/dev/null || true
 echo "$INPUT" | /home/partha/.enki-venv/bin/python -m enki.gates.uru --hook session-start 2>>"$LOG" || true
 
-# Inject combined context: Uru enforcement + Abzu memory
+# Read project state from per-project em.db
+STATE_JSON=$(ENKI_PROJECT="$PROJECT" /home/partha/.enki-venv/bin/python -c "
+import json
+import os
+
+from enki.project_state import normalize_project_name, read_all_project_state, project_db_path
+
+project = normalize_project_name(os.environ.get('ENKI_PROJECT'))
+if project_db_path(project).exists():
+    state = read_all_project_state(project)
+else:
+    state = {'phase': None, 'tier': None, 'goal': None}
+print(json.dumps({
+    'project': project,
+    'phase': state.get('phase') or 'none',
+    'tier': state.get('tier') or 'minimal',
+    'goal': state.get('goal') or 'none',
+}))
+" 2>>"$LOG" || echo '{"project":"","phase":"none","tier":"minimal","goal":"none"}')
+
+PROJECT=$(echo "$STATE_JSON" | jq -r '.project // ""')
+PHASE=$(echo "$STATE_JSON" | jq -r '.phase // "none"')
+TIER=$(echo "$STATE_JSON" | jq -r '.tier // "minimal"')
+GOAL=$(echo "$STATE_JSON" | jq -r '.goal // "none"')
+
+# Inject ordered context: orientation -> pipeline -> persona -> Uru -> Abzu memory
 echo "$(date -Iseconds) [enki-session-start] tool=$TOOL_NAME" >> "$LOG" 2>/dev/null || true
-CONTEXT=$(/home/partha/.enki-venv/bin/python -c "
-import sys
-sys.path.insert(0, 'src')
+CONTEXT=$(ENKI_PROJECT="$PROJECT" ENKI_GOAL="$GOAL" ENKI_TIER="$TIER" ENKI_PHASE="$PHASE" /home/partha/.enki-venv/bin/python -c "
+import os
 
-parts = []
+from enki.session_context import build_session_start_context
 
-# Uru enforcement context
-try:
-    from enki.gates.uru import inject_enforcement_context
-    uru_ctx = inject_enforcement_context()
-    if uru_ctx:
-        parts.append(uru_ctx)
-except Exception:
-    parts.append('Uru: Enforcement context unavailable.')
+project = os.environ.get('ENKI_PROJECT') or 'default'
+goal = os.environ.get('ENKI_GOAL') or 'none'
+tier = os.environ.get('ENKI_TIER') or 'minimal'
+phase = os.environ.get('ENKI_PHASE') or 'none'
 
-# Abzu memory context (persona + beads + last summary)
-try:
-    from enki.memory.abzu import inject_session_start
-    project = '$PROJECT' or None
-    goal = '$GOAL' or None
-    tier = '$TIER' or 'standard'
-    abzu_ctx = inject_session_start(project, goal, tier)
-    if abzu_ctx:
-        parts.append(abzu_ctx)
-except Exception:
-    pass
-
-print('\n'.join(parts))
+print(build_session_start_context(project, goal, tier, phase))
 " 2>>"$LOG" || echo "Uru: Enforcement context unavailable.")
 
 echo "$CONTEXT"

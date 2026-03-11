@@ -421,6 +421,39 @@ class TestBugs:
         counts = count_open_bugs(PROJECT)
         assert isinstance(counts, dict)
 
+    def test_prefix_derivation(self, em_root):
+        from enki.orch.bugs import derive_project_prefix
+        assert derive_project_prefix("eridu") == "ER"
+        assert derive_project_prefix("testforge-rebuild") == "TR"
+        assert derive_project_prefix("checkpoint-test") == "CT"
+
+    def test_bug_numbering_is_project_scoped(self, em_root):
+        from enki.orch.bugs import file_bug, get_bug, to_human_bug_id
+        b1 = file_bug("project-a", "A1", "d", "QA", "P2")
+        b2 = file_bug("project-a", "A2", "d", "QA", "P2")
+        b3 = file_bug("project-b", "B1", "d", "QA", "P2")
+        assert to_human_bug_id("project-a", get_bug("project-a", b1)["bug_number"]) == "PA-001"
+        assert to_human_bug_id("project-a", get_bug("project-a", b2)["bug_number"]) == "PA-002"
+        assert to_human_bug_id("project-b", get_bug("project-b", b3)["bug_number"]) == "PB-001"
+
+    def test_existing_bugs_are_backfilled_by_created_at(self, em_root):
+        from enki.db import em_db
+        from enki.orch.bugs import list_bugs
+
+        with em_db(PROJECT) as conn:
+            conn.execute(
+                "INSERT INTO bugs "
+                "(id, project_id, filed_by, priority, title, description, created_at) "
+                "VALUES "
+                "('u1', ?, 'QA', 'P2', 'first', 'd', '2026-01-01T00:00:00'), "
+                "('u2', ?, 'QA', 'P2', 'second', 'd', '2026-01-01T00:00:01')",
+                (PROJECT, PROJECT),
+            )
+        bugs = list_bugs(PROJECT)
+        by_id = {b["id"]: b for b in bugs}
+        assert by_id["u1"]["bug_number"] == 1
+        assert by_id["u2"]["bug_number"] == 2
+
 
 # =============================================================================
 # Parsing

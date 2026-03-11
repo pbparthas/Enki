@@ -254,17 +254,26 @@ class TestGateChecks:
         with connect(uru_path) as conn:
             from enki.gates.schemas import create_tables as create_uru
             create_uru(conn)
-
         # Write session ID
         (enki_root / "SESSION_ID").write_text("test-session")
+        (enki_root / "PROJECT").write_text("testproj")
 
         db_dir = enki_root / "db"
         db_dir.mkdir()
+        cwd_match = str(Path.cwd())
+        with connect(db_dir / "wisdom.db") as conn:
+            from enki.memory.schemas import create_tables as create_memory
+            create_memory(conn, "wisdom")
+            conn.execute(
+                "INSERT INTO projects (name, path) VALUES (?, ?)",
+                ("testproj", cwd_match),
+            )
 
         with patch("enki.db.ENKI_ROOT", enki_root), \
              patch("enki.db.DB_DIR", db_dir), \
              patch("enki.gates.uru.ENKI_ROOT", enki_root), \
-             patch("enki.gates.layer0.ENKI_ROOT", enki_root):
+             patch("enki.gates.layer0.ENKI_ROOT", enki_root), \
+             patch("enki.gates.uru.os.getcwd", return_value=cwd_match):
             yield enki_root, projects_dir, db_path
 
     def _set_goal(self, db_path, goal="Build feature", tier="minimal"):
@@ -292,10 +301,15 @@ class TestGateChecks:
     def _approve_spec(self, db_path):
         with connect(db_path) as conn:
             conn.execute(
-                "INSERT INTO pm_decisions "
-                "(id, project_id, decision_type, proposed_action, human_response) "
-                "VALUES ('d1', 'testproj', 'spec_approval', 'approve impl spec', "
-                "'approved')"
+                "INSERT INTO hitl_approvals (id, project, stage, note) "
+                "VALUES ('TP-001', 'testproj', 'spec', 'approve impl spec')"
+            )
+
+    def _approve_igi(self, db_path):
+        with connect(db_path) as conn:
+            conn.execute(
+                "INSERT INTO hitl_approvals (id, project, stage, note) "
+                "VALUES ('TP-002', 'testproj', 'igi', 'igi approved spec')"
             )
 
     def test_gate1_no_goal_blocks_code(self, mock_project):
@@ -391,6 +405,21 @@ class TestGateChecks:
         self._set_goal(db_path, tier="standard")
         self._set_phase(db_path, "implement")
         self._approve_spec(db_path)
+
+        result = check_pre_tool_use(
+            "Write",
+            {"file_path": "/project/src/main.py"},
+            hook_context={"subagent_type": "dev"},
+        )
+        assert result["decision"] == "allow"
+
+    def test_gate2_standard_tier_with_igi_allows(self, mock_project):
+        from enki.gates.uru import check_pre_tool_use
+
+        _, _, db_path = mock_project
+        self._set_goal(db_path, tier="standard")
+        self._set_phase(db_path, "implement")
+        self._approve_igi(db_path)
 
         result = check_pre_tool_use(
             "Write",
@@ -702,22 +731,6 @@ class TestGateChecks:
         assert dev_result["decision"] == "allow"
         assert qa_result["decision"] == "allow"
 
-    def test_mid_session_tier_change_attempt_blocked(self, mock_project):
-        from enki.gates.uru import check_pre_tool_use
-
-        _, _, db_path = mock_project
-        self._set_goal(db_path, tier="standard")
-        self._set_phase(db_path, "implement")
-
-        result = check_pre_tool_use(
-            "Write",
-            {"file_path": "/tmp/.enki/TIER", "content": "full"},
-            hook_context={"subagent_type": "dev"},
-        )
-        assert result["decision"] == "block"
-        assert "Tier is locked for this session" in result["reason"]
-
-
 # ── Nudges ──
 
 
@@ -729,19 +742,28 @@ class TestNudges:
         enki_root = tmp_path / ".enki"
         enki_root.mkdir()
         (enki_root / "SESSION_ID").write_text("test-session")
+        (enki_root / "PROJECT").write_text("testproj")
+        cwd_match = str(Path.cwd())
+        db_dir = enki_root / "db"
+        db_dir.mkdir()
 
         uru_path = enki_root / "uru.db"
         with connect(uru_path) as conn:
             from enki.gates.schemas import create_tables
             create_tables(conn)
-
-        db_dir = enki_root / "db"
-        db_dir.mkdir()
+        with connect(db_dir / "wisdom.db") as conn:
+            from enki.memory.schemas import create_tables as create_memory
+            create_memory(conn, "wisdom")
+            conn.execute(
+                "INSERT INTO projects (name, path) VALUES (?, ?)",
+                ("testproj", cwd_match),
+            )
 
         with patch("enki.db.ENKI_ROOT", enki_root), \
              patch("enki.db.DB_DIR", db_dir), \
              patch("enki.gates.uru.ENKI_ROOT", enki_root), \
-             patch("enki.gates.layer0.ENKI_ROOT", enki_root):
+             patch("enki.gates.layer0.ENKI_ROOT", enki_root), \
+             patch("enki.gates.uru.os.getcwd", return_value=cwd_match):
             yield enki_root
 
     def test_decision_nudge_fires(self, mock_nudge_env):
@@ -768,6 +790,53 @@ class TestNudges:
         assert result["decision"] == "allow"
         if "nudges" in result:
             assert any("checkpoint" in n or "capture" in n for n in result["nudges"])
+
+
+def test_gate_checks_are_project_scoped(tmp_path):
+    enki_root = tmp_path / ".enki"
+    db_dir = enki_root / "db"
+    db_dir.mkdir(parents=True)
+
+    for project in ("proj-a", "proj-b"):
+        db_path = enki_root / "projects" / project / "em.db"
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        with connect(db_path) as conn:
+            from enki.orch.schemas import create_tables
+            create_tables(conn)
+            conn.execute(
+                "INSERT INTO project_state (key, value) VALUES ('goal', ?), ('tier', ?), ('phase', ?)",
+                (
+                    f"goal-{project}",
+                    "minimal" if project == "proj-a" else "standard",
+                    "implement" if project == "proj-a" else "planning",
+                ),
+            )
+
+    uru_path = enki_root / "uru.db"
+    with connect(uru_path) as conn:
+        from enki.gates.schemas import create_tables as create_uru
+        create_uru(conn)
+
+    with patch("enki.db.ENKI_ROOT", enki_root), \
+         patch("enki.db.DB_DIR", db_dir), \
+         patch("enki.gates.uru.ENKI_ROOT", enki_root), \
+         patch("enki.gates.layer0.ENKI_ROOT", enki_root):
+        from enki.gates.uru import check_pre_tool_use
+
+        allow = check_pre_tool_use(
+            "Write",
+            {"file_path": "/project/src/main.py"},
+            hook_context={"project": "proj-a", "subagent_type": "dev"},
+        )
+        block = check_pre_tool_use(
+            "Write",
+            {"file_path": "/project/src/main.py"},
+            hook_context={"project": "proj-b", "subagent_type": "dev"},
+        )
+
+    assert allow["decision"] == "allow"
+    assert block["decision"] == "block"
+    assert "Phase is 'planning'" in block["reason"]
 
     def test_nudges_never_block(self, mock_nudge_env):
         from enki.gates.uru import check_post_tool_use
@@ -899,10 +968,20 @@ class TestEnforcementContext:
 
         db_dir = enki_root / "db"
         db_dir.mkdir()
+        (enki_root / "PROJECT").write_text("testproj")
+        cwd_match = str(Path.cwd())
+        with connect(db_dir / "wisdom.db") as conn:
+            from enki.memory.schemas import create_tables as create_memory
+            create_memory(conn, "wisdom")
+            conn.execute(
+                "INSERT INTO projects (name, path) VALUES (?, ?)",
+                ("testproj", cwd_match),
+            )
 
         with patch("enki.db.ENKI_ROOT", enki_root), \
              patch("enki.db.DB_DIR", db_dir), \
-             patch("enki.gates.uru.ENKI_ROOT", enki_root):
+             patch("enki.gates.uru.ENKI_ROOT", enki_root), \
+             patch("enki.gates.uru.os.getcwd", return_value=cwd_match):
             yield enki_root
 
     def test_enforcement_context_includes_state(self, mock_context_env):

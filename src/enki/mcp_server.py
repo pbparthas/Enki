@@ -30,7 +30,12 @@ async def list_tools() -> list[Tool]:
         # ── Memory (Abzu) ──
         Tool(
             name="enki_remember",
-            description="Store knowledge (decision, learning, pattern, fix, preference). Preferences → permanent. Others → staging for review.",
+            description=(
+                "Store a note in memory. When to call: after decisions, fixes, and notable findings. "
+                "Categories: decision, solution, learning, violation, pattern, challenge. "
+                "Use 'challenge' for Igi findings. Use 'decision' for architectural choices. "
+                "Preference notes bypass staging and go directly to permanent memory."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -49,7 +54,10 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="enki_recall",
-            description="Search for relevant knowledge across permanent and staged stores",
+            description=(
+                "Search memory for relevant notes. When to call: at the START of every session "
+                "before doing any work, and before architectural decisions to check prior solutions."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -97,20 +105,31 @@ async def list_tools() -> list[Tool]:
         # ── Orchestration (EM) ──
         Tool(
             name="enki_goal",
-            description="Set active goal. Satisfies Gate 1. Auto-detects tier.",
+            description=(
+                "Initialise or update a project. Call this at the start of every new project "
+                "or when no goal is set. Creates full project infrastructure if missing "
+                "(directory, em.db, all tables). Parameters: project (name string, not path), "
+                "goal (what to build), tier (minimal/standard/full)."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "description": {"type": "string", "description": "What we're building"},
-                    "project": {"type": "string", "description": "Optional project ID", "default": "."},
+                    "goal": {"type": "string", "description": "Alias for description"},
+                    "project": {"type": "string", "description": "Optional project ID", "default": "default"},
+                    "tier": {"type": "string", "enum": ["minimal", "standard", "full"]},
                     "spec_path": {"type": "string", "description": "Optional authored spec path"},
                 },
-                "required": ["description"],
+                "required": [],
             },
         ),
         Tool(
             name="enki_phase",
-            description="Advance phase sequentially or return phase status.",
+            description=(
+                "Check current phase status. When to call: for status checks only. "
+                "Never call action='advance' directly; call enki_approve for HITL phase transitions. "
+                "Parameters: action ('status'), project (name)."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -124,9 +143,31 @@ async def list_tools() -> list[Tool]:
                         "enum": ["planning", "spec", "approved", "implement", "validating", "complete"],
                         "description": "Target phase for advance",
                     },
-                    "project": {"type": "string", "default": "."},
+                    "project": {"type": "string", "default": "default"},
                 },
                 "required": ["action"],
+            },
+        ),
+        Tool(
+            name="enki_approve",
+            description=(
+                "Record HITL approval and advance phase. When to call: after EVERY operator approval; "
+                "call this immediately because the gate will not advance without it. "
+                "Stages: 'igi' after Igi challenge review, "
+                "'spec' after product spec review, 'architect' after implementation spec review, "
+                "'test' after test results review. Never skip this call even if approval is verbal."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "project": {"type": "string"},
+                    "stage": {
+                        "type": "string",
+                        "enum": ["igi", "spec", "architect", "test"],
+                    },
+                    "note": {"type": "string"},
+                },
+                "required": ["project", "stage"],
             },
         ),
         Tool(
@@ -189,7 +230,11 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="enki_bug",
-            description="File or manage bugs",
+            description=(
+                "File a bug. Returns human-readable ID in format PREFIX-### (for example TF-001). "
+                "Severity: critical, high, medium, low. Call immediately when a bug is found; "
+                "do not defer. The returned bug_id is referenceable in conversation and commits."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -261,10 +306,13 @@ def _handle_restore(args: dict) -> str:
 
 def _handle_goal(args: dict) -> str:
     from .mcp.orch_tools import enki_goal
+    description = args.get("description") or args.get("goal")
     result = enki_goal(
-        args["description"],
-        args.get("project", "."),
+        description,
+        args.get("project", "default"),
         args.get("spec_path"),
+        args.get("goal"),
+        args.get("tier"),
     )
     return json.dumps(result, indent=2)
 
@@ -274,7 +322,17 @@ def _handle_phase(args: dict) -> str:
     result = enki_phase(
         args["action"],
         args.get("to"),
-        args.get("project", "."),
+        args.get("project", "default"),
+    )
+    return json.dumps(result, indent=2)
+
+
+def _handle_approve(args: dict) -> str:
+    from .mcp.orch_tools import enki_approve
+    result = enki_approve(
+        project=args["project"],
+        stage=args["stage"],
+        note=args.get("note"),
     )
     return json.dumps(result, indent=2)
 
@@ -352,6 +410,7 @@ TOOL_HANDLERS = {
     "enki_restore": _handle_restore,
     "enki_goal": _handle_goal,
     "enki_phase": _handle_phase,
+    "enki_approve": _handle_approve,
     "enki_spawn": _handle_spawn,
     "enki_report": _handle_report,
     "enki_wave": _handle_wave,

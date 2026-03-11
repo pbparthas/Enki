@@ -367,7 +367,7 @@ def enki_restore(project: str | None = None) -> dict:
             elif "Project:" in line:
                 project_line = line.split("Project:", 1)[1].strip()
 
-        parts.append(f"**Project:** {project_line or project or 'unknown'}")
+        parts.append(f"**Project:** {project or project_line or 'unknown'}")
         parts.append(f"**Goal:** {goal_line or 'NOT SET'}")
         parts.append(f"**Phase:** {phase_line or 'NOT SET'} | **Tier:** {tier_line or 'unknown'}")
         parts.append("")

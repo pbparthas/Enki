@@ -11,23 +11,9 @@ from enki.db import ENKI_ROOT, uru_db, wisdom_db
 
 
 def inject_session_start(project: str, goal: str, tier: str) -> str:
-    """Load and format context for session start injection.
-
-    Returns formatted string for CC's context window.
-    Tier-dependent: Minimal gets less, Full gets more.
-    """
+    """Load and format memory context for session start injection."""
     parts = []
-
-    # Load persona
-    persona_path = ENKI_ROOT / "persona" / "PERSONA.md"
-    if persona_path.exists():
-        persona_text = persona_path.read_text()
-        if tier == "minimal":
-            # Short persona for minimal tier
-            lines = persona_text.split("\n")[:20]
-            parts.append("\n".join(lines))
-        else:
-            parts.append(persona_text)
+    parts.append("## Abzu Memory Context")
 
     # Load last session summary
     if tier != "minimal":
@@ -42,20 +28,22 @@ def inject_session_start(project: str, goal: str, tier: str) -> str:
             if last.get("operational_state"):
                 parts.append(last["operational_state"])
 
-    # Load relevant beads
-    bead_limit = {"minimal": 0, "standard": 3, "full": 5}.get(tier, 3)
-    if bead_limit > 0 and goal:
+    # Auto recall by goal at session start (top 5)
+    goal_query = (goal or "").strip()
+    if goal_query and goal_query.lower() not in {"none", "not set"}:
         from enki.memory.notes import search
-        beads = search(goal, project=project, limit=bead_limit)
+        beads = search(goal_query, project=project, limit=5)
+        parts.append(f"\n## Auto Recall (query: {goal_query})")
         if beads:
-            parts.append("\n## Relevant Knowledge")
             for b in beads:
                 parts.append(f"- [{b['category']}] {b['content'][:200]}")
+        else:
+            parts.append("- No relevant memory found yet.")
 
     # Load staged candidates for full tier
-    if tier == "full" and goal:
+    if tier == "full" and goal_query and goal_query.lower() not in {"none", "not set"}:
         from enki.memory.staging import search_candidates
-        candidates = search_candidates(goal, limit=3)
+        candidates = search_candidates(goal_query, limit=3)
         if candidates:
             parts.append("\n## Candidate Knowledge (unreviewed)")
             for c in candidates:

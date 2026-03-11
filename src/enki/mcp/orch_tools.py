@@ -6,13 +6,25 @@ Goal, phase, triage, quick, decompose, orchestrate, mail, status, etc.
 
 import json
 import hashlib
+import logging
+import os
 import re
+import shutil
 import subprocess
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from enki.db import ENKI_ROOT, abzu_db, em_db, uru_db, wisdom_db
+from enki.db import ENKI_ROOT, abzu_db, connect, em_db, uru_db, wisdom_db
+from enki.project_state import (
+    deprecate_global_project_marker,
+    normalize_project_name,
+    project_db_path,
+    read_project_state,
+    resolve_project_from_cwd,
+    write_project_state,
+)
+from enki.orch.schemas import create_tables as create_em_tables
 from enki.orch.orchestrator import Orchestrator
 from enki.orch.tiers import (
     detect_tier,
@@ -49,9 +61,12 @@ from enki.orch.task_graph import (
     TaskStatus,
 )
 from enki.orch.bugs import (
+    derive_project_prefix,
     file_bug,
     close_bug,
     list_bugs,
+    resolve_bug_identifier,
+    to_human_bug_id,
 )
 from enki.orch.status import generate_status_update, get_sprint_summary
 from enki.orch.onboarding import (
@@ -66,16 +81,26 @@ from enki.memory import gemini as gemini_review
 from enki.memory.notes import create as create_note, update as update_note
 from enki.memory.staging import resolve_candidate_id
 
+logger = logging.getLogger(__name__)
+
 PHASE_ORDER = ["planning", "spec", "approved", "implement", "validating", "complete"]
 PHASE_ALIASES = {
     "spec-review": "spec",
     "approve": "approved",
     "review": "validating",
+    "none": "planning",
 }
 VALID_AGENT_ROLES = {
     "pm", "architect", "dba", "dev", "qa", "ui_ux", "validator",
     "reviewer", "infosec", "devops", "performance", "researcher", "em",
     "igi",
+}
+APPROVAL_STAGES = {"igi", "spec", "architect", "test"}
+APPROVAL_TARGET_PHASE = {
+    "igi": "approved",
+    "spec": "approved",
+    "architect": "implement",
+    "test": "complete",
 }
 
 
@@ -83,24 +108,75 @@ VALID_AGENT_ROLES = {
 
 
 def enki_goal(
-    description: str,
-    project: str = ".",
+    description: str | None = None,
+    project: str = "default",
     spec_path: str | None = None,
+    goal: str | None = None,
+    tier: str | None = None,
 ) -> dict:
-    """Set active goal and initialize mechanical orchestration state."""
-    tier = detect_tier(description)
-    active = _get_active_goal(project)
-    if active and active["tier"] and active["tier"] != tier:
+    """Set active goal and fully initialize project infrastructure."""
+    requested_goal = (description or goal or "").strip()
+    if not requested_goal:
+        return {"error": "Goal description is required."}
+
+    external_spec = (spec_path or "").strip()
+    external_spec_path: Path | None = None
+    if external_spec:
+        candidate = Path(external_spec).expanduser()
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            return {"error": f"spec_path could not be resolved: {external_spec}"}
+        if not resolved.exists():
+            return {"error": f"spec_path does not exist: {resolved}"}
+        if not resolved.is_file():
+            return {"error": f"spec_path is not a file: {resolved}"}
+        if not os.access(resolved, os.R_OK):
+            return {"error": f"spec_path is not readable: {resolved}"}
+        external_spec_path = resolved
+
+    project = normalize_project_name(project)
+    deprecate_global_project_marker()
+
+    db_path = project_db_path(project)
+    project_dir = db_path.parent
+    enki_root = db_path.parents[2]
+    cwd = Path.cwd().resolve()
+
+    created: dict[str, bool] = {}
+    existing: dict[str, bool] = {}
+    warnings: list[str] = []
+
+    try:
+        project_dir_exists = project_dir.exists()
+        project_dir.mkdir(parents=True, exist_ok=True)
+        created["project_dir"] = not project_dir_exists
+        existing["project_dir"] = project_dir_exists
+    except OSError as e:
         return {
-            "error": (
-                f"Tier is locked to {active['tier']} for this session. "
-                f"Cannot change to {tier}."
-            )
+            "error": f"Failed to create project directory '{project_dir}': {e}",
+            "project": project,
         }
 
-    phase = "spec-review" if spec_path else "planning"
+    db_existed = db_path.exists()
+    with connect(db_path) as conn:
+        create_em_tables(conn)
+    created["em_db"] = not db_existed
+    existing["em_db"] = db_existed
+
+    detected_tier = (tier or "").strip().lower() or detect_tier(requested_goal)
+    phase = "planning"
     goal_id = str(uuid.uuid4())
-    metadata = {"tier_locked": True, "spec_path": spec_path}
+    metadata = {"spec_path": spec_path}
+    copied_spec: Path | None = None
+    spec_mode = "internal"
+    if external_spec_path is not None:
+        copied_spec = project_dir / "external-spec.md"
+        try:
+            shutil.copy2(external_spec_path, copied_spec)
+        except OSError as e:
+            return {"error": f"Failed to copy external spec: {e}"}
+        spec_mode = "external"
 
     with em_db(project) as conn:
         conn.execute(
@@ -112,20 +188,73 @@ def enki_goal(
             "INSERT INTO task_state "
             "(task_id, project_id, sprint_id, task_name, tier, work_type, status, started_at, agent_outputs) "
             "VALUES (?, ?, 'default', ?, ?, 'goal', 'active', datetime('now'), ?)",
-            (goal_id, project, description, tier, json.dumps(metadata)),
+            (goal_id, project, requested_goal, detected_tier, json.dumps(metadata)),
         )
         conn.execute(
             "INSERT INTO task_state "
             "(task_id, project_id, sprint_id, task_name, tier, work_type, status, started_at) "
             "VALUES (?, ?, 'default', ?, ?, 'phase', 'active', datetime('now'))",
-            (str(uuid.uuid4()), project, phase, tier),
+            (str(uuid.uuid4()), project, phase, detected_tier),
         )
 
-    result = {"goal_id": goal_id, "tier": tier, "phase": phase}
+    write_project_state(project, "goal", requested_goal)
+    write_project_state(project, "tier", detected_tier)
+    write_project_state(project, "phase", phase)
+    write_project_state(project, "spec_source", spec_mode)
+    write_project_state(project, "spec_path", str(copied_spec) if copied_spec else "")
+    created["project_state"] = True
+    existing["project_state"] = False
+
+    if created["project_dir"]:
+        _write_project_last_marker(enki_root, project, cwd)
+
+    registered_cwd = str(cwd)
+    with wisdom_db() as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS projects (
+                name TEXT PRIMARY KEY,
+                path TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_active TIMESTAMP
+            )
+        """)
+        conn.execute(
+            "INSERT OR REPLACE INTO projects (name, path, last_active) "
+            "VALUES (?, ?, CURRENT_TIMESTAMP)",
+            (project, registered_cwd),
+        )
+
+    mcp_status = _ensure_project_mcp_json(cwd)
+    created["mcp_json"] = mcp_status["created"]
+    existing["mcp_json"] = mcp_status["existing"]
+    warning = mcp_status.get("warning")
+    if warning:
+        warnings.append(warning)
+
+    result = {
+        "status": "initialised",
+        "project": project,
+        "goal_id": goal_id,
+        "tier": detected_tier,
+        "phase": phase,
+        "spec_mode": spec_mode,
+    }
     if spec_path:
         result["spec_path"] = spec_path
+    if copied_spec:
+        result["spec_copied_to"] = str(copied_spec)
+    result["bootstrap"] = {
+        "project": project,
+        "project_dir": str(project_dir),
+        "db_path": str(db_path),
+        "registered_path": registered_cwd,
+        "created": created,
+        "existing": existing,
+    }
+    if warnings:
+        result["bootstrap"]["warnings"] = warnings
     challenge_prompt = """
-⚠ PLANNING PHASE ACTIVE — Challenge pass required before spec.
+⚠ PRE-SPEC PHASE ACTIVE — Challenge pass required before spec.
 
 After recording requirements, spawn Igi for independent challenge review:
   enki_spawn("igi", "challenge-review")
@@ -142,12 +271,50 @@ Phase transition to spec WILL CHECK that:
 """
     result["challenge_prompt"] = challenge_prompt.strip()
     result["message"] = (
-        f"Goal registered: {description}\n"
-        f"Tier: {tier}\n"
+        f"Goal registered: {requested_goal}\n"
+        f"Tier: {detected_tier}\n"
         "Phase: planning\n\n"
         f"{challenge_prompt.strip()}"
     )
     return result
+
+
+def _write_project_last_marker(enki_root: Path, project: str, cwd: Path) -> None:
+    marker = enki_root / "PROJECT.last"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(
+        f"project={project}\n"
+        f"cwd={cwd}\n"
+        f"initialized_at={datetime.now(timezone.utc).isoformat()}\n"
+    )
+
+
+def _mcp_template_path() -> Path:
+    raw = os.environ.get("ENKI_MCP_TEMPLATE", str(Path.home() / ".enki" / "mcp-template.json"))
+    return Path(raw).expanduser()
+
+
+def _ensure_project_mcp_json(cwd: Path) -> dict[str, bool | str]:
+    target = cwd / ".mcp.json"
+    if target.exists():
+        logger.info("enki_goal: .mcp.json already exists at %s; skipping", target)
+        return {"created": False, "existing": True}
+
+    template = _mcp_template_path()
+    if not template.exists():
+        warning = f"MCP template missing: {template}. Skipped writing .mcp.json"
+        logger.warning("enki_goal: %s", warning)
+        return {"created": False, "existing": False, "warning": warning}
+
+    try:
+        template_json = json.loads(template.read_text())
+        target.write_text(json.dumps(template_json, indent=2) + "\n")
+        logger.info("enki_goal: wrote .mcp.json at %s from template %s", target, template)
+        return {"created": True, "existing": False}
+    except Exception as e:
+        warning = f"Failed to write .mcp.json from template {template}: {e}"
+        logger.warning("enki_goal: %s", warning)
+        return {"created": False, "existing": False, "warning": warning}
 
 
 def enki_triage(description: str) -> dict:
@@ -169,8 +336,14 @@ def enki_quick(description: str, project: str = ".") -> dict:
     return quick(description, project)
 
 
-def enki_phase(action: str, to: str | None = None, project: str = ".") -> dict:
+def enki_phase(
+    action: str,
+    to: str | None = None,
+    project: str = "default",
+) -> dict:
     """Advance phase with DB-backed precondition checks, or return status."""
+    project = normalize_project_name(project)
+
     active = _require_active_goal(project)
     if active.get("error"):
         return active
@@ -227,9 +400,54 @@ def enki_phase(action: str, to: str | None = None, project: str = ".") -> dict:
                 "VALUES (?, ?, 'default', ?, ?, 'phase', 'active', datetime('now'))",
                 (str(uuid.uuid4()), project, target, active.get("tier") or "standard"),
             )
+        write_project_state(project, "phase", target)
         return {"phase": target, "required_next": _phase_required_next(target)}
 
     return {"error": f"Unknown action: {action}. Use 'advance' or 'status'."}
+
+
+def enki_approve(
+    project: str,
+    stage: str,
+    note: str | None = None,
+) -> dict:
+    """Create HITL approval record and advance project phase."""
+    project = normalize_project_name(project)
+    stage_key = (stage or "").strip().lower()
+    if stage_key not in APPROVAL_STAGES:
+        return {
+            "error": f"Unknown stage: {stage}. Expected one of {sorted(APPROVAL_STAGES)}"
+        }
+
+    with em_db(project) as conn:
+        _ensure_hitl_approvals_table(conn)
+        existing = conn.execute(
+            "SELECT id FROM hitl_approvals WHERE project = ? AND stage = ? "
+            "ORDER BY approved_at DESC, rowid DESC LIMIT 1",
+            (project, stage_key),
+        ).fetchone()
+        if existing:
+            approval_id = existing["id"]
+            created = False
+        else:
+            approval_id = _next_human_approval_id(conn, project)
+            conn.execute(
+                "INSERT INTO hitl_approvals (id, project, stage, note) VALUES (?, ?, ?, ?)",
+                (approval_id, project, stage_key, note),
+            )
+            created = True
+        if stage_key == "igi":
+            _insert_implied_spec_approval(conn, project)
+
+    target_phase = APPROVAL_TARGET_PHASE[stage_key]
+    write_project_state(project, "phase", target_phase)
+    return {
+        "approval_id": approval_id,
+        "project": project,
+        "stage": stage_key,
+        "phase": target_phase,
+        "created": created,
+    }
 
 
 # ── PM ──
@@ -351,6 +569,7 @@ def enki_spawn(
         prompt = _load_authored_prompt(role_key)
         task = get_task(project, task_id) or {}
         merged_context = {"task": task, **(context or {})}
+        merged_context = _inject_external_spec_mode(project, role_key, merged_context)
         filtered_context = _apply_blind_wall(role_key, merged_context)
 
         spawn_payload = {
@@ -700,26 +919,44 @@ def enki_bug(
     project: str = ".",
 ) -> dict:
     """File or manage bugs."""
+    project = normalize_project_name(project)
     priority_map = {"critical": "P0", "high": "P1", "medium": "P2", "low": "P3"}
     priority = priority_map.get(severity, "P2")
 
     if action == "file":
-        bug_id = file_bug(
+        internal_id = file_bug(
             project=project,
             title=title or "Untitled bug",
             description=description or "",
             filed_by="Human",
             priority=priority,
         )
-        return {"bug_id": bug_id, "action": "filed"}
+        with em_db(project) as conn:
+            row = conn.execute(
+                "SELECT bug_number FROM bugs WHERE id = ?",
+                (internal_id,),
+            ).fetchone()
+        human_id = to_human_bug_id(project, int(row["bug_number"]))
+        return {"bug_id": human_id, "action": "filed"}
     elif action == "close":
         if not bug_id:
             return {"error": "bug_id required for close"}
-        close_bug(project, bug_id)
-        return {"bug_id": bug_id, "action": "closed"}
+        resolved = resolve_bug_identifier(project, bug_id)
+        if not resolved:
+            return {"error": f"bug_id not found: {bug_id}"}
+        internal_id, human_id = resolved
+        close_bug(project, internal_id)
+        return {"bug_id": human_id, "action": "closed"}
     elif action == "list":
         bugs = list_bugs(project)
-        return {"bugs": bugs, "count": len(bugs)}
+        normalized = []
+        for bug in bugs:
+            item = dict(bug)
+            bug_number = item.get("bug_number")
+            item["bug_id"] = to_human_bug_id(project, int(bug_number)) if bug_number else None
+            item["internal_id"] = item.get("id")
+            normalized.append(item)
+        return {"bugs": normalized, "count": len(normalized)}
     else:
         return {"error": f"Unknown action: {action}"}
 
@@ -774,6 +1011,43 @@ def enki_profile(
 # ── Private helpers ──
 
 
+def _inject_external_spec_mode(project: str, role: str, context: dict) -> dict:
+    """Inject PM endorsement mode when an external spec is configured."""
+    if role != "pm":
+        return context
+    source = (read_project_state(project, "spec_source", "internal") or "internal").strip().lower()
+    spec_path = (read_project_state(project, "spec_path", "") or "").strip()
+    if source != "external" or not spec_path:
+        return context
+
+    try:
+        spec_text = Path(spec_path).read_text()
+    except OSError as e:
+        logger.warning("Failed to read external spec at %s: %s", spec_path, e)
+        return context
+
+    external_block = (
+        "## External Spec Mode\n\n"
+        "A spec has been provided externally and is attached below. Your job is NOT\n"
+        "to write a new spec from scratch. Your job is to:\n\n"
+        "1. Read and fully internalise the provided spec\n"
+        "2. Identify any gaps, ambiguities, unstated assumptions, or conflicts\n"
+        "3. Document your findings as PM notes\n"
+        "4. Endorse the spec with your notes — or flag blockers if the spec is\n"
+        "   insufficient to proceed\n"
+        "5. Produce a PM Endorsement document (not a rewrite) that confirms the\n"
+        "   spec is understood and ready for debate and Igi challenge\n\n"
+        "The spec you are reviewing:\n"
+    )
+    enriched = dict(context)
+    enriched["pm_mode"] = "external_spec_endorsement"
+    enriched["pm_instruction"] = external_block
+    enriched["external_spec_path"] = spec_path
+    enriched["external_spec_contents"] = spec_text
+    enriched["pm_output_requirement"] = "PM output in this mode: a PM Endorsement document, not a full spec rewrite."
+    return enriched
+
+
 def _next_step_hint(tier: str) -> str:
     """Hint for what to do after setting goal."""
     if tier == "minimal":
@@ -798,6 +1072,10 @@ def _phase_hint(phase: str) -> str:
 
 
 def _get_active_goal(project: str) -> dict | None:
+    project = normalize_project_name(project)
+    goal_state = read_project_state(project, "goal")
+    tier_state = read_project_state(project, "tier")
+    phase_state = read_project_state(project, "phase")
     with em_db(project) as conn:
         row = conn.execute(
             "SELECT task_id, task_name, tier, agent_outputs, started_at FROM task_state "
@@ -811,14 +1089,14 @@ def _get_active_goal(project: str) -> dict | None:
             "ORDER BY started_at DESC, rowid DESC LIMIT 1",
             (project,),
         ).fetchone()
-    if not row:
+    if not row and not goal_state:
         return None
     return {
-        "goal_id": row["task_id"],
-        "goal": row["task_name"],
-        "tier": row["tier"],
-        "phase": phase_row["task_name"] if phase_row else None,
-        "started_at": row["started_at"],
+        "goal_id": row["task_id"] if row else None,
+        "goal": goal_state or (row["task_name"] if row else None),
+        "tier": tier_state or (row["tier"] if row else None),
+        "phase": phase_state or (phase_row["task_name"] if phase_row else None),
+        "started_at": row["started_at"] if row else None,
     }
 
 
@@ -855,17 +1133,19 @@ def _phase_missing_preconditions(
                     "Each gap, assumption, or risk should be a separate note."
                 )
     elif target == "approved":
-        if not _has_hitl_approval(project):
-            return "HITL approval record"
+        if not _has_hitl_approval(project, "spec"):
+            return "HITL approval record for stage 'spec'"
     elif target == "implement":
         if not _has_agent_status(goal_id, "architect", "completed"):
             return "Architect agent completed"
-        if not _has_hitl_approval(project):
-            return "HITL approval record"
+        if not _has_hitl_approval(project, "architect"):
+            return "HITL approval record for stage 'architect'"
     elif target == "validating":
         if not _all_wave_tasks_completed(project):
             return "all waves completed"
     elif target == "complete":
+        if not _has_hitl_approval(project, "test"):
+            return "HITL approval record for stage 'test'"
         if not _has_validator_signoff(project, goal_id):
             return "Validator sign-off exists"
     return None
@@ -873,10 +1153,10 @@ def _phase_missing_preconditions(
 
 def _phase_required_next(phase: str) -> str:
     hints = {
-        "spec": "Run spec authoring and collect HITL approval.",
-        "approved": "Architect review complete; then advance to implement.",
+        "spec": "Run spec authoring, then record HITL approval with enki_approve(stage='spec').",
+        "approved": "Complete architecture and record HITL approval with enki_approve(stage='architect').",
         "implement": "Execute waves with enki_wave until all tasks complete.",
-        "validating": "Spawn validator and record sign-off.",
+        "validating": "Spawn validator, record sign-off, then enki_approve(stage='test').",
         "complete": "Pipeline complete.",
     }
     return hints.get(phase, "Continue pipeline.")
@@ -931,19 +1211,51 @@ def _count_challenge_notes(project: str, goal_started_at: str | None) -> int:
     return total
 
 
-def _has_hitl_approval(project: str) -> bool:
+def _has_hitl_approval(project: str, stage: str) -> bool:
     with em_db(project) as conn:
-        spec = conn.execute(
-            "SELECT 1 FROM pm_decisions "
-            "WHERE project_id = ? AND decision_type = 'spec_approval' "
-            "AND human_response = 'approved' LIMIT 1",
-            (project,),
+        _ensure_hitl_approvals_table(conn)
+        row = conn.execute(
+            "SELECT 1 FROM hitl_approvals WHERE project = ? AND stage = ? LIMIT 1",
+            (project, stage),
         ).fetchone()
-        gate = conn.execute(
-            "SELECT 1 FROM test_approvals WHERE project = ? AND hitl_approved = 1 LIMIT 1",
-            (project,),
-        ).fetchone()
-    return bool(spec or gate)
+    return row is not None
+
+
+def _ensure_hitl_approvals_table(conn) -> None:
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS hitl_approvals (
+            id TEXT PRIMARY KEY,
+            project TEXT NOT NULL,
+            stage TEXT NOT NULL,
+            note TEXT,
+            approved_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+
+def _next_human_approval_id(conn, project: str) -> str:
+    prefix = derive_project_prefix(project)
+    row = conn.execute(
+        "SELECT COALESCE(MAX(CAST(SUBSTR(id, INSTR(id, '-') + 1) AS INTEGER)), 0) + 1 "
+        "AS next_num FROM hitl_approvals WHERE project = ?",
+        (project,),
+    ).fetchone()
+    return f"{prefix}-{int(row['next_num']):03d}"
+
+
+def _insert_implied_spec_approval(conn, project: str) -> None:
+    """Create synthetic spec approval when igi approval is recorded."""
+    existing_spec = conn.execute(
+        "SELECT 1 FROM hitl_approvals WHERE project = ? AND stage = 'spec' LIMIT 1",
+        (project,),
+    ).fetchone()
+    if existing_spec:
+        return
+    implied_id = _next_human_approval_id(conn, project)
+    conn.execute(
+        "INSERT INTO hitl_approvals (id, project, stage, note) VALUES (?, ?, 'spec', ?)",
+        (implied_id, project, "implied by igi approval"),
+    )
 
 
 def _all_wave_tasks_completed(project: str) -> bool:

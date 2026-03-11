@@ -11,6 +11,7 @@ import uuid
 from datetime import datetime
 
 from enki.db import em_db
+from enki.project_state import normalize_project_name, read_project_state, write_project_state
 from enki.orch.pm import is_spec_approved
 
 PHASE_ORDER = ["intake", "debate", "spec", "approve", "implement", "review", "complete"]
@@ -95,6 +96,7 @@ def quick(description: str, project: str) -> dict:
 
 def set_goal(project: str, description: str, tier: str = "auto") -> dict:
     """Set project goal and tier."""
+    project = normalize_project_name(project)
     if tier == "auto":
         tier = detect_tier(description)
 
@@ -112,6 +114,7 @@ def set_goal(project: str, description: str, tier: str = "auto") -> dict:
 
 def set_phase(project: str, phase: str) -> dict:
     """Set project phase."""
+    project = normalize_project_name(project)
     if phase not in PHASE_ORDER:
         return {
             "error": f"Invalid phase: {phase}. Must be one of {PHASE_ORDER}"
@@ -123,6 +126,7 @@ def set_phase(project: str, phase: str) -> dict:
 
 def get_project_state(project: str) -> dict:
     """Get current goal, tier, and phase for a project."""
+    project = normalize_project_name(project)
     with em_db(project) as conn:
         goal_row = conn.execute(
             "SELECT task_name, tier FROM task_state "
@@ -138,9 +142,9 @@ def get_project_state(project: str) -> dict:
 
     return {
         "project": project,
-        "goal": goal_row["task_name"] if goal_row else None,
-        "tier": goal_row["tier"] if goal_row else None,
-        "phase": phase_row["task_name"] if phase_row else None,
+        "goal": read_project_state(project, "goal") or (goal_row["task_name"] if goal_row else None),
+        "tier": read_project_state(project, "tier") or (goal_row["tier"] if goal_row else None),
+        "phase": read_project_state(project, "phase") or (phase_row["task_name"] if phase_row else None),
     }
 
 
@@ -209,6 +213,7 @@ def triage(description: str) -> dict:
 
 def _set_goal(project: str, description: str, tier: str) -> None:
     """Write goal to em.db."""
+    project = normalize_project_name(project)
     task_id = str(uuid.uuid4())
     with em_db(project) as conn:
         # Mark previous goals as completed
@@ -225,10 +230,13 @@ def _set_goal(project: str, description: str, tier: str) -> None:
             "VALUES (?, ?, 'default', ?, ?, 'goal', 'active', datetime('now'))",
             (task_id, project, description, tier),
         )
+    write_project_state(project, "goal", description)
+    write_project_state(project, "tier", tier)
 
 
 def _set_phase(project: str, phase: str) -> None:
     """Write phase to em.db."""
+    project = normalize_project_name(project)
     task_id = str(uuid.uuid4())
     with em_db(project) as conn:
         conn.execute(
@@ -239,6 +247,7 @@ def _set_phase(project: str, phase: str) -> None:
             "datetime('now'))",
             (task_id, project, phase),
         )
+    write_project_state(project, "phase", phase)
 
 
 def _tier_reasoning(description: str, tier: str) -> str:
@@ -249,3 +258,5 @@ def _tier_reasoning(description: str, tier: str) -> str:
         return "Large scope: new system, architecture change, or multi-sprint work."
     else:
         return "Medium scope: feature work requiring planning and testing."
+    project = normalize_project_name(project)
+    project = normalize_project_name(project)

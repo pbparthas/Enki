@@ -442,7 +442,7 @@ CC told us how it would escape. Here's how each is closed.
 
 CC sets a trivial goal to satisfy Gate 1, then jumps to code.
 
-**Closed by:** Gate 3 (phase check). Setting a goal puts phase at `intake`. Code edits require `implement`. CC can't get to `implement` without going through the workflow phases. Phase transitions are logged and, for Standard/Full tier, require human approval.
+**Closed by:** Gate 3 (phase check). Setting a goal puts phase at `intake`. Code edits require `implement`. CC can't get to `implement` without going through the workflow phases. Phase transitions are logged and, for Standard/Full tier, require human approval. Workflow state is read from `project_state` in each project's `~/.enki/projects/{name}/em.db`; flat `PHASE/TIER/GOAL` files are not authoritative.
 
 ### Escape Hatch 2: "It's a small change, I'll just do it"
 

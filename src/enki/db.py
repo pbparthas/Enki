@@ -74,6 +74,9 @@ _em_initialized: set[str] = set()
 
 def em_db(project: str):
     """Connection to per-project em.db. Auto-initializes tables."""
+    project = (project or "").strip()
+    if not project or project == ".":
+        project = "default"
     path = ENKI_ROOT / "projects" / project / "em.db"
     path.parent.mkdir(parents=True, exist_ok=True)
 

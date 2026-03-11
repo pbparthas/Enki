@@ -13,6 +13,7 @@ Nudge 3: Unread kickoff mail
 """
 
 import json
+import os
 import re
 import sys
 import uuid
@@ -21,6 +22,11 @@ from datetime import datetime
 from pathlib import Path
 
 from enki.db import ENKI_ROOT, em_db, uru_db
+from enki.project_state import (
+    normalize_project_name,
+    read_project_state,
+    resolve_project_from_cwd,
+)
 from enki.gates.layer0 import (
     extract_db_targets,
     extract_write_targets,
@@ -33,7 +39,7 @@ MUTATION_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit", "Task"}
 
 # Phase order and phases where code changes are allowed
 PHASE_ORDER = ["intake", "debate", "spec", "approve", "implement", "review", "complete"]
-IMPLEMENT_PHASES = {"implement", "review", "complete"}
+IMPLEMENT_PHASES = {"spec", "approved", "implement", "review", "complete"}
 AGENT_SPAWN_PHASES = {"spec", "spec-review", "approved", "debate", "approve", "implement", "review", "complete"}
 
 # Decision language patterns for nudge 1
@@ -131,20 +137,14 @@ def check_pre_tool_use(
     """
     try:
         hook_context = hook_context or {}
+        project = _project_from_context(tool_input, hook_context)
 
-        goal_gate = _enforce_goal_gate(tool_name)
+        goal_gate = _enforce_goal_gate(tool_name, project)
         if goal_gate:
             _log_enforcement(
                 "pre-tool-use", "layer1", tool_name, None, "block", goal_gate["reason"]
             )
             return goal_gate
-
-        tier_lock = _enforce_tier_immutability(tool_name, tool_input)
-        if tier_lock:
-            _log_enforcement(
-                "pre-tool-use", "layer1", tool_name, None, "block", tier_lock["reason"]
-            )
-            return tier_lock
 
         reasoning_result = inspect_reasoning(reasoning_text)
         if reasoning_result.blocked:
@@ -172,7 +172,6 @@ def check_pre_tool_use(
         if tool_name not in MUTATION_TOOLS and tool_name != "Bash":
             return {"decision": "allow"}
         if tool_name == "Task":
-            project = _get_current_project() or str(Path.cwd())
             goal = _get_active_goal(project)
             if not goal:
                 return {"decision": "block", "reason": "Set a goal with enki_goal before spawning agents."}
@@ -272,7 +271,7 @@ def check_pre_tool_use(
                 }
 
             try:
-                gate_result = _check_gates(target)
+                gate_result = _check_gates(target, project=project)
             except Exception:
                 return {
                     "decision": "block",
@@ -397,7 +396,7 @@ def end_session(session_id: str) -> dict:
 
 def inject_enforcement_context() -> str:
     """Build enforcement context string for post-compact injection."""
-    project = _get_current_project()
+    project = _project_from_context({}, {})
     if not project:
         return "Uru: No active project."
 
@@ -427,9 +426,9 @@ def inject_enforcement_context() -> str:
 # ── Private helpers ──
 
 
-def _check_gates(filepath: str) -> dict:
+def _check_gates(filepath: str, project: str | None = None) -> dict:
     """Layer 1 gate checks. Only called for non-exempt files."""
-    project = _get_current_project()
+    project = project or _project_from_context({}, {})
 
     if not project:
         return {
@@ -469,12 +468,12 @@ def _check_gates(filepath: str) -> dict:
     return {"decision": "allow"}
 
 
-def _enforce_goal_gate(tool_name: str) -> dict | None:
+def _enforce_goal_gate(tool_name: str, project: str) -> dict | None:
     """Require an active goal before nearly all work begins."""
     if _is_goal_bootstrap_tool(tool_name):
         return None
 
-    if _has_active_goal():
+    if _has_active_goal(project):
         return None
 
     return {
@@ -496,52 +495,15 @@ def _is_goal_bootstrap_tool(tool_name: str) -> bool:
     )
 
 
-def _has_active_goal() -> bool:
-    """Goal can come from session state or GOAL marker file."""
+def _has_active_goal(project: str) -> bool:
+    """Check whether active goal exists for the project."""
     try:
-        project = _get_current_project()
         if project and _get_active_goal(project):
             return True
     except Exception:
         pass
 
-    goal_file = ENKI_ROOT / "GOAL"
-    if goal_file.exists() and goal_file.read_text().strip():
-        return True
-
     return False
-
-
-def _enforce_tier_immutability(tool_name: str, tool_input: dict) -> dict | None:
-    """Tier cannot change mid-session once set by enki_goal."""
-    try:
-        project = _get_current_project()
-        if not project:
-            return None
-        current_tier = _get_tier(project)
-        if not current_tier:
-            return None
-    except Exception:
-        return None
-
-    candidate = None
-    if tool_name in {"Write", "Edit", "MultiEdit", "NotebookEdit"}:
-        target = str(tool_input.get("file_path") or tool_input.get("path") or "")
-        if Path(target).name == "TIER":
-            candidate = str(tool_input.get("content") or "").strip() or "<unknown>"
-    elif tool_name == "Bash":
-        command = str(tool_input.get("command") or "")
-        if re.search(r"\bTIER\b", command):
-            candidate = "<unknown>"
-    elif (tool_name or "").lower().endswith("enki_goal"):
-        candidate = str(tool_input.get("tier") or "").strip() or None
-
-    if candidate and candidate.lower() not in {current_tier.lower(), "auto"}:
-        return {
-            "decision": "block",
-            "reason": f"Tier is locked for this session. Cannot change from {current_tier}.",
-        }
-    return None
 
 
 def _check_task_prompt_integrity(tool_input: dict, hook_context: dict) -> dict | None:
@@ -848,30 +810,38 @@ def _get_session_id() -> str:
     return "unknown"
 
 
+def _project_from_context(tool_input: dict, hook_context: dict) -> str | None:
+    """Resolve active project from hook payload or cwd mapping."""
+    for src in (hook_context or {}, tool_input or {}):
+        if not isinstance(src, dict):
+            continue
+        value = src.get("project")
+        if isinstance(value, str) and value.strip():
+            return normalize_project_name(value)
+    cwd = os.getcwd()
+    for src in (hook_context or {}, tool_input or {}):
+        if isinstance(src, dict):
+            source_cwd = src.get("cwd")
+            if isinstance(source_cwd, str) and source_cwd.strip():
+                cwd = source_cwd
+                break
+    resolved = resolve_project_from_cwd(cwd)
+    if resolved:
+        return normalize_project_name(resolved)
+    return None
+
+
 def _get_current_project() -> str | None:
-    """Get the current active project name."""
-    projects_dir = ENKI_ROOT / "projects"
-    if not projects_dir.exists():
-        return None
-
-    # Find project with most recent em.db activity
-    latest = None
-    latest_time = 0.0
-    for proj_dir in projects_dir.iterdir():
-        if proj_dir.is_dir():
-            em_path = proj_dir / "em.db"
-            if em_path.exists():
-                mtime = em_path.stat().st_mtime
-                if mtime > latest_time:
-                    latest_time = mtime
-                    latest = proj_dir.name
-
-    return latest
+    return _project_from_context({}, {})
 
 
 def _get_active_goal(project: str) -> str | None:
     """Read active goal from em.db."""
     try:
+        project = normalize_project_name(project)
+        goal_state = read_project_state(project, "goal")
+        if goal_state:
+            return goal_state
         with em_db(project) as conn:
             row = conn.execute(
                 "SELECT task_name FROM task_state "
@@ -886,6 +856,10 @@ def _get_active_goal(project: str) -> str | None:
 def _get_current_phase(project: str) -> str | None:
     """Read current phase from em.db."""
     try:
+        project = normalize_project_name(project)
+        phase_state = read_project_state(project, "phase")
+        if phase_state:
+            return phase_state
         with em_db(project) as conn:
             row = conn.execute(
                 "SELECT task_name FROM task_state "
@@ -900,6 +874,10 @@ def _get_current_phase(project: str) -> str | None:
 def _get_tier(project: str) -> str | None:
     """Read current tier from em.db."""
     try:
+        project = normalize_project_name(project)
+        tier_state = read_project_state(project, "tier")
+        if tier_state:
+            return tier_state
         with em_db(project) as conn:
             row = conn.execute(
                 "SELECT tier FROM task_state "
@@ -914,12 +892,21 @@ def _get_tier(project: str) -> str | None:
 def _is_spec_approved(project: str) -> bool:
     """Check if implementation spec is approved in em.db."""
     try:
+        project = normalize_project_name(project)
         with em_db(project) as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS hitl_approvals (
+                    id TEXT PRIMARY KEY,
+                    project TEXT NOT NULL,
+                    stage TEXT NOT NULL,
+                    note TEXT,
+                    approved_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
             row = conn.execute(
-                "SELECT id FROM pm_decisions "
-                "WHERE project_id = ? AND decision_type = 'spec_approval' "
-                "AND human_response = 'approved' "
-                "ORDER BY created_at DESC LIMIT 1",
+                "SELECT id FROM hitl_approvals "
+                "WHERE project = ? AND stage IN ('spec', 'igi') "
+                "ORDER BY approved_at DESC LIMIT 1",
                 (project,),
             ).fetchone()
             return row is not None

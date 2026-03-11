@@ -552,8 +552,15 @@ class TestAbzuFacade:
 
         remember("JWT auth pattern", "preference", project="cortex")
 
-        context = inject_session_start("cortex", "Add auth", "standard")
-        assert "Enki" in context  # From persona
+        context = inject_session_start("cortex", "JWT auth", "standard")
+        assert "Abzu Memory Context" in context
+        assert "JWT auth pattern" in context
+
+    def test_inject_session_start_empty_memory_graceful(self, mem_env):
+        from enki.memory.abzu import inject_session_start
+        context = inject_session_start("cortex", "new goal", "standard")
+        assert "Auto Recall" in context
+        assert "No relevant memory found yet." in context
 
     def test_finalize_session(self, mem_env):
         from enki.memory.abzu import finalize_session, update_pre_compact_summary

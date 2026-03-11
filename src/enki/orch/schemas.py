@@ -85,6 +85,15 @@ def create_tables(conn) -> None:
     )
 
     conn.execute("""
+        CREATE TABLE IF NOT EXISTS project_state (
+            key TEXT NOT NULL,
+            value TEXT NOT NULL,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (key)
+        )
+    """)
+
+    conn.execute("""
         CREATE TABLE IF NOT EXISTS test_approvals (
             task_id TEXT PRIMARY KEY,
             project TEXT NOT NULL,
@@ -113,6 +122,7 @@ def create_tables(conn) -> None:
     conn.execute("""
         CREATE TABLE IF NOT EXISTS bugs (
             id TEXT PRIMARY KEY,
+            bug_number INTEGER,
             project_id TEXT NOT NULL,
             task_id TEXT,
             sprint_id TEXT,
@@ -128,6 +138,10 @@ def create_tables(conn) -> None:
             FOREIGN KEY (mail_message_id) REFERENCES mail_messages(id)
         )
     """)
+    try:
+        conn.execute("ALTER TABLE bugs ADD COLUMN bug_number INTEGER")
+    except Exception:
+        pass
 
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_bugs_project "
@@ -135,6 +149,10 @@ def create_tables(conn) -> None:
     )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_bugs_task ON bugs(task_id)"
+    )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_bugs_project_number "
+        "ON bugs(project_id, bug_number)"
     )
 
     conn.execute("""
@@ -199,4 +217,30 @@ def create_tables(conn) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_checkpoints_session "
         "ON checkpoints(session_id)"
+    )
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS file_registry (
+            project_id TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            task_id TEXT NOT NULL,
+            action TEXT NOT NULL CHECK (action IN ('created', 'modified')),
+            description TEXT,
+            registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (project_id, file_path)
+        )
+    """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS hitl_approvals (
+            id TEXT PRIMARY KEY,
+            project TEXT NOT NULL,
+            stage TEXT NOT NULL,
+            note TEXT,
+            approved_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_hitl_approvals_project_stage "
+        "ON hitl_approvals(project, stage)"
     )

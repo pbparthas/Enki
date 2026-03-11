@@ -78,8 +78,7 @@ def list_checkpoints(project: str) -> list[dict]:
 def resume_session(project: str, checkpoint_id: str) -> dict:
     """Restore session state from a checkpoint.
 
-    Restores phase, tier, and goal by writing to em.db task_state.
-    Writes state files (.enki/PHASE, .enki/GOAL, .enki/TIER).
+    Restores phase, tier, and goal by writing to em.db state.
 
     Returns dict with restored state summary.
     """
@@ -104,11 +103,6 @@ def resume_session(project: str, checkpoint_id: str) -> dict:
     # Restore phase
     if checkpoint.get("phase"):
         set_phase(project, checkpoint["phase"])
-
-    # Write state files for hook scripts
-    _write_state_file("PHASE", checkpoint.get("phase", ""))
-    _write_state_file("GOAL", checkpoint.get("goal", ""))
-    _write_state_file("TIER", checkpoint.get("tier", ""))
 
     # Build summary for display
     recent_beads = json.loads(checkpoint.get("recent_bead_ids") or "[]")
@@ -184,8 +178,3 @@ def _get_recent_bead_ids(limit: int = 10) -> list[str]:
     except Exception:
         return []
 
-
-def _write_state_file(name: str, value: str | None) -> None:
-    """Write a state file to ~/.enki/ for hook scripts."""
-    state_file = ENKI_ROOT / name
-    state_file.write_text(value or "")
