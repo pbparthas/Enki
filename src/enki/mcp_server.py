@@ -88,7 +88,12 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="enki_status",
             description="Get memory system health: note counts, staging depth, decay stats",
-            inputSchema={"type": "object", "properties": {}},
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "project": {"type": "string", "description": "Optional project ID"},
+                },
+            },
         ),
         Tool(
             name="enki_restore",
@@ -160,14 +165,14 @@ async def list_tools() -> list[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "project": {"type": "string"},
+                    "project": {"type": "string", "default": "default"},
                     "stage": {
                         "type": "string",
                         "enum": ["igi", "spec", "architect", "test"],
                     },
                     "note": {"type": "string"},
                 },
-                "required": ["project", "stage"],
+                "required": ["stage"],
             },
         ),
         Tool(
@@ -179,7 +184,7 @@ async def list_tools() -> list[Tool]:
                     "role": {"type": "string"},
                     "task_id": {"type": "string"},
                     "context": {"type": "object"},
-                    "project": {"type": "string", "default": "."},
+                    "project": {"type": "string", "default": "default"},
                 },
                 "required": ["role", "task_id"],
             },
@@ -194,7 +199,7 @@ async def list_tools() -> list[Tool]:
                     "task_id": {"type": "string"},
                     "summary": {"type": "string"},
                     "status": {"type": "string", "enum": ["completed", "failed"], "default": "completed"},
-                    "project": {"type": "string", "default": "."},
+                    "project": {"type": "string", "default": "default"},
                 },
                 "required": ["role", "task_id", "summary"],
             },
@@ -205,10 +210,9 @@ async def list_tools() -> list[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "goal_id": {"type": "string"},
-                    "project": {"type": "string", "default": "."},
+                    "project": {"type": "string", "default": "default"},
                 },
-                "required": ["goal_id"],
+                "required": [],
             },
         ),
         Tool(
@@ -246,6 +250,20 @@ async def list_tools() -> list[Tool]:
                     "project": {"type": "string", "default": "."},
                 },
                 "required": ["action"],
+            },
+        ),
+        Tool(
+            name="enki_register",
+            description=(
+                "Register a project path mapping in wisdom.db. "
+                "Use this to repair/refresh CWD-based project resolution."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "project": {"type": "string", "description": "Project name"},
+                    "path": {"type": "string", "description": "Optional source path (defaults to CWD)"},
+                },
             },
         ),
     ]
@@ -294,7 +312,7 @@ def _handle_star(args: dict) -> str:
 
 def _handle_status(args: dict) -> str:
     from .mcp.memory_tools import enki_status
-    result = enki_status()
+    result = enki_status(project=args.get("project"))
     return json.dumps(result, indent=2)
 
 
@@ -322,7 +340,7 @@ def _handle_phase(args: dict) -> str:
     result = enki_phase(
         args["action"],
         args.get("to"),
-        args.get("project", "default"),
+        args.get("project"),
     )
     return json.dumps(result, indent=2)
 
@@ -330,7 +348,7 @@ def _handle_phase(args: dict) -> str:
 def _handle_approve(args: dict) -> str:
     from .mcp.orch_tools import enki_approve
     result = enki_approve(
-        project=args["project"],
+        project=args.get("project"),
         stage=args["stage"],
         note=args.get("note"),
     )
@@ -343,7 +361,7 @@ def _handle_spawn(args: dict) -> str:
         role=args["role"],
         task_id=args["task_id"],
         context=args.get("context"),
-        project=args.get("project", "."),
+        project=args.get("project"),
     )
     return json.dumps(result, indent=2)
 
@@ -355,7 +373,7 @@ def _handle_report(args: dict) -> str:
         task_id=args["task_id"],
         summary=args["summary"],
         status=args.get("status", "completed"),
-        project=args.get("project", "."),
+        project=args.get("project"),
     )
     return json.dumps(result, indent=2)
 
@@ -363,8 +381,7 @@ def _handle_report(args: dict) -> str:
 def _handle_wave(args: dict) -> str:
     from .mcp.orch_tools import enki_wave
     result = enki_wave(
-        goal_id=args["goal_id"],
-        project=args.get("project", "."),
+        project=args.get("project"),
     )
     return json.dumps(result, indent=2)
 
@@ -398,6 +415,15 @@ def _handle_bug(args: dict) -> str:
     return json.dumps(result, indent=2)
 
 
+def _handle_register(args: dict) -> str:
+    from .mcp.orch_tools import enki_register
+    result = enki_register(
+        project=args.get("project"),
+        path=args.get("path"),
+    )
+    return json.dumps(result, indent=2)
+
+
 # =============================================================================
 # Dispatch map
 # =============================================================================
@@ -417,6 +443,7 @@ TOOL_HANDLERS = {
     "enki_complete": _handle_complete,
     "enki_wrap": _handle_wrap,
     "enki_bug": _handle_bug,
+    "enki_register": _handle_register,
 }
 
 

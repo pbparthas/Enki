@@ -134,6 +134,40 @@ def test_enki_goal_bootstraps_all_tables_and_is_idempotent(tmp_path):
     db_mod._em_initialized = old_init
 
 
+def test_enki_goal_keeps_stable_goal_id_and_preserves_in_progress_phase(tmp_path):
+    root = tmp_path / ".enki"
+    (root / "db").mkdir(parents=True)
+    _make_prompts(root)
+    old_init = db_mod._em_initialized.copy()
+    db_mod._em_initialized.clear()
+    with _patch_env(root):
+        from enki.db import init_all, uru_db
+        from enki.mcp.orch_tools import enki_goal
+        from enki.project_state import stable_goal_id, write_project_state
+
+        init_all()
+        first = enki_goal("first goal", project="stable-proj")
+        expected = stable_goal_id("stable-proj")
+        assert first["goal_id"] == expected
+
+        write_project_state("stable-proj", "phase", "implement")
+        _insert_agent_status(expected, "dev", "in_progress")
+
+        second = enki_goal("second goal", project="stable-proj")
+        assert second["goal_id"] == expected
+        assert second["phase"] == "implement"
+        assert second["phase_preserved"] is True
+        assert "warning" in second
+
+        with uru_db() as conn:
+            row = conn.execute(
+                "SELECT status FROM agent_status WHERE goal_id = ? AND agent_role = 'dev'",
+                (expected,),
+            ).fetchone()
+        assert row["status"] == "in_progress"
+    db_mod._em_initialized = old_init
+
+
 def test_enki_goal_with_valid_external_spec_copies_and_sets_state(tmp_path):
     root = tmp_path / ".enki"
     (root / "db").mkdir(parents=True)
@@ -243,6 +277,26 @@ def test_enki_goal_writes_mcp_json_to_cwd_from_template(tmp_path):
         assert json.loads(target.read_text()) == json.loads(template.read_text())
         assert result["bootstrap"]["created"]["mcp_json"] is True
         assert result["bootstrap"]["existing"]["mcp_json"] is False
+    db_mod._em_initialized = old_init
+
+
+def test_enki_goal_updates_pipeline_implement_section_with_foreground(tmp_path):
+    root = tmp_path / ".enki"
+    (root / "db").mkdir(parents=True)
+    _make_prompts(root)
+    (root / "PIPELINE.md").write_text("# Enki Pipeline — Operational Reference\n\n### implement\nold text\n")
+    old_init = db_mod._em_initialized.copy()
+    db_mod._em_initialized.clear()
+    with _patch_env(root):
+        from enki.db import init_all
+        from enki.mcp.orch_tools import enki_goal
+
+        init_all()
+        enki_goal("Build API", project=PROJECT)
+        text = (root / "PIPELINE.md").read_text().lower()
+        assert "### implement" in text
+        assert "foreground" in text
+        assert "never background agents" in text
     db_mod._em_initialized = old_init
 
 
@@ -409,6 +463,8 @@ def test_enki_approve_stage_transitions_and_idempotency(tmp_path):
         assert test["phase"] == "complete"
         assert duplicate["created"] is False
         assert duplicate["approval_id"] == spec["approval_id"]
+        assert "mandatory_next" in architect
+        assert "Call enki_wave(project='pipeline-proj') NOW" in architect["mandatory_next"]
 
 
 def test_enki_spawn_requires_goal_and_returns_summary(tmp_path):
@@ -437,7 +493,7 @@ def test_enki_spawn_requires_goal_and_returns_summary(tmp_path):
         assert result["prompt_path"] == "~/.enki/prompts/dev.md"
         artifact = Path(result["context_artifact"])
         assert artifact.exists()
-        assert goal["goal_id"] in str(artifact)
+        assert f"/artifacts/{PROJECT}/" in str(artifact)
         assert artifact.name.startswith("spawn-dev-")
 
         from enki.db import uru_db
@@ -561,7 +617,7 @@ def test_enki_report_flow(tmp_path):
             project=PROJECT,
         )
         assert fail_report["status"] == "failed"
-        artifact = root / "artifacts" / goal["goal_id"] / f"qa-{task_id}.md"
+        artifact = root / "artifacts" / PROJECT / f"qa-{task_id}.md"
         assert artifact.exists()
     db_mod._em_initialized = old_init
 
@@ -627,7 +683,7 @@ def test_igi_spawn_loads_prompt(tmp_path):
         text = artifact.read_text()
         assert "~/.enki/prompts/igi.md" in spawn["prompt_path"]
         assert "You are igi." in text
-        assert goal["goal_id"] in str(artifact)
+        assert f"/artifacts/{PROJECT}/" in str(artifact)
     db_mod._em_initialized = old_init
 
 
@@ -666,18 +722,184 @@ def test_enki_wave_preconditions_and_returns_spawn_list(tmp_path):
         sprint = create_sprint(PROJECT, 1)
         create_task(PROJECT, sprint, "Task A", tier="standard")
 
-        blocked = enki_wave(goal_id=goal["goal_id"], project=PROJECT)
+        blocked = enki_wave(project=PROJECT)
         assert blocked["error"] == "Specs not approved."
 
         _insert_hitl_spec_approval(PROJECT)
-        result = enki_wave(goal_id=goal["goal_id"], project=PROJECT)
+        result = enki_wave(project=PROJECT)
         assert "wave_number" in result
         assert "instruction" in result
+        assert result["execution_mode"] == "foreground_sequential"
+        assert "sequentially in foreground" in result["instruction"]
         roles = [a["role"] for a in result["agents"]]
         assert "dev" in roles
         assert "qa" in roles
         assert all("context_artifact" in a for a in result["agents"])
         assert all("prompt_path" in a for a in result["agents"])
+        wave_report = root / "artifacts" / PROJECT / f"wave-{result['wave_number']}.md"
+        assert wave_report.exists()
+        report_text = wave_report.read_text()
+        assert '"execution_mode": "foreground_sequential"' in report_text
+        assert "Do not background agents" in report_text
+    db_mod._em_initialized = old_init
+
+
+def test_enki_spawn_includes_foreground_execution_mode(tmp_path):
+    root = tmp_path / ".enki"
+    (root / "db").mkdir(parents=True)
+    _make_prompts(root)
+    old_init = db_mod._em_initialized.copy()
+    db_mod._em_initialized.clear()
+    with _patch_env(root):
+        from enki.db import init_all
+        from enki.mcp.orch_tools import enki_goal, enki_spawn
+        from enki.orch.task_graph import create_sprint, create_task
+
+        init_all()
+        enki_goal("build endpoint", project=PROJECT)
+        sprint = create_sprint(PROJECT, 1)
+        task_id = create_task(PROJECT, sprint, "Task A", tier="standard")
+        spawned = enki_spawn("dev", task_id, project=PROJECT)
+        assert spawned["execution_mode"] == "foreground_sequential"
+        assert "Run this agent in foreground" in spawned["instruction"]
+    db_mod._em_initialized = old_init
+
+
+def test_enki_phase_status_implement_no_waves_has_mandatory_next(tmp_path):
+    root = tmp_path / ".enki"
+    (root / "db").mkdir(parents=True)
+    _make_prompts(root)
+    old_init = db_mod._em_initialized.copy()
+    db_mod._em_initialized.clear()
+    with _patch_env(root), patch("enki.mcp.orch_tools.ENKI_ROOT", root):
+        from enki.db import init_all
+        from enki.mcp.orch_tools import enki_goal, enki_phase
+        from enki.project_state import write_project_state
+
+        init_all()
+        enki_goal("build endpoint", project=PROJECT)
+        write_project_state(PROJECT, "phase", "implement")
+        status = enki_phase("status", project=PROJECT)
+        assert status["phase"] == "implement"
+        assert status["wave_status"] == "NOT STARTED"
+        assert "Call enki_wave(project='pipeline-proj')" in status["mandatory_next"]
+    db_mod._em_initialized = old_init
+
+
+def test_enki_phase_status_implement_with_wave_in_progress(tmp_path):
+    root = tmp_path / ".enki"
+    (root / "db").mkdir(parents=True)
+    _make_prompts(root)
+    old_init = db_mod._em_initialized.copy()
+    db_mod._em_initialized.clear()
+    with _patch_env(root), patch("enki.mcp.orch_tools.ENKI_ROOT", root):
+        from enki.db import init_all, uru_db
+        from enki.mcp.orch_tools import enki_goal, enki_phase
+        from enki.project_state import read_project_state, write_project_state
+
+        init_all()
+        enki_goal("build endpoint", project=PROJECT)
+        write_project_state(PROJECT, "phase", "implement")
+        artifacts = root / "artifacts" / PROJECT
+        artifacts.mkdir(parents=True, exist_ok=True)
+        (artifacts / "wave-2.md").write_text("wave")
+        goal_id = read_project_state(PROJECT, "goal_id")
+        with uru_db() as conn:
+            conn.execute(
+                "INSERT INTO agent_status (goal_id, agent_role, status) VALUES (?, 'dev', 'in_progress')",
+                (goal_id,),
+            )
+        status = enki_phase("status", project=PROJECT)
+        assert status["phase"] == "implement"
+        assert status["wave_status"] == "Wave 2 in progress"
+        assert "Call enki_report for each completed agent" in status["mandatory_next"]
+    db_mod._em_initialized = old_init
+
+
+def test_enki_register_explicit_and_cwd_and_update(tmp_path):
+    root = tmp_path / ".enki"
+    (root / "db").mkdir(parents=True)
+    _make_prompts(root)
+    old_init = db_mod._em_initialized.copy()
+    db_mod._em_initialized.clear()
+    with _patch_env(root):
+        from enki.db import init_all, wisdom_db
+        from enki.mcp.orch_tools import enki_register
+
+        init_all()
+        p1 = tmp_path / "workspace" / "proj-r1"
+        p2 = tmp_path / "workspace" / "proj-r2"
+        p1.mkdir(parents=True)
+        p2.mkdir(parents=True)
+
+        explicit = enki_register(project="proj-r", path=str(p1))
+        assert explicit["path"] == str(p1.resolve())
+
+        with patch("pathlib.Path.cwd", return_value=p2):
+            inferred = enki_register(project="proj-r")
+        assert inferred["path"] == str(p2.resolve())
+
+        with wisdom_db() as conn:
+            row = conn.execute(
+                "SELECT path FROM projects WHERE name = 'proj-r'"
+            ).fetchone()
+        assert row["path"] == str(p2.resolve())
+    db_mod._em_initialized = old_init
+
+
+def test_enki_goal_existing_project_updates_wisdom_registration(tmp_path):
+    root = tmp_path / ".enki"
+    (root / "db").mkdir(parents=True)
+    _make_prompts(root)
+    old_init = db_mod._em_initialized.copy()
+    db_mod._em_initialized.clear()
+    with _patch_env(root):
+        from enki.db import init_all, wisdom_db
+        from enki.mcp.orch_tools import enki_goal
+
+        init_all()
+        old_path = tmp_path / "workspace" / "old"
+        new_path = tmp_path / "workspace" / "new"
+        old_path.mkdir(parents=True)
+        new_path.mkdir(parents=True)
+
+        with patch("pathlib.Path.cwd", return_value=old_path):
+            enki_goal("bootstrap", project="proj-reg")
+        with patch("pathlib.Path.cwd", return_value=new_path):
+            enki_goal("bootstrap again", project="proj-reg")
+
+        with wisdom_db() as conn:
+            row = conn.execute(
+                "SELECT path FROM projects WHERE name = 'proj-reg'"
+            ).fetchone()
+        assert row["path"] == str(new_path.resolve())
+    db_mod._em_initialized = old_init
+
+
+def test_resolve_project_prefers_cwd_for_defaultish_values(tmp_path):
+    root = tmp_path / ".enki"
+    (root / "db").mkdir(parents=True)
+    _make_prompts(root)
+    old_init = db_mod._em_initialized.copy()
+    db_mod._em_initialized.clear()
+    with _patch_env(root):
+        from enki.db import init_all
+        from enki.mcp.orch_tools import _resolve_project
+
+        init_all()
+        cwd = tmp_path / "workspace" / "cwd-proj"
+        cwd.mkdir(parents=True)
+        from enki.db import wisdom_db
+        with wisdom_db() as conn:
+            conn.execute(
+                "INSERT INTO projects (name, path) VALUES (?, ?)",
+                ("cwd-proj", str(cwd.resolve())),
+            )
+        with patch("pathlib.Path.cwd", return_value=cwd):
+            assert _resolve_project(None) == "cwd-proj"
+            assert _resolve_project(".") == "cwd-proj"
+            assert _resolve_project("default") == "cwd-proj"
+            assert _resolve_project("explicit-proj") == "explicit-proj"
     db_mod._em_initialized = old_init
 
 

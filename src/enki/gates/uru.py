@@ -26,6 +26,8 @@ from enki.project_state import (
     normalize_project_name,
     read_project_state,
     resolve_project_from_cwd,
+    stable_goal_id,
+    write_project_state,
 )
 from enki.gates.layer0 import (
     extract_db_targets,
@@ -626,18 +628,21 @@ def _extract_task_role(tool_input: dict, hook_context: dict) -> str | None:
 
 
 def _goal_id() -> str | None:
-    """Fetch active goal task ID for agent status tracking."""
+    """Fetch stable goal id for agent status tracking."""
     try:
         project = _get_current_project()
         if not project:
             return None
-        with em_db(project) as conn:
-            row = conn.execute(
-                "SELECT task_id FROM task_state "
-                "WHERE work_type = 'goal' AND status != 'completed' "
-                "ORDER BY started_at DESC LIMIT 1"
-            ).fetchone()
-            return row["task_id"] if row else None
+        stable_id = stable_goal_id(project)
+        gid = read_project_state(project, "goal_id")
+        if gid == stable_id:
+            return gid
+        goal = (read_project_state(project, "goal") or "").strip().lower()
+        if goal and goal != "none":
+            gid = stable_id
+            write_project_state(project, "goal_id", gid)
+            return gid
+        return None
     except Exception as e:
         raise RuntimeError("Failed to read active goal id") from e
 
@@ -836,55 +841,31 @@ def _get_current_project() -> str | None:
 
 
 def _get_active_goal(project: str) -> str | None:
-    """Read active goal from em.db."""
+    """Read active goal from project_state."""
     try:
         project = normalize_project_name(project)
-        goal_state = read_project_state(project, "goal")
-        if goal_state:
-            return goal_state
-        with em_db(project) as conn:
-            row = conn.execute(
-                "SELECT task_name FROM task_state "
-                "WHERE work_type = 'goal' AND status != 'completed' "
-                "ORDER BY started_at DESC LIMIT 1"
-            ).fetchone()
-            return row["task_name"] if row else None
+        goal = (read_project_state(project, "goal") or "").strip()
+        if not goal or goal.lower() == "none":
+            return None
+        return goal
     except Exception as e:
         raise RuntimeError("Failed to read active goal") from e
 
 
 def _get_current_phase(project: str) -> str | None:
-    """Read current phase from em.db."""
+    """Read current phase from project_state."""
     try:
         project = normalize_project_name(project)
-        phase_state = read_project_state(project, "phase")
-        if phase_state:
-            return phase_state
-        with em_db(project) as conn:
-            row = conn.execute(
-                "SELECT task_name FROM task_state "
-                "WHERE work_type = 'phase' "
-                "ORDER BY started_at DESC LIMIT 1"
-            ).fetchone()
-            return row["task_name"] if row else None
+        return read_project_state(project, "phase")
     except Exception as e:
         raise RuntimeError("Failed to read current phase") from e
 
 
 def _get_tier(project: str) -> str | None:
-    """Read current tier from em.db."""
+    """Read current tier from project_state."""
     try:
         project = normalize_project_name(project)
-        tier_state = read_project_state(project, "tier")
-        if tier_state:
-            return tier_state
-        with em_db(project) as conn:
-            row = conn.execute(
-                "SELECT tier FROM task_state "
-                "WHERE work_type = 'goal' AND status != 'completed' "
-                "ORDER BY started_at DESC LIMIT 1"
-            ).fetchone()
-            return row["tier"] if row else None
+        return read_project_state(project, "tier")
     except Exception as e:
         raise RuntimeError("Failed to read tier") from e
 

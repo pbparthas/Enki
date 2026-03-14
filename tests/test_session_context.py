@@ -9,7 +9,7 @@ def test_generate_orientation_block_actions():
         "planning": "Call enki_goal to initialise this project",
         "spec": "call enki_approve(stage='igi')",
         "approved": "call enki_approve(stage='architect')",
-        "implement": "Spawn EM orchestration",
+        "implement": "ORCHESTRATOR MODE ONLY",
         "validating": "call enki_approve(stage='test')",
         "complete": "Run session end pipeline",
     }
@@ -18,6 +18,8 @@ def test_generate_orientation_block_actions():
         assert block.startswith("## 𒀭 Enki Session — proj-x")
         assert f"- Phase: {phase} | Tier: standard" in block
         assert fragment in block
+    block = generate_orientation_block("proj-x", "implement", "Ship API", "standard")
+    assert "enki_wave(project='proj-x')" in block
 
 
 def test_session_start_context_order_strict(tmp_path):

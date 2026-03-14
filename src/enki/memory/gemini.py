@@ -14,9 +14,11 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 
-from enki.db import ENKI_ROOT, uru_db, wisdom_db
+import enki.db as db
+from enki.db import uru_db, wisdom_db
 
 logger = logging.getLogger(__name__)
+ENKI_ROOT = None
 
 # ── Gemini CLI availability ──
 GEMINI_CLI_AVAILABLE = shutil.which("gemini") is not None
@@ -26,9 +28,15 @@ from enki.memory.retention import get_decay_stats
 from enki.memory.staging import count_candidates, list_candidates
 
 
+def _enki_root() -> Path:
+    if ENKI_ROOT is not None:
+        return Path(ENKI_ROOT)
+    return db.ENKI_ROOT
+
+
 def _load_google_api_key() -> str:
     """Load GOOGLE_API_KEY from ~/.enki/.env, fallback to process env."""
-    env_path = ENKI_ROOT / ".env"
+    env_path = _enki_root() / ".env"
     key = None
 
     if env_path.exists():
@@ -86,7 +94,7 @@ def generate_review_package(output_dir: str | None = None) -> str:
 
     Returns the path to the generated file.
     """
-    output_dir = output_dir or str(ENKI_ROOT / "reviews")
+    output_dir = output_dir or str(_enki_root() / "reviews")
     Path(output_dir).mkdir(parents=True, exist_ok=True)
 
     now = datetime.now()
@@ -205,7 +213,7 @@ def prepare_mini_review(project: str) -> str:
     Lighter weight — for mid-project checkpoints.
     Returns path to the generated file.
     """
-    output_dir = str(ENKI_ROOT / "reviews")
+    output_dir = str(_enki_root() / "reviews")
     Path(output_dir).mkdir(parents=True, exist_ok=True)
 
     now = datetime.now()

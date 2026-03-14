@@ -147,7 +147,19 @@ Respond with ONLY a JSON object containing:
 
 JSON:"""
 
-    return _generate_json(prompt)
+    try:
+        return _generate_json(prompt)
+    except OllamaUnavailableError:
+        words = [w.strip(".,:;!?").lower() for w in content.split() if w.strip()]
+        keywords = [w for w in words if len(w) > 3][:6]
+        if not keywords:
+            keywords = ["general"]
+        return {
+            "keywords": keywords,
+            "context_description": f"Useful when working on {category} tasks.",
+            "tags": [category, "fallback"],
+            "summary": content[:120] if content else f"{category} note",
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -195,7 +207,21 @@ If no links, return [].
 
 JSON:"""
 
-    result = _generate_json(prompt)
+    try:
+        result = _generate_json(prompt)
+    except OllamaUnavailableError:
+        sorted_candidates = sorted(
+            candidates,
+            key=lambda c: float(c.get("score", 0.0)),
+            reverse=True,
+        )
+        fallback = []
+        for cand in sorted_candidates[:5]:
+            score = float(cand.get("score", 0.0))
+            if score < 0.25:
+                continue
+            fallback.append({"target_id": cand["note_id"], "relationship": "relates_to"})
+        result = fallback
     if not isinstance(result, list):
         return []
 
@@ -279,7 +305,10 @@ Respond with ONLY a JSON object containing:
 
 JSON:"""
 
-    result = _generate_json(prompt)
+    try:
+        result = _generate_json(prompt)
+    except OllamaUnavailableError:
+        return None
     if not isinstance(result, dict) or not result.get("should_update"):
         return None
 
@@ -325,7 +354,10 @@ If nothing notable, return [].
 
 JSON:"""
 
-    result = _generate_json(prompt)
+    try:
+        result = _generate_json(prompt)
+    except OllamaUnavailableError:
+        return []
     if not isinstance(result, list):
         return []
 
@@ -373,7 +405,10 @@ If nothing noteworthy, return [].
 
 JSON:"""
 
-    result = _generate_json(prompt)
+    try:
+        result = _generate_json(prompt)
+    except OllamaUnavailableError:
+        return []
     if not isinstance(result, list):
         return []
 

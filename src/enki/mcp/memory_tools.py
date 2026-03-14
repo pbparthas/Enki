@@ -12,8 +12,21 @@ import logging
 import os
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
+
+from enki.project_state import normalize_project_name, resolve_project_from_cwd
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_project(project: str | None) -> str:
+    candidate = (project or "").strip()
+    if candidate and candidate not in {".", "default"}:
+        return normalize_project_name(candidate)
+    resolved = resolve_project_from_cwd(str(Path.cwd()))
+    if resolved:
+        return normalize_project_name(resolved)
+    return normalize_project_name(candidate) or "default"
 
 
 # ---------------------------------------------------------------------------
@@ -34,6 +47,7 @@ def enki_remember(
     Preferences → direct to wisdom.db notes.
     Everything else → abzu.db note_candidates (staging).
     """
+    project = _resolve_project(project)
     if not content or not content.strip():
         return {"stored": "rejected", "reason": "empty content"}
 
@@ -169,7 +183,7 @@ def enki_recall(
     if not query or not query.strip():
         return []
 
-    proj = project if scope == "project" else None
+    proj = _resolve_project(project) if scope == "project" else None
 
     try:
         from enki.embeddings import hybrid_search
@@ -249,9 +263,10 @@ def enki_star(bead_id: str) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def enki_status() -> dict:
+def enki_status(project: str | None = None) -> dict:
     """Get memory system health: note counts, staging depth, decay stats."""
     from enki.db import DB_DIR, ENKI_ROOT, get_abzu_db, get_wisdom_db
+    resolved_project = _resolve_project(project) if project is not None else None
 
     # v4 note counts
     v4_notes = {}
@@ -324,6 +339,7 @@ def enki_status() -> dict:
                 break
 
     return {
+        "project": resolved_project,
         "notes": v4_notes,
         "staging": v4_staging,
         "v3_beads": v3_beads,
@@ -344,6 +360,7 @@ def enki_restore(project: str | None = None) -> dict:
     """
     parts = []
     MAX_CHARS = 6000
+    resolved_project = _resolve_project(project) if project is not None else project
 
     # 1. Persona identity (compact)
     parts.append("# Session Restored")
@@ -367,13 +384,13 @@ def enki_restore(project: str | None = None) -> dict:
             elif "Project:" in line:
                 project_line = line.split("Project:", 1)[1].strip()
 
-        parts.append(f"**Project:** {project or project_line or 'unknown'}")
+        parts.append(f"**Project:** {resolved_project or project_line or 'unknown'}")
         parts.append(f"**Goal:** {goal_line or 'NOT SET'}")
         parts.append(f"**Phase:** {phase_line or 'NOT SET'} | **Tier:** {tier_line or 'unknown'}")
         parts.append("")
     except Exception:
-        if project:
-            parts.append(f"**Project:** {project}")
+        if resolved_project:
+            parts.append(f"**Project:** {resolved_project}")
         parts.append("")
 
     # 3. Latest session summary
@@ -400,7 +417,7 @@ def enki_restore(project: str | None = None) -> dict:
         pass
 
     # 4. Recent relevant notes (up to 3)
-    if project:
+    if resolved_project:
         try:
             from enki.db import get_wisdom_db
             conn = get_wisdom_db()
@@ -408,7 +425,7 @@ def enki_restore(project: str | None = None) -> dict:
                 rows = conn.execute(
                     "SELECT content, category FROM notes "
                     "WHERE project = ? ORDER BY last_accessed DESC LIMIT 3",
-                    (project,),
+                    (resolved_project,),
                 ).fetchall()
                 if rows:
                     parts.append("**Recent Knowledge:**")

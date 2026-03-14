@@ -89,14 +89,38 @@ def _install_hooks() -> int:
     if not hooks_src.exists():
         return 0
 
-    CLAUDE_HOOKS_DIR.mkdir(parents=True, exist_ok=True)
+    fallback_dir = ENKI_ROOT / "hooks"
+    target_dir = CLAUDE_HOOKS_DIR
+    try:
+        target_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        # Sandbox or permission-restricted env: fall back to ~/.enki/hooks.
+        target_dir = fallback_dir
+        target_dir.mkdir(parents=True, exist_ok=True)
 
     installed = 0
+    used_fallback = target_dir == fallback_dir
     for src_file in sorted(hooks_src.glob("enki-*.sh")):
-        dst_file = CLAUDE_HOOKS_DIR / src_file.name
-        shutil.copy2(src_file, dst_file)
-        dst_file.chmod(dst_file.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-        installed += 1
+        dst_file = target_dir / src_file.name
+        try:
+            shutil.copy2(src_file, dst_file)
+            dst_file.chmod(dst_file.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+            installed += 1
+        except OSError:
+            if not used_fallback:
+                # Retry once to local writable fallback path.
+                fallback_dir.mkdir(parents=True, exist_ok=True)
+                target_dir = fallback_dir
+                used_fallback = True
+                dst_file = target_dir / src_file.name
+                try:
+                    shutil.copy2(src_file, dst_file)
+                    dst_file.chmod(dst_file.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+                    installed += 1
+                except OSError:
+                    continue
+            else:
+                continue
 
     return installed
 

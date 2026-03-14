@@ -22,6 +22,7 @@ from enki.project_state import (
     project_db_path,
     read_project_state,
     resolve_project_from_cwd,
+    stable_goal_id,
     write_project_state,
 )
 from enki.orch.schemas import create_tables as create_em_tables
@@ -104,6 +105,35 @@ APPROVAL_TARGET_PHASE = {
 }
 
 
+def _resolve_project(project: str | None) -> str:
+    candidate = (project or "").strip()
+    if candidate and candidate not in {".", "default"}:
+        return normalize_project_name(candidate)
+    resolved = resolve_project_from_cwd(str(Path.cwd()))
+    if resolved:
+        return normalize_project_name(resolved)
+    return normalize_project_name(candidate) or "default"
+
+
+def _register_project_path(project: str, cwd: Path | None = None) -> str:
+    resolved_cwd = str((cwd or Path.cwd()).resolve())
+    with wisdom_db() as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS projects (
+                name TEXT PRIMARY KEY,
+                path TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_active TIMESTAMP
+            )
+        """)
+        conn.execute(
+            "INSERT OR REPLACE INTO projects (name, path, last_active) "
+            "VALUES (?, ?, CURRENT_TIMESTAMP)",
+            (project, resolved_cwd),
+        )
+    return resolved_cwd
+
+
 # ── Goal & Triage ──
 
 
@@ -135,7 +165,7 @@ def enki_goal(
             return {"error": f"spec_path is not readable: {resolved}"}
         external_spec_path = resolved
 
-    project = normalize_project_name(project)
+    project = _resolve_project(project)
     deprecate_global_project_marker()
 
     db_path = project_db_path(project)
@@ -165,9 +195,17 @@ def enki_goal(
     existing["em_db"] = db_existed
 
     detected_tier = (tier or "").strip().lower() or detect_tier(requested_goal)
-    phase = "planning"
-    goal_id = str(uuid.uuid4())
-    metadata = {"spec_path": spec_path}
+    previous_goal = read_project_state(project, "goal")
+    existing_phase = read_project_state(project, "phase")
+    if existing_phase and existing_phase not in {"none", "planning"}:
+        phase = existing_phase
+        phase_preserved = True
+    else:
+        phase = "planning"
+        phase_preserved = False
+
+    goal_id = stable_goal_id(project)
+
     copied_spec: Path | None = None
     spec_mode = "internal"
     if external_spec_path is not None:
@@ -178,51 +216,20 @@ def enki_goal(
             return {"error": f"Failed to copy external spec: {e}"}
         spec_mode = "external"
 
-    with em_db(project) as conn:
-        conn.execute(
-            "UPDATE task_state SET status = 'completed', completed_at = datetime('now') "
-            "WHERE project_id = ? AND work_type = 'goal' AND status != 'completed'",
-            (project,),
-        )
-        conn.execute(
-            "INSERT INTO task_state "
-            "(task_id, project_id, sprint_id, task_name, tier, work_type, status, started_at, agent_outputs) "
-            "VALUES (?, ?, 'default', ?, ?, 'goal', 'active', datetime('now'), ?)",
-            (goal_id, project, requested_goal, detected_tier, json.dumps(metadata)),
-        )
-        conn.execute(
-            "INSERT INTO task_state "
-            "(task_id, project_id, sprint_id, task_name, tier, work_type, status, started_at) "
-            "VALUES (?, ?, 'default', ?, ?, 'phase', 'active', datetime('now'))",
-            (str(uuid.uuid4()), project, phase, detected_tier),
-        )
-
     write_project_state(project, "goal", requested_goal)
     write_project_state(project, "tier", detected_tier)
-    write_project_state(project, "phase", phase)
+    write_project_state(project, "goal_id", goal_id)
+    if not phase_preserved:
+        write_project_state(project, "phase", phase)
     write_project_state(project, "spec_source", spec_mode)
     write_project_state(project, "spec_path", str(copied_spec) if copied_spec else "")
-    created["project_state"] = True
-    existing["project_state"] = False
+    created["project_state"] = previous_goal is None
+    existing["project_state"] = previous_goal is not None
 
     if created["project_dir"]:
         _write_project_last_marker(enki_root, project, cwd)
 
-    registered_cwd = str(cwd)
-    with wisdom_db() as conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS projects (
-                name TEXT PRIMARY KEY,
-                path TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                last_active TIMESTAMP
-            )
-        """)
-        conn.execute(
-            "INSERT OR REPLACE INTO projects (name, path, last_active) "
-            "VALUES (?, ?, CURRENT_TIMESTAMP)",
-            (project, registered_cwd),
-        )
+    registered_cwd = _register_project_path(project, cwd=cwd)
 
     mcp_status = _ensure_project_mcp_json(cwd)
     created["mcp_json"] = mcp_status["created"]
@@ -230,6 +237,7 @@ def enki_goal(
     warning = mcp_status.get("warning")
     if warning:
         warnings.append(warning)
+    _ensure_pipeline_md(enki_root)
 
     result = {
         "status": "initialised",
@@ -237,6 +245,7 @@ def enki_goal(
         "goal_id": goal_id,
         "tier": detected_tier,
         "phase": phase,
+        "phase_preserved": phase_preserved,
         "spec_mode": spec_mode,
     }
     if spec_path:
@@ -253,6 +262,10 @@ def enki_goal(
     }
     if warnings:
         result["bootstrap"]["warnings"] = warnings
+    if phase_preserved:
+        result["warning"] = (
+            f"Project already in progress — phase preserved at {phase}. Goal and tier updated."
+        )
     challenge_prompt = """
 ⚠ PRE-SPEC PHASE ACTIVE — Challenge pass required before spec.
 
@@ -273,10 +286,25 @@ Phase transition to spec WILL CHECK that:
     result["message"] = (
         f"Goal registered: {requested_goal}\n"
         f"Tier: {detected_tier}\n"
-        "Phase: planning\n\n"
+        f"Phase: {phase}\n\n"
         f"{challenge_prompt.strip()}"
     )
     return result
+
+
+def enki_register(project: str | None = None, path: str | None = None) -> dict:
+    """Register project path mapping in wisdom.db for CWD-based resolution."""
+    resolved_project = _resolve_project(project)
+    if path:
+        cwd = Path(path).expanduser().resolve()
+    else:
+        cwd = Path.cwd().resolve()
+    registered_path = _register_project_path(resolved_project, cwd=cwd)
+    return {
+        "registered": True,
+        "project": resolved_project,
+        "path": registered_path,
+    }
 
 
 def _write_project_last_marker(enki_root: Path, project: str, cwd: Path) -> None:
@@ -317,6 +345,31 @@ def _ensure_project_mcp_json(cwd: Path) -> dict[str, bool | str]:
         return {"created": False, "existing": False, "warning": warning}
 
 
+def _ensure_pipeline_md(enki_root: Path) -> None:
+    pipeline_path = enki_root / "PIPELINE.md"
+    implement_section = (
+        "### implement\n"
+        "- Call enki_wave(project) to get next wave\n"
+        "- Execute Dev agent in FOREGROUND via Task tool — wait for completion\n"
+        "- Call enki_report(role='dev', task_id=..., status='completed')\n"
+        "- Execute QA agent in FOREGROUND via Task tool — wait for completion\n"
+        "- Call enki_report(role='qa', task_id=..., status='completed')\n"
+        "- Repeat until enki_wave returns no more tasks\n"
+        "- NEVER background agents — foreground only for permission inheritance\n"
+    )
+    if not pipeline_path.exists():
+        pipeline_path.write_text("# Enki Pipeline — Operational Reference\n\n" + implement_section)
+        return
+    text = pipeline_path.read_text()
+    pattern = re.compile(r"(?ms)^### implement\s*\n.*?(?=^### |\Z)")
+    if pattern.search(text):
+        updated = pattern.sub(implement_section, text)
+    else:
+        updated = text.rstrip() + "\n\n" + implement_section
+    if updated != text:
+        pipeline_path.write_text(updated)
+
+
 def enki_triage(description: str) -> dict:
     """Auto-detect tier from description.
 
@@ -339,10 +392,10 @@ def enki_quick(description: str, project: str = ".") -> dict:
 def enki_phase(
     action: str,
     to: str | None = None,
-    project: str = "default",
+    project: str | None = None,
 ) -> dict:
     """Advance phase with DB-backed precondition checks, or return status."""
-    project = normalize_project_name(project)
+    project = _resolve_project(project)
 
     active = _require_active_goal(project)
     if active.get("error"):
@@ -361,13 +414,27 @@ def enki_phase(
             if current_idx + 1 < len(PHASE_ORDER)
             else "done"
         )
-        return {
+        result = {
             "phase": current,
             "tier": tier or "not set",
             "goal": goal or "not set",
             "next_phase": next_phase,
             "pipeline": " → ".join(PHASE_ORDER),
         }
+        if current == "implement":
+            wave_status = _wave_status(project)
+            result["wave_status"] = wave_status
+            if wave_status == "NOT STARTED":
+                result["mandatory_next"] = (
+                    f"Call enki_wave(project='{project}') to spawn Wave 1 agents. "
+                    "Do not read source files or explore code — that is agent work."
+                )
+            elif "in progress" in wave_status:
+                result["mandatory_next"] = (
+                    "Call enki_report for each completed agent, then enki_wave for next wave "
+                    "when current wave is complete."
+                )
+        return result
 
     if action == "advance":
         if not to:
@@ -393,13 +460,6 @@ def enki_phase(
         if missing:
             return {"error": f"Cannot advance to {target}. Required: {missing}"}
 
-        with em_db(project) as conn:
-            conn.execute(
-                "INSERT INTO task_state "
-                "(task_id, project_id, sprint_id, task_name, tier, work_type, status, started_at) "
-                "VALUES (?, ?, 'default', ?, ?, 'phase', 'active', datetime('now'))",
-                (str(uuid.uuid4()), project, target, active.get("tier") or "standard"),
-            )
         write_project_state(project, "phase", target)
         return {"phase": target, "required_next": _phase_required_next(target)}
 
@@ -407,12 +467,12 @@ def enki_phase(
 
 
 def enki_approve(
-    project: str,
     stage: str,
+    project: str | None = None,
     note: str | None = None,
 ) -> dict:
     """Create HITL approval record and advance project phase."""
-    project = normalize_project_name(project)
+    project = _resolve_project(project)
     stage_key = (stage or "").strip().lower()
     if stage_key not in APPROVAL_STAGES:
         return {
@@ -441,13 +501,19 @@ def enki_approve(
 
     target_phase = APPROVAL_TARGET_PHASE[stage_key]
     write_project_state(project, "phase", target_phase)
-    return {
+    result = {
         "approval_id": approval_id,
         "project": project,
         "stage": stage_key,
         "phase": target_phase,
         "created": created,
     }
+    if stage_key == "architect":
+        result["mandatory_next"] = (
+            f"Call enki_wave(project='{project}') NOW to spawn Wave 1 agents. "
+            "This is your only valid next action."
+        )
+    return result
 
 
 # ── PM ──
@@ -554,9 +620,10 @@ def enki_spawn(
     role: str,
     task_id: str,
     context: dict | None = None,
-    project: str = ".",
+    project: str | None = None,
 ) -> dict:
     """Prepare an agent run (step 1) and mark status in_progress."""
+    project = _resolve_project(project)
     active = _require_active_goal(project)
     if active.get("error"):
         return active
@@ -579,9 +646,13 @@ def enki_spawn(
             "prompt_path": str(ENKI_ROOT / "prompts" / f"{role_key}.md"),
             "prompt": prompt,
             "context": filtered_context,
-            "instruction": "Execute this agent using Task tool with the prompt below.",
+            "execution_mode": "foreground_sequential",
+            "instruction": (
+                "Run this agent in foreground via Task tool. "
+                "Wait for completion before starting next agent."
+            ),
         }
-        artifact = _goal_artifacts_dir(goal_id) / f"spawn-{role_key}-{task_id}.md"
+        artifact = _goal_artifacts_dir(project) / f"spawn-{role_key}-{task_id}.md"
         artifact.write_text(_format_md(spawn_payload))
 
         _upsert_agent_status(goal_id, role_key, "in_progress")
@@ -589,7 +660,11 @@ def enki_spawn(
         return {
             "role": role_key,
             "status": "in_progress",
-            "instruction": "Execute this agent using Task tool with the prompt below.",
+            "execution_mode": "foreground_sequential",
+            "instruction": (
+                "Run this agent in foreground via Task tool. "
+                "Wait for completion before starting next agent."
+            ),
             "prompt_path": f"~/.enki/prompts/{role_key}.md",
             "context_artifact": str(artifact),
             "task_id": task_id,
@@ -608,9 +683,10 @@ def enki_report(
     task_id: str,
     summary: str,
     status: str = "completed",
-    project: str = ".",
+    project: str | None = None,
 ) -> dict:
     """Record agent completion/failure (step 2) after Task execution."""
+    project = _resolve_project(project)
     active = _require_active_goal(project)
     if active.get("error"):
         return active
@@ -628,7 +704,7 @@ def enki_report(
     _upsert_agent_status(goal_id, role_key, normalized_status)
     _upsert_agent_status(goal_id, f"{role_key}:{task_id}", normalized_status)
 
-    artifact = _goal_artifacts_dir(goal_id) / f"{role_key}-{task_id}.md"
+    artifact = _goal_artifacts_dir(project) / f"{role_key}-{task_id}.md"
     artifact.write_text(
         _format_md(
             {
@@ -654,14 +730,14 @@ def enki_report(
     }
 
 
-def enki_wave(goal_id: str, project: str = ".") -> dict:
+def enki_wave(project: str | None = None) -> dict:
     """Prepare next wave's Dev+QA agent runs for external Task execution."""
+    project = _resolve_project(project)
     active = _require_active_goal(project)
     if active.get("error"):
         return active
-    if active["goal_id"] != goal_id:
-        return {"error": "No goal set or goal_id mismatch."}
-    if not is_spec_approved(project):
+    goal_id = active["goal_id"]
+    if not (_has_hitl_approval(project, "spec") or _has_hitl_approval(project, "igi")):
         return {"error": "Specs not approved."}
 
     sprint = get_active_sprint(project)
@@ -672,7 +748,7 @@ def enki_wave(goal_id: str, project: str = ".") -> dict:
     if not tasks:
         return {"error": "No tasks ready for next wave."}
 
-    wave_no = _next_wave_number(goal_id)
+    wave_no = _next_wave_number(project)
     agents = []
     for task in tasks:
         ctx = {
@@ -690,7 +766,15 @@ def enki_wave(goal_id: str, project: str = ".") -> dict:
                 "context_artifact": item.get("context_artifact"),
             })
 
-    report_path = _goal_artifacts_dir(goal_id) / f"wave-{wave_no}.md"
+    report_path = _goal_artifacts_dir(project) / f"wave-{wave_no}.md"
+    wave_instruction = (
+        "Execute agents sequentially in foreground — one at a time, not in parallel. "
+        "Start Dev agent first. Wait for completion. "
+        "Call enki_report(role='dev', task_id=..., status='completed'). "
+        "Then start QA agent. Wait for completion. "
+        "Call enki_report(role='qa', task_id=..., status='completed'). "
+        "Do not background agents — foreground execution inherits write permissions."
+    )
     report_path.write_text(
         _format_md(
             {
@@ -698,7 +782,9 @@ def enki_wave(goal_id: str, project: str = ".") -> dict:
                 "wave_number": wave_no,
                 "task_ids": [t["task_id"] for t in tasks],
                 "agents": agents,
-                "instruction": "Execute each agent via Task tool, then call enki_report for each when done.",
+                "execution_mode": "foreground_sequential",
+                "execution_order": ["dev", "qa"],
+                "instruction": wave_instruction,
             }
         )
     )
@@ -706,12 +792,14 @@ def enki_wave(goal_id: str, project: str = ".") -> dict:
     return {
         "wave_number": wave_no,
         "agents": agents,
-        "instruction": "Execute each agent via Task tool, then call enki_report for each when done.",
+        "execution_mode": "foreground_sequential",
+        "instruction": wave_instruction,
     }
 
 
-def enki_complete(task_id: str, project: str = ".") -> dict:
+def enki_complete(task_id: str, project: str | None = None) -> dict:
     """Mark completion only if validator/QA/wave checks are satisfied."""
+    project = _resolve_project(project)
     active = _require_active_goal(project)
     if active.get("error"):
         return active
@@ -916,10 +1004,10 @@ def enki_bug(
     description: str | None = None,
     severity: str = "medium",
     bug_id: str | None = None,
-    project: str = ".",
+    project: str | None = None,
 ) -> dict:
     """File or manage bugs."""
-    project = normalize_project_name(project)
+    project = _resolve_project(project)
     priority_map = {"critical": "P0", "high": "P1", "medium": "P2", "low": "P3"}
     priority = priority_map.get(severity, "P2")
 
@@ -964,8 +1052,9 @@ def enki_bug(
 # ── Status ──
 
 
-def enki_status_update(project: str = ".") -> dict:
+def enki_status_update(project: str | None = None) -> dict:
     """Generate status update."""
+    project = _resolve_project(project)
     text = generate_status_update(project)
     return {"status_text": text}
 
@@ -1073,30 +1162,20 @@ def _phase_hint(phase: str) -> str:
 
 def _get_active_goal(project: str) -> dict | None:
     project = normalize_project_name(project)
-    goal_state = read_project_state(project, "goal")
-    tier_state = read_project_state(project, "tier")
-    phase_state = read_project_state(project, "phase")
-    with em_db(project) as conn:
-        row = conn.execute(
-            "SELECT task_id, task_name, tier, agent_outputs, started_at FROM task_state "
-            "WHERE project_id = ? AND work_type = 'goal' AND status != 'completed' "
-            "ORDER BY started_at DESC LIMIT 1",
-            (project,),
-        ).fetchone()
-        phase_row = conn.execute(
-            "SELECT task_name FROM task_state "
-            "WHERE project_id = ? AND work_type = 'phase' "
-            "ORDER BY started_at DESC, rowid DESC LIMIT 1",
-            (project,),
-        ).fetchone()
-    if not row and not goal_state:
+    goal = (read_project_state(project, "goal") or "").strip()
+    if not goal or goal.lower() == "none":
         return None
+    stable_id = stable_goal_id(project)
+    gid = read_project_state(project, "goal_id")
+    if gid != stable_id:
+        gid = stable_id
+        write_project_state(project, "goal_id", gid)
     return {
-        "goal_id": row["task_id"] if row else None,
-        "goal": goal_state or (row["task_name"] if row else None),
-        "tier": tier_state or (row["tier"] if row else None),
-        "phase": phase_state or (phase_row["task_name"] if phase_row else None),
-        "started_at": row["started_at"] if row else None,
+        "goal_id": gid,
+        "goal": goal,
+        "tier": read_project_state(project, "tier"),
+        "phase": read_project_state(project, "phase"),
+        "started_at": None,
     }
 
 
@@ -1285,8 +1364,8 @@ def _has_validator_signoff(project: str, goal_id: str) -> bool:
     return row is not None
 
 
-def _goal_artifacts_dir(goal_id: str) -> Path:
-    path = ENKI_ROOT / "artifacts" / goal_id
+def _goal_artifacts_dir(project: str) -> Path:
+    path = ENKI_ROOT / "artifacts" / normalize_project_name(project)
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -1352,8 +1431,8 @@ def _summarize_findings(task: dict, context: dict) -> list[str]:
     return findings
 
 
-def _next_wave_number(goal_id: str) -> int:
-    path = _goal_artifacts_dir(goal_id)
+def _next_wave_number(project: str) -> int:
+    path = _goal_artifacts_dir(project)
     existing = list(path.glob("wave-*.md"))
     if not existing:
         return 1
@@ -1364,6 +1443,35 @@ def _next_wave_number(goal_id: str) -> int:
         except Exception:
             continue
     return (max(nums) + 1) if nums else 1
+
+
+def _wave_status(project: str) -> str:
+    wave_files = list(_goal_artifacts_dir(project).glob("wave-*.md"))
+    if not wave_files:
+        return "NOT STARTED"
+    wave_numbers: list[int] = []
+    for p in wave_files:
+        try:
+            wave_numbers.append(int(p.stem.split("-", 1)[1]))
+        except Exception:
+            continue
+    active_wave = max(wave_numbers) if wave_numbers else 1
+    try:
+        goal_id = read_project_state(project, "goal_id")
+        if goal_id:
+            with uru_db() as conn:
+                row = conn.execute(
+                    "SELECT COUNT(*) AS c FROM agent_status "
+                    "WHERE goal_id = ? AND status = 'in_progress' "
+                    "AND (agent_role = 'dev' OR agent_role = 'qa' "
+                    "OR agent_role LIKE 'dev:%' OR agent_role LIKE 'qa:%')",
+                    (goal_id,),
+                ).fetchone()
+            if row and int(row["c"] or 0) > 0:
+                return f"Wave {active_wave} in progress"
+    except Exception:
+        pass
+    return f"Wave {active_wave} in progress"
 
 
 def _format_md(payload: dict) -> str:

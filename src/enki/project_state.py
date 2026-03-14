@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import hashlib
 from pathlib import Path
 
 import enki.db as db
 from enki.orch.schemas import create_tables
 
-STATE_KEYS = {"phase", "tier", "goal", "spec_source", "spec_path"}
+STATE_KEYS = {"phase", "tier", "goal", "goal_id", "spec_source", "spec_path"}
 DEFAULT_PROJECT = "default"
 
 _initialized_projects: set[str] = set()
@@ -66,9 +67,16 @@ def read_all_project_state(project: str | None) -> dict[str, str | None]:
         "phase": read_project_state(project, "phase"),
         "tier": read_project_state(project, "tier"),
         "goal": read_project_state(project, "goal"),
+        "goal_id": read_project_state(project, "goal_id"),
         "spec_source": read_project_state(project, "spec_source"),
         "spec_path": read_project_state(project, "spec_path"),
     }
+
+
+def stable_goal_id(project: str | None) -> str:
+    """Deterministic goal_id derived from project name."""
+    normalized = normalize_project_name(project)
+    return hashlib.sha256(normalized.encode()).hexdigest()[:16]
 
 
 def resolve_project_from_cwd(cwd: str) -> str | None:

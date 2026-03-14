@@ -15,11 +15,11 @@ def generate_orientation_block(project: str, phase: str, goal: str, tier: str) -
         "planning": "Call enki_goal to initialise this project",
         "spec": "Igi challenge is pending or complete. Check findings, present to operator, then call enki_approve(stage='igi')",
         "approved": "Write Architect implementation spec, present to operator, call enki_approve(stage='architect')",
-        "implement": "Spawn EM orchestration. Dev and QA agents are active.",
+        "implement": "ORCHESTRATOR MODE ONLY. Your first and only action is enki_wave(project='{project}'). Do NOT read source files, explore code, or implement directly. Spawn agents and report results.",
         "validating": "Validation in progress. Present results to operator, call enki_approve(stage='test')",
         "complete": "Sprint complete. Run session end pipeline.",
     }
-    next_action = action_map.get(phase_key, "Check enki_phase status and continue pipeline.")
+    next_action = action_map.get(phase_key, "Check enki_phase status and continue pipeline.").format(project=project)
     return (
         f"## 𒀭 Enki Session — {project}\n"
         f"- Goal: {goal}\n"

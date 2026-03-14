@@ -278,23 +278,17 @@ class TestGateChecks:
 
     def _set_goal(self, db_path, goal="Build feature", tier="minimal"):
         with connect(db_path) as conn:
-            conn.execute(
-                "INSERT INTO task_state "
-                "(task_id, project_id, sprint_id, task_name, tier, work_type, "
-                "status, started_at) "
-                "VALUES ('g1', 'testproj', 's1', ?, ?, 'goal', 'active', "
-                "datetime('now'))",
-                (goal, tier),
+            conn.executemany(
+                "INSERT INTO project_state (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                [("goal", goal), ("tier", tier), ("goal_id", "testproj-goal")],
             )
 
     def _set_phase(self, db_path, phase="implement"):
         with connect(db_path) as conn:
             conn.execute(
-                "INSERT INTO task_state "
-                "(task_id, project_id, sprint_id, task_name, tier, work_type, "
-                "status, started_at) "
-                "VALUES ('p1', 'testproj', 's1', ?, 'minimal', 'phase', "
-                "'active', datetime('now'))",
+                "INSERT INTO project_state (key, value) VALUES ('phase', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 (phase,),
             )
 
@@ -851,16 +845,18 @@ def test_gate_checks_are_project_scoped(tmp_path):
         from enki.db import connect as _connect
         from enki.gates.uru import check_post_tool_use
         from enki.orch.schemas import create_tables as create_em
+        from enki.project_state import stable_goal_id
 
         projects_dir = mock_nudge_env / "projects" / "testproj"
         projects_dir.mkdir(parents=True)
         em_path = projects_dir / "em.db"
+        expected_goal_id = stable_goal_id("testproj")
         with _connect(em_path) as conn:
             create_em(conn)
             conn.execute(
-                "INSERT INTO task_state "
-                "(task_id, project_id, sprint_id, task_name, tier, work_type, status, started_at) "
-                "VALUES ('g1', 'testproj', 's1', 'Build auth', 'standard', 'goal', 'active', datetime('now'))"
+                "INSERT INTO project_state (key, value) VALUES "
+                "('goal', 'Build auth'), ('tier', 'standard'), ('phase', 'spec'), ('goal_id', ?)",
+                (expected_goal_id,),
             )
 
         result = check_post_tool_use(
@@ -872,7 +868,8 @@ def test_gate_checks_are_project_scoped(tmp_path):
 
         with _connect(mock_nudge_env / "uru.db") as conn:
             row = conn.execute(
-                "SELECT status FROM agent_status WHERE goal_id = 'g1' AND agent_role = 'pm'"
+                "SELECT status FROM agent_status WHERE goal_id = ? AND agent_role = 'pm'",
+                (expected_goal_id,),
             ).fetchone()
         assert row is not None
         assert row[0] == "completed"
@@ -952,18 +949,8 @@ class TestEnforcementContext:
             from enki.orch.schemas import create_tables
             create_tables(conn)
             conn.execute(
-                "INSERT INTO task_state "
-                "(task_id, project_id, sprint_id, task_name, tier, work_type, "
-                "status, started_at) "
-                "VALUES ('g1', 'testproj', 's1', 'Build auth', 'standard', "
-                "'goal', 'active', datetime('now'))"
-            )
-            conn.execute(
-                "INSERT INTO task_state "
-                "(task_id, project_id, sprint_id, task_name, tier, work_type, "
-                "status, started_at) "
-                "VALUES ('p1', 'testproj', 's1', 'implement', 'standard', "
-                "'phase', 'active', datetime('now'))"
+                "INSERT INTO project_state (key, value) VALUES "
+                "('goal', 'Build auth'), ('tier', 'standard'), ('phase', 'implement'), ('goal_id', 'testproj-goal')"
             )
 
         db_dir = enki_root / "db"

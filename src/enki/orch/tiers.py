@@ -7,11 +7,13 @@ Three tiers determine workflow complexity:
 """
 
 import re
-import uuid
-from datetime import datetime
 
-from enki.db import em_db
-from enki.project_state import normalize_project_name, read_project_state, write_project_state
+from enki.project_state import (
+    normalize_project_name,
+    read_project_state,
+    stable_goal_id,
+    write_project_state,
+)
 from enki.orch.pm import is_spec_approved
 
 PHASE_ORDER = ["intake", "debate", "spec", "approve", "implement", "review", "complete"]
@@ -127,24 +129,17 @@ def set_phase(project: str, phase: str) -> dict:
 def get_project_state(project: str) -> dict:
     """Get current goal, tier, and phase for a project."""
     project = normalize_project_name(project)
-    with em_db(project) as conn:
-        goal_row = conn.execute(
-            "SELECT task_name, tier FROM task_state "
-            "WHERE work_type = 'goal' AND status != 'completed' "
-            "ORDER BY started_at DESC LIMIT 1"
-        ).fetchone()
-
-        phase_row = conn.execute(
-            "SELECT task_name FROM task_state "
-            "WHERE work_type = 'phase' "
-            "ORDER BY started_at DESC, rowid DESC LIMIT 1"
-        ).fetchone()
-
+    goal = read_project_state(project, "goal")
+    goal_id = read_project_state(project, "goal_id")
+    if goal and not goal_id:
+        goal_id = stable_goal_id(project)
+        write_project_state(project, "goal_id", goal_id)
     return {
         "project": project,
-        "goal": read_project_state(project, "goal") or (goal_row["task_name"] if goal_row else None),
-        "tier": read_project_state(project, "tier") or (goal_row["tier"] if goal_row else None),
-        "phase": read_project_state(project, "phase") or (phase_row["task_name"] if phase_row else None),
+        "goal": goal,
+        "goal_id": goal_id,
+        "tier": read_project_state(project, "tier"),
+        "phase": read_project_state(project, "phase"),
     }
 
 
@@ -212,41 +207,16 @@ def triage(description: str) -> dict:
 
 
 def _set_goal(project: str, description: str, tier: str) -> None:
-    """Write goal to em.db."""
+    """Write goal to project_state."""
     project = normalize_project_name(project)
-    task_id = str(uuid.uuid4())
-    with em_db(project) as conn:
-        # Mark previous goals as completed
-        conn.execute(
-            "UPDATE task_state SET status = 'completed', "
-            "completed_at = datetime('now') "
-            "WHERE project_id = ? AND work_type = 'goal' AND status != 'completed'",
-            (project,),
-        )
-        conn.execute(
-            "INSERT INTO task_state "
-            "(task_id, project_id, sprint_id, task_name, tier, work_type, "
-            "status, started_at) "
-            "VALUES (?, ?, 'default', ?, ?, 'goal', 'active', datetime('now'))",
-            (task_id, project, description, tier),
-        )
     write_project_state(project, "goal", description)
     write_project_state(project, "tier", tier)
+    write_project_state(project, "goal_id", stable_goal_id(project))
 
 
 def _set_phase(project: str, phase: str) -> None:
-    """Write phase to em.db."""
+    """Write phase to project_state."""
     project = normalize_project_name(project)
-    task_id = str(uuid.uuid4())
-    with em_db(project) as conn:
-        conn.execute(
-            "INSERT INTO task_state "
-            "(task_id, project_id, sprint_id, task_name, tier, work_type, "
-            "status, started_at) "
-            "VALUES (?, ?, 'default', ?, 'minimal', 'phase', 'active', "
-            "datetime('now'))",
-            (task_id, project, phase),
-        )
     write_project_state(project, "phase", phase)
 
 
@@ -258,5 +228,3 @@ def _tier_reasoning(description: str, tier: str) -> str:
         return "Large scope: new system, architecture change, or multi-sprint work."
     else:
         return "Medium scope: feature work requiring planning and testing."
-    project = normalize_project_name(project)
-    project = normalize_project_name(project)
