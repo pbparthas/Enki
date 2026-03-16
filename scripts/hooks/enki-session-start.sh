@@ -85,4 +85,16 @@ phase = os.environ.get('ENKI_PHASE') or 'none'
 print(build_session_start_context(project, goal, tier, phase))
 " 2>>"$LOG" || echo "Uru: Enforcement context unavailable.")
 
+# Inject operational skill reference
+SKILL_FILE="$HOME/.enki/SKILL.md"
+if [ -f "$SKILL_FILE" ]; then
+    SKILL_CONTENT=$(cat "$SKILL_FILE" 2>/dev/null || true)
+    if [ -n "$SKILL_CONTENT" ]; then
+        CONTEXT="${CONTEXT}
+
+---ENKI-SKILL---
+$SKILL_CONTENT"
+    fi
+fi
+
 echo "$CONTEXT"

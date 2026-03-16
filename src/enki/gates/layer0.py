@@ -40,6 +40,7 @@ LAYER0_PROTECTED = {
     "gemini_review.py",
     # Identity
     "PERSONA.md",
+    "SKILL.md",
     # Shared prompt templates
     "_base.md",
     "_coding_standards.md",

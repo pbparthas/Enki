@@ -57,7 +57,7 @@ def test_full_pipeline_with_stable_goal_id_and_wave(monkeypatch, tmp_path):
     assert qa["status"] == "completed"
 
     test_ok = orch_tools_mod.enki_approve(stage="test", project="alpha")
-    assert test_ok["phase"] == "complete"
+    assert test_ok["phase"] == "validating"
     assert (enki_root / "artifacts" / "alpha" / f"dev-{task_id}.md").exists()
 
 

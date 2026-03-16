@@ -94,14 +94,15 @@ PHASE_ALIASES = {
 VALID_AGENT_ROLES = {
     "pm", "architect", "dba", "dev", "qa", "ui_ux", "validator",
     "reviewer", "infosec", "devops", "performance", "researcher", "em",
-    "igi",
+    "igi", "cto", "devils_advocate", "tech_feasibility", "historical_context",
 }
-APPROVAL_STAGES = {"igi", "spec", "architect", "test"}
+APPROVAL_STAGES = {"igi", "spec", "architect", "test", "spec-revision"}
 APPROVAL_TARGET_PHASE = {
     "igi": "approved",
     "spec": "approved",
+    "spec-revision": "approved",
     "architect": "implement",
-    "test": "complete",
+    "test": "validating",
 }
 
 
@@ -240,6 +241,7 @@ def enki_goal(
     _ensure_pipeline_md(enki_root)
 
     result = {
+        "message": _next_step_hint(detected_tier),
         "status": "initialised",
         "project": project,
         "goal_id": goal_id,
@@ -266,29 +268,6 @@ def enki_goal(
         result["warning"] = (
             f"Project already in progress — phase preserved at {phase}. Goal and tier updated."
         )
-    challenge_prompt = """
-⚠ PRE-SPEC PHASE ACTIVE — Challenge pass required before spec.
-
-After recording requirements, spawn Igi for independent challenge review:
-  enki_spawn("igi", "challenge-review")
-
-Then execute Igi via Task tool with the spawn artifact.
-Then call enki_report("igi", "challenge-review", summary).
-
-Igi will identify gaps, blind spots, assumptions, and failure modes.
-Present Igi's findings to HITL alongside your intake notes.
-
-Phase transition to spec WILL CHECK that:
-1. Igi has completed (enki_report called)
-2. Challenge notes exist (enki_remember with category="challenge")
-"""
-    result["challenge_prompt"] = challenge_prompt.strip()
-    result["message"] = (
-        f"Goal registered: {requested_goal}\n"
-        f"Tier: {detected_tier}\n"
-        f"Phase: {phase}\n\n"
-        f"{challenge_prompt.strip()}"
-    )
     return result
 
 
@@ -501,7 +480,37 @@ def enki_approve(
 
     target_phase = APPROVAL_TARGET_PHASE[stage_key]
     write_project_state(project, "phase", target_phase)
+    approval_messages = {
+        "igi": (
+            "Igi approved. Phase → approved. "
+            "Now call enki_kickoff() to begin pre-implementation kickoff. "
+            "PM will present spec, Architect will review feasibility, DBA/UI will join if needed. "
+            "Do not spawn Architect directly — enki_kickoff() handles the sequence."
+        ),
+        "spec": (
+            "Spec approved. Phase → approved. "
+            "Now spawn Igi for adversarial review: enki_spawn('igi', 'igi-review') → Task tool → enki_report. "
+            "Present Igi findings to HITL → enki_approve(stage='igi')."
+        ),
+        "spec-revision": (
+            "Spec revision approved. Kickoff blockers resolved. "
+            "Now spawn Architect for impl spec: enki_spawn('architect', 'impl-spec') → Task tool → enki_report. "
+            "Present impl spec + kickoff summary to HITL → enki_approve(stage='architect')."
+        ),
+        "architect": (
+            "Architect approved. Phase → implement. "
+            "Now call enki_decompose(tasks=[...]) with Architect's task breakdown. "
+            "Tasks format: [{'name': str, 'files': [str], 'dependencies': [str]}]. "
+            "Dependencies are task names not IDs. Then call enki_wave()."
+        ),
+        "test": (
+            "Test approved. Phase → validating. "
+            "Spawn Validator: enki_spawn('validator', task_id) → Task tool → enki_report. "
+            "Then enki_complete(task_id) once validator+QA+no open bugs confirmed."
+        ),
+    }
     result = {
+        "message": approval_messages.get(stage_key, "Approval recorded."),
         "approval_id": approval_id,
         "project": project,
         "stage": stage_key,
@@ -514,6 +523,350 @@ def enki_approve(
             "This is your only valid next action."
         )
     return result
+
+
+def enki_kickoff(project: str | None = None) -> dict:
+    """Run pre-implementation kickoff: PM presents spec, Architect reviews feasibility,
+    DBA/UI conditionally join. Handles resume on session restart."""
+    project = _resolve_project(project)
+    active = _require_active_goal(project)
+    if active.get("error"):
+        return active
+
+    goal_id = active["goal_id"]
+    phase = active.get("phase", "planning")
+
+    if phase in ("implement", "validating", "complete"):
+        return {
+            "message": (
+                "Project already in implement phase. Kickoff not required. "
+                "Call enki_wave() to continue."
+            ),
+            "skipped": True,
+            "reason": "phase_already_implement",
+        }
+
+    spec_source = read_project_state(project, "spec_source") or ""
+    spec_path = read_project_state(project, "spec_path") or ""
+    spec_exists = bool(spec_source and (spec_source != "internal" or spec_path))
+    if not spec_exists:
+        return {
+            "message": (
+                "No spec found for this project. Kickoff not required. "
+                "Call enki_spawn('architect', 'impl-spec') directly."
+            ),
+            "skipped": True,
+            "reason": "no_spec",
+        }
+
+    artifacts_dir = _goal_artifacts_dir(project)
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    kickoff_path = artifacts_dir / f"kickoff-{goal_id}.md"
+    kickoff_id = f"kickoff-{goal_id}"
+
+    existing = {}
+    if kickoff_path.exists():
+        try:
+            content = kickoff_path.read_text()
+            match = re.search(r"```json\n(.*?)\n```", content, re.DOTALL)
+            if match:
+                existing = json.loads(match.group(1))
+        except Exception:
+            existing = {}
+
+    status = existing.get("status", "")
+    agents_participated = existing.get("agents_participated", [])
+
+    if status == "complete":
+        return {
+            "message": (
+                "Kickoff already complete. No blockers found. "
+                "Present kickoff summary to HITL for verbal ok, "
+                "then spawn Architect: enki_spawn('architect', 'impl-spec') → Task tool → enki_report."
+            ),
+            "kickoff_id": kickoff_id,
+            "agents_participated": agents_participated,
+            "blockers_found": False,
+            "blockers": [],
+            "summary_path": str(kickoff_path),
+            "resumed": True,
+        }
+
+    if status == "resolved":
+        return {
+            "message": (
+                "Kickoff blockers resolved. "
+                "Spawn Architect for impl spec: enki_spawn('architect', 'impl-spec') → Task tool → enki_report. "
+                "Present impl spec + kickoff summary to HITL → enki_approve(stage='architect')."
+            ),
+            "kickoff_id": kickoff_id,
+            "agents_participated": agents_participated,
+            "blockers_found": True,
+            "blockers": existing.get("blockers", []),
+            "summary_path": str(kickoff_path),
+            "resumed": True,
+        }
+
+    if status == "blockers_found":
+        with em_db(project) as conn:
+            spec_revision_approved = conn.execute(
+                "SELECT id FROM hitl_approvals WHERE project = ? AND stage = ? LIMIT 1",
+                (project, "spec-revision"),
+            ).fetchone()
+        if not spec_revision_approved:
+            return {
+                "message": (
+                    "Kickoff found blockers awaiting HITL resolution. "
+                    "Present blockers below to HITL. Once resolved, call enki_approve(stage='spec-revision', note='<resolution>'). "
+                    "Then call enki_kickoff() again to proceed."
+                ),
+                "kickoff_id": kickoff_id,
+                "agents_participated": agents_participated,
+                "blockers_found": True,
+                "blockers": existing.get("blockers", []),
+                "summary_path": str(kickoff_path),
+                "resumed": True,
+            }
+        existing["status"] = "resolved"
+        kickoff_path.write_text(_format_md(existing))
+        return {
+            "message": (
+                "Spec revision approved. Blockers resolved. "
+                "Spawn Architect: enki_spawn('architect', 'impl-spec') → Task tool → enki_report."
+            ),
+            "kickoff_id": kickoff_id,
+            "agents_participated": agents_participated,
+            "blockers_found": True,
+            "blockers": existing.get("blockers", []),
+            "summary_path": str(kickoff_path),
+            "resumed": True,
+        }
+
+    if not existing:
+        existing = {
+            "kickoff_id": kickoff_id,
+            "project": project,
+            "goal_id": goal_id,
+            "status": "in_progress",
+            "agents_participated": [],
+            "dba_triggered": False,
+            "ui_triggered": False,
+            "blockers": [],
+            "agent_outputs": {},
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        kickoff_path.write_text(_format_md(existing))
+
+    agents_to_run = []
+    if "pm" not in agents_participated:
+        agents_to_run.append("pm")
+    if "architect" not in agents_participated:
+        agents_to_run.append("architect")
+
+    spawn_instructions = []
+    for role in agents_to_run:
+        spawn_result = enki_spawn(
+            role,
+            f"kickoff-{role}",
+            {
+                "mode": "kickoff",
+                "kickoff_id": kickoff_id,
+                "spec_source": spec_source,
+                "spec_path": spec_path,
+            },
+            project,
+        )
+        spawn_instructions.append({
+            "role": role,
+            "prompt_path": spawn_result.get("prompt_path"),
+            "context_artifact": spawn_result.get("context_artifact"),
+            "instruction": spawn_result.get("instruction"),
+        })
+
+    existing["status"] = "in_progress"
+    existing["spawn_instructions"] = spawn_instructions
+    kickoff_path.write_text(_format_md(existing))
+
+    return {
+        "message": (
+            f"Kickoff initialised. Execute {len(spawn_instructions)} agents sequentially. "
+            "For each: read prompt_path verbatim → read context_artifact → Task tool foreground → enki_report. "
+            "After PM completes: call enki_kickoff_update(role='pm', output={...}) to record DBA/UI signals. "
+            "After all agents complete: call enki_kickoff_complete(project=...) to evaluate blockers and get summary."
+        ),
+        "kickoff_id": kickoff_id,
+        "agents_participated": agents_participated,
+        "spawn_instructions": spawn_instructions,
+        "summary_path": str(kickoff_path),
+        "status": "in_progress",
+    }
+
+
+def enki_kickoff_update(
+    role: str,
+    output: dict,
+    project: str | None = None,
+) -> dict:
+    """Record a kickoff agent's output and update artifact progressively.
+    Call after each kickoff agent completes via Task tool.
+    For PM: reads DBA/UI signals from output and triggers conditional spawning.
+    """
+    project = _resolve_project(project)
+    active = _require_active_goal(project)
+    if active.get("error"):
+        return active
+
+    goal_id = active["goal_id"]
+    artifacts_dir = _goal_artifacts_dir(project)
+    kickoff_path = artifacts_dir / f"kickoff-{goal_id}.md"
+
+    if not kickoff_path.exists():
+        return {"error": "No kickoff in progress. Call enki_kickoff() first."}
+
+    try:
+        content = kickoff_path.read_text()
+        match = re.search(r"```json\n(.*?)\n```", content, re.DOTALL)
+        existing = json.loads(match.group(1)) if match else {}
+    except Exception:
+        return {"error": "Failed to read kickoff artifact."}
+
+    existing.setdefault("agent_outputs", {})
+    existing.setdefault("agents_participated", [])
+    existing["agent_outputs"][role] = output
+    if role not in existing["agents_participated"]:
+        existing["agents_participated"].append(role)
+
+    additional_spawns = []
+    if role == "pm":
+        dba_needed = output.get("dba_needed", False)
+        ui_needed = output.get("ui_needed", False)
+        existing["dba_triggered"] = dba_needed
+        existing["ui_triggered"] = ui_needed
+
+        participated = existing["agents_participated"]
+        if dba_needed and "dba" not in participated:
+            spawn_result = enki_spawn(
+                "dba",
+                "kickoff-dba",
+                {
+                    "mode": "kickoff",
+                    "kickoff_id": existing.get("kickoff_id"),
+                },
+                project,
+            )
+            additional_spawns.append({
+                "role": "dba",
+                "prompt_path": spawn_result.get("prompt_path"),
+                "context_artifact": spawn_result.get("context_artifact"),
+            })
+        if ui_needed and "ui_ux" not in participated:
+            spawn_result = enki_spawn(
+                "ui_ux",
+                "kickoff-ui_ux",
+                {
+                    "mode": "kickoff",
+                    "kickoff_id": existing.get("kickoff_id"),
+                },
+                project,
+            )
+            additional_spawns.append({
+                "role": "ui_ux",
+                "prompt_path": spawn_result.get("prompt_path"),
+                "context_artifact": spawn_result.get("context_artifact"),
+            })
+
+    kickoff_path.write_text(_format_md(existing))
+
+    if additional_spawns:
+        return {
+            "message": (
+                f"PM output recorded. Additional agents triggered: {[s['role'] for s in additional_spawns]}. "
+                "Execute each sequentially via Task tool, then call enki_kickoff_update for each. "
+                "After all complete: call enki_kickoff_complete()."
+            ),
+            "role_recorded": role,
+            "additional_spawns": additional_spawns,
+        }
+
+    return {
+        "message": (
+            f"Agent {role} output recorded. "
+            "Continue with remaining kickoff agents, then call enki_kickoff_complete()."
+        ),
+        "role_recorded": role,
+        "agents_participated": existing["agents_participated"],
+    }
+
+
+def enki_kickoff_complete(project: str | None = None) -> dict:
+    """Evaluate all kickoff agent outputs, identify blockers, write final summary.
+    Call after all kickoff agents have completed and been recorded via enki_kickoff_update.
+    """
+    project = _resolve_project(project)
+    active = _require_active_goal(project)
+    if active.get("error"):
+        return active
+
+    goal_id = active["goal_id"]
+    artifacts_dir = _goal_artifacts_dir(project)
+    kickoff_path = artifacts_dir / f"kickoff-{goal_id}.md"
+
+    if not kickoff_path.exists():
+        return {"error": "No kickoff in progress. Call enki_kickoff() first."}
+
+    try:
+        content = kickoff_path.read_text()
+        match = re.search(r"```json\n(.*?)\n```", content, re.DOTALL)
+        existing = json.loads(match.group(1)) if match else {}
+    except Exception:
+        return {"error": "Failed to read kickoff artifact."}
+
+    blockers = []
+    for role, output in existing.get("agent_outputs", {}).items():
+        agent_blockers = output.get("blockers", [])
+        for blocker in agent_blockers:
+            blockers.append({
+                "raised_by": role,
+                "concern": blocker.get("concern", ""),
+                "type": blocker.get("type", "unknown"),
+                "resolution_options": blocker.get("resolution_options", []),
+            })
+
+    blockers_found = len(blockers) > 0
+    existing["blockers"] = blockers
+    existing["blockers_found"] = blockers_found
+    existing["status"] = "blockers_found" if blockers_found else "complete"
+    existing["completed_at"] = datetime.now(timezone.utc).isoformat()
+    kickoff_path.write_text(_format_md(existing))
+
+    if blockers_found:
+        return {
+            "message": (
+                f"Kickoff complete. {len(blockers)} blocker(s) found. "
+                "Present kickoff summary and blockers to HITL. "
+                "Once HITL resolves each blocker, call enki_approve(stage='spec-revision', note='<resolution details>'). "
+                "Then call enki_kickoff() again to proceed to impl spec."
+            ),
+            "kickoff_id": existing.get("kickoff_id"),
+            "agents_participated": existing.get("agents_participated", []),
+            "blockers_found": True,
+            "blockers": blockers,
+            "summary_path": str(kickoff_path),
+        }
+
+    return {
+        "message": (
+            "Kickoff complete. No blockers found. "
+            "Present kickoff summary to HITL for verbal ok. "
+            "Then spawn Architect: enki_spawn('architect', 'impl-spec') → Task tool → enki_report. "
+            "Present impl spec + kickoff summary to HITL → enki_approve(stage='architect')."
+        ),
+        "kickoff_id": existing.get("kickoff_id"),
+        "agents_participated": existing.get("agents_participated", []),
+        "blockers_found": False,
+        "blockers": [],
+        "summary_path": str(kickoff_path),
+    }
 
 
 # ── PM ──
@@ -582,6 +935,11 @@ def enki_decompose(tasks: list[dict], project: str = ".") -> dict:
         })
 
     return {
+        "message": (
+            f"Sprint created with {len(created)} tasks. "
+            "Now call enki_wave() to spawn Dev+QA agents for Wave 1. "
+            "Do not read source files or plan implementation yourself — that is agent work."
+        ),
         "sprint_id": sprint_id,
         "tasks": created,
         "total_tasks": len(created),
@@ -658,6 +1016,13 @@ def enki_spawn(
         _upsert_agent_status(goal_id, role_key, "in_progress")
         _upsert_agent_status(goal_id, f"{role_key}:{task_id}", "in_progress")
         return {
+            "message": (
+                f"Agent {role_key} prepared. "
+                f"1. Read prompt file verbatim: ~/.enki/prompts/{role_key}.md — never substitute your own prompt. "
+                f"2. Read context artifact in chunks if large: {artifact} — never skip, never summarize. "
+                "3. Run via Task tool in foreground — never Background tool. "
+                f"4. After Task completes: call enki_report(role='{role_key}', task_id='{task_id}', summary=..., status='completed'|'failed')."
+            ),
             "role": role_key,
             "status": "in_progress",
             "execution_mode": "foreground_sequential",
@@ -723,10 +1088,19 @@ def enki_report(
     _mail_em(project, role_key, task_id, normalized_status, findings)
 
     return {
+        "message": (
+            f"Agent {role_key} recorded as {normalized_status} for task {task_id}. "
+            + (
+                "Run next agent in sequence, then enki_report. "
+                "After all wave agents reported: enki_mail_inbox() then enki_wave()."
+                if normalized_status == "completed"
+                else
+                "Agent failed. Call enki_escalate(task_id, reason) immediately — never take over agent work."
+            )
+        ),
         "role": role_key,
         "task_id": task_id,
         "status": normalized_status,
-        "message": f"Agent {role_key} recorded as {normalized_status}.",
     }
 
 
@@ -790,6 +1164,13 @@ def enki_wave(project: str | None = None) -> dict:
     )
 
     return {
+        "message": (
+            f"Wave {wave_no} ready with {len(agents)} agents. "
+            "Execute sequentially — Dev first, then QA. Never parallel. Never Background. "
+            "For each agent: read prompt_path verbatim → read context_artifact in chunks → Task tool foreground → enki_report. "
+            "After all agents reported: call enki_mail_inbox() to read agent messages. "
+            "Then call enki_wave() for next wave, or enki_complete(task_id) if this is the final wave."
+        ),
         "wave_number": wave_no,
         "agents": agents,
         "execution_mode": "foreground_sequential",
@@ -829,6 +1210,11 @@ def enki_complete(task_id: str, project: str | None = None) -> dict:
 
     update_task_status(project, task_id, TaskStatus.COMPLETED)
     return {
+        "message": (
+            f"Task {task_id} complete. "
+            "Call enki_wave() for next wave. "
+            "If all waves done: enki_phase(action='status') to confirm, then enki_wrap() to close session."
+        ),
         "completion_status": "completed",
         "summary": f"Task {task_id} completed with validator+QA gates satisfied.",
     }
@@ -1139,11 +1525,14 @@ def _inject_external_spec_mode(project: str, role: str, context: dict) -> dict:
 
 def _next_step_hint(tier: str) -> str:
     """Hint for what to do after setting goal."""
-    if tier == "minimal":
-        return "Phase auto-advanced to implement. You can code now, then enki_phase(action='advance', to='review'/'complete')"
-    if tier == "standard":
-        return "Run enki_phase(action='advance', to='intake'), then PM intake checklist"
-    return "Run enki_phase(action='advance', to='intake'), then full PM intake + debate"
+    base = (
+        "Goal set. Tier: {tier}. "
+        "Call enki_recall to load relevant context. "
+        "Perform planning phase checks (see CLAUDE.md — architectural completeness, assumption surfacing, scope pressure test). "
+        "Then begin Q&A intake with human to flesh out requirements. "
+        "When requirements are clear, spawn PM: enki_spawn('pm', 'spec-draft') → Task tool → enki_report."
+    )
+    return base.format(tier=tier)
 
 
 def _phase_hint(phase: str) -> str:

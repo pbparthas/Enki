@@ -168,7 +168,7 @@ async def list_tools() -> list[Tool]:
                     "project": {"type": "string", "default": "default"},
                     "stage": {
                         "type": "string",
-                        "enum": ["igi", "spec", "architect", "test"],
+                        "enum": ["igi", "spec", "architect", "test", "spec-revision"],
                     },
                     "note": {"type": "string"},
                 },
@@ -213,6 +213,164 @@ async def list_tools() -> list[Tool]:
                     "project": {"type": "string", "default": "default"},
                 },
                 "required": [],
+            },
+        ),
+        Tool(
+            name="enki_decompose",
+            description=(
+                "Break an approved spec into a task DAG for sprint execution. "
+                "Call after architect spec is HITL approved, before enki_wave. "
+                "tasks: list of {name, files, dependencies} dicts."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "tasks": {
+                        "type": "array",
+                        "items": {"type": "object"},
+                        "description": "List of {name, files, dependencies} task dicts",
+                    },
+                    "project": {"type": "string", "default": "default"},
+                },
+                "required": ["tasks"],
+            },
+        ),
+        Tool(
+            name="enki_kickoff",
+            description=(
+                "Run pre-implementation kickoff. Call after enki_approve(stage='igi'). "
+                "PM presents spec, Architect reviews technical feasibility, DBA/UI join conditionally. "
+                "Handles resume on session restart — safe to call multiple times. "
+                "Skips automatically for brownfield projects without a spec or projects already in implement phase."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "project": {"type": "string", "default": "default"},
+                },
+            },
+        ),
+        Tool(
+            name="enki_kickoff_update",
+            description=(
+                "Record a kickoff agent's output progressively. "
+                "Call after each kickoff agent completes via Task tool. "
+                "For PM output: automatically triggers DBA/UI spawning if needed."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "role": {"type": "string", "description": "Agent role that just completed"},
+                    "output": {"type": "object", "description": "Agent's structured output"},
+                    "project": {"type": "string", "default": "default"},
+                },
+                "required": ["role", "output"],
+            },
+        ),
+        Tool(
+            name="enki_kickoff_complete",
+            description=(
+                "Evaluate all kickoff agent outputs, collect blockers, write final summary. "
+                "Call after all kickoff agents have completed and been recorded via enki_kickoff_update."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "project": {"type": "string", "default": "default"},
+                },
+            },
+        ),
+        Tool(
+            name="enki_escalate",
+            description=(
+                "Escalate a blocked task to human (HITL). Call immediately when a task "
+                "cannot proceed without human input. Never improvise around blockers - escalate."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string"},
+                    "reason": {"type": "string", "description": "Why this needs human attention"},
+                    "project": {"type": "string", "default": "default"},
+                },
+                "required": ["task_id", "reason"],
+            },
+        ),
+        Tool(
+            name="enki_mark_blocked",
+            description="Mark a task as blocked with a reason. Use when a task cannot proceed due to unresolved dependency or missing input.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string"},
+                    "reason": {"type": "string"},
+                    "project": {"type": "string", "default": "default"},
+                },
+                "required": ["task_id", "reason"],
+            },
+        ),
+        Tool(
+            name="enki_sprint_summary",
+            description=(
+                "Get full sprint summary including wave status, task counts, and completion state. "
+                "Call at session start to orient on current sprint progress."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "sprint_id": {"type": "string", "description": "Sprint ID e.g. sprint-1"},
+                    "project": {"type": "string", "default": "default"},
+                },
+                "required": ["sprint_id"],
+            },
+        ),
+        Tool(
+            name="enki_status_update",
+            description="Generate a human-readable project status update covering goal, phase, sprint, and wave progress.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "project": {"type": "string", "default": "default"},
+                },
+            },
+        ),
+        Tool(
+            name="enki_mail_inbox",
+            description=(
+                "Read unread messages in EM inbox. Call after each wave completes to read "
+                "agent messages, concerns, and handoffs before starting next wave."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "agent": {"type": "string", "default": "EM", "description": "Inbox owner"},
+                    "project": {"type": "string", "default": "default"},
+                },
+            },
+        ),
+        Tool(
+            name="enki_mail_thread",
+            description="Read full message thread history by thread ID. Use to get complete context on an agent conversation.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "thread_id": {"type": "string"},
+                    "project": {"type": "string", "default": "default"},
+                },
+                "required": ["thread_id"],
+            },
+        ),
+        Tool(
+            name="enki_next_actions",
+            description=(
+                "Get list of tasks ready to spawn in current wave without triggering execution. "
+                "Use to inspect what's ready before calling enki_wave."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "project": {"type": "string", "default": "default"},
+                },
             },
         ),
         Tool(
@@ -395,6 +553,104 @@ def _handle_complete(args: dict) -> str:
     return json.dumps(result, indent=2)
 
 
+def _handle_decompose(args: dict) -> str:
+    from .mcp.orch_tools import enki_decompose
+    result = enki_decompose(
+        tasks=args["tasks"],
+        project=args.get("project", "default"),
+    )
+    return json.dumps(result, indent=2)
+
+
+def _handle_kickoff(args: dict) -> str:
+    from .mcp.orch_tools import enki_kickoff
+    result = enki_kickoff(
+        project=args.get("project", "default"),
+    )
+    return json.dumps(result, indent=2)
+
+
+def _handle_kickoff_update(args: dict) -> str:
+    from .mcp.orch_tools import enki_kickoff_update
+    result = enki_kickoff_update(
+        role=args["role"],
+        output=args["output"],
+        project=args.get("project", "default"),
+    )
+    return json.dumps(result, indent=2)
+
+
+def _handle_kickoff_complete(args: dict) -> str:
+    from .mcp.orch_tools import enki_kickoff_complete
+    result = enki_kickoff_complete(
+        project=args.get("project", "default"),
+    )
+    return json.dumps(result, indent=2)
+
+
+def _handle_escalate(args: dict) -> str:
+    from .mcp.orch_tools import enki_escalate
+    result = enki_escalate(
+        task_id=args["task_id"],
+        reason=args["reason"],
+        project=args.get("project", "default"),
+    )
+    return json.dumps(result, indent=2)
+
+
+def _handle_mark_blocked(args: dict) -> str:
+    from .mcp.orch_tools import enki_mark_blocked
+    result = enki_mark_blocked(
+        task_id=args["task_id"],
+        reason=args["reason"],
+        project=args.get("project", "default"),
+    )
+    return json.dumps(result, indent=2)
+
+
+def _handle_sprint_summary(args: dict) -> str:
+    from .mcp.orch_tools import enki_sprint_summary
+    result = enki_sprint_summary(
+        sprint_id=args["sprint_id"],
+        project=args.get("project", "default"),
+    )
+    return json.dumps(result, indent=2)
+
+
+def _handle_status_update(args: dict) -> str:
+    from .mcp.orch_tools import enki_status_update
+    result = enki_status_update(
+        project=args.get("project", "default"),
+    )
+    return json.dumps(result, indent=2)
+
+
+def _handle_mail_inbox(args: dict) -> str:
+    from .mcp.orch_tools import enki_mail_inbox
+    result = enki_mail_inbox(
+        agent=args.get("agent", "EM"),
+        project=args.get("project", "default"),
+    )
+    return json.dumps(result, indent=2)
+
+
+def _handle_mail_thread(args: dict) -> str:
+    from .mcp.orch_tools import enki_mail_thread
+    result = enki_mail_thread(
+        thread_id=args["thread_id"],
+        project=args.get("project", "default"),
+    )
+    return json.dumps(result, indent=2)
+
+
+def _handle_next_actions(args: dict) -> str:
+    from .mcp.orch_tools import enki_next_actions
+    result = enki_next_actions(
+        project=args.get("project", "default"),
+    )
+    return json.dumps(result, indent=2)
+
+
 def _handle_wrap(args: dict) -> str:
     from .mcp.orch_tools import enki_wrap
     _ = args
@@ -440,6 +696,17 @@ TOOL_HANDLERS = {
     "enki_spawn": _handle_spawn,
     "enki_report": _handle_report,
     "enki_wave": _handle_wave,
+    "enki_decompose": _handle_decompose,
+    "enki_kickoff": _handle_kickoff,
+    "enki_kickoff_update": _handle_kickoff_update,
+    "enki_kickoff_complete": _handle_kickoff_complete,
+    "enki_escalate": _handle_escalate,
+    "enki_mark_blocked": _handle_mark_blocked,
+    "enki_sprint_summary": _handle_sprint_summary,
+    "enki_status_update": _handle_status_update,
+    "enki_mail_inbox": _handle_mail_inbox,
+    "enki_mail_thread": _handle_mail_thread,
+    "enki_next_actions": _handle_next_actions,
     "enki_complete": _handle_complete,
     "enki_wrap": _handle_wrap,
     "enki_bug": _handle_bug,
@@ -451,11 +718,61 @@ TOOL_HANDLERS = {
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     """Handle tool calls via dispatch map."""
     init_all()
+    args = arguments or {}
+
+    try:
+        if name == "enki_decompose":
+            from .mcp.orch_tools import enki_decompose
+            result = enki_decompose(**args)
+            return [TextContent(type="text", text=json.dumps(result, indent=2))]
+        elif name == "enki_kickoff":
+            from .mcp.orch_tools import enki_kickoff
+            result = enki_kickoff(**args)
+            return [TextContent(type="text", text=json.dumps(result, indent=2))]
+        elif name == "enki_kickoff_update":
+            from .mcp.orch_tools import enki_kickoff_update
+            result = enki_kickoff_update(**args)
+            return [TextContent(type="text", text=json.dumps(result, indent=2))]
+        elif name == "enki_kickoff_complete":
+            from .mcp.orch_tools import enki_kickoff_complete
+            result = enki_kickoff_complete(**args)
+            return [TextContent(type="text", text=json.dumps(result, indent=2))]
+        elif name == "enki_escalate":
+            from .mcp.orch_tools import enki_escalate
+            result = enki_escalate(**args)
+            return [TextContent(type="text", text=json.dumps(result, indent=2))]
+        elif name == "enki_mark_blocked":
+            from .mcp.orch_tools import enki_mark_blocked
+            result = enki_mark_blocked(**args)
+            return [TextContent(type="text", text=json.dumps(result, indent=2))]
+        elif name == "enki_sprint_summary":
+            from .mcp.orch_tools import enki_sprint_summary
+            result = enki_sprint_summary(**args)
+            return [TextContent(type="text", text=json.dumps(result, indent=2))]
+        elif name == "enki_status_update":
+            from .mcp.orch_tools import enki_status_update
+            result = enki_status_update(**args)
+            return [TextContent(type="text", text=json.dumps(result, indent=2))]
+        elif name == "enki_mail_inbox":
+            from .mcp.orch_tools import enki_mail_inbox
+            result = enki_mail_inbox(**args)
+            return [TextContent(type="text", text=json.dumps(result, indent=2))]
+        elif name == "enki_mail_thread":
+            from .mcp.orch_tools import enki_mail_thread
+            result = enki_mail_thread(**args)
+            return [TextContent(type="text", text=json.dumps(result, indent=2))]
+        elif name == "enki_next_actions":
+            from .mcp.orch_tools import enki_next_actions
+            result = enki_next_actions(**args)
+            return [TextContent(type="text", text=json.dumps(result, indent=2))]
+    except Exception as e:
+        logger.exception(f"Error in {name}")
+        return [TextContent(type="text", text=f"Error: {e}")]
 
     handler = TOOL_HANDLERS.get(name)
     if handler:
         try:
-            result = handler(arguments)
+            result = handler(args)
             return [TextContent(type="text", text=result)]
         except Exception as e:
             logger.exception(f"Error in {name}")

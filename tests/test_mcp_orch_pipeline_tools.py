@@ -67,8 +67,8 @@ def test_enki_goal_sets_bootstrap_state(tmp_path):
         assert result["phase"] == "planning"
         assert "goal_id" in result
         assert "bootstrap" in result
-        assert "Challenge pass required" in result["challenge_prompt"]
-        assert "enki_spawn(\"igi\", \"challenge-review\")" in result["challenge_prompt"]
+        assert "message" in result
+        assert "Call enki_recall to load relevant context." in result["message"]
         from enki.db import em_db
         with em_db(PROJECT) as conn:
             rows = conn.execute(
@@ -460,7 +460,7 @@ def test_enki_approve_stage_transitions_and_idempotency(tmp_path):
 
         assert spec["phase"] == "approved"
         assert architect["phase"] == "implement"
-        assert test["phase"] == "complete"
+        assert test["phase"] == "validating"
         assert duplicate["created"] is False
         assert duplicate["approval_id"] == spec["approval_id"]
         assert "mandatory_next" in architect
