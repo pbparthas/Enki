@@ -77,7 +77,8 @@ def create_tables(conn) -> None:
             PRIMARY KEY (goal_id, agent_role)
         )
     """)
+    conn.execute("DROP INDEX IF EXISTS idx_agent_status_goal")
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_agent_status_goal "
-        "ON agent_status(goal_id)"
+        "ON agent_status(goal_id, agent_role, status)"
     )

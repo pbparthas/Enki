@@ -236,6 +236,41 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="enki_debate",
+            description=(
+                "Run multi-round spec debate before HITL approval. "
+                "Call after PM writes docs/spec-draft.md and before enki_approve(stage='spec'). "
+                "Runs 2 rounds: opening positions then rebuttals. "
+                "PM reconciles into docs/spec-final.md + docs/debate-summary.md. "
+                "Resumable - safe to call multiple times. Automatically detects brownfield "
+                "and includes historical_context agent if Researcher Codebase Profile exists."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "project": {"type": "string", "default": "default"},
+                },
+            },
+        ),
+        Tool(
+            name="enki_debate_update",
+            description=(
+                "Record a debate agent's output progressively. "
+                "Call after each debate agent Task completes. "
+                "round: '1' for opening positions, '2' for rebuttals, 'reconciliation' for PM."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "role": {"type": "string"},
+                    "round": {"type": "string", "enum": ["1", "2", "reconciliation"]},
+                    "output": {"type": "object"},
+                    "project": {"type": "string", "default": "default"},
+                },
+                "required": ["role", "round", "output"],
+            },
+        ),
+        Tool(
             name="enki_kickoff",
             description=(
                 "Run pre-implementation kickoff. Call after enki_approve(stage='igi'). "
@@ -562,6 +597,25 @@ def _handle_decompose(args: dict) -> str:
     return json.dumps(result, indent=2)
 
 
+def _handle_debate(args: dict) -> str:
+    from .mcp.orch_tools import enki_debate
+    result = enki_debate(
+        project=args.get("project", "default"),
+    )
+    return json.dumps(result, indent=2)
+
+
+def _handle_debate_update(args: dict) -> str:
+    from .mcp.orch_tools import enki_debate_update
+    result = enki_debate_update(
+        role=args["role"],
+        round=args["round"],
+        output=args["output"],
+        project=args.get("project", "default"),
+    )
+    return json.dumps(result, indent=2)
+
+
 def _handle_kickoff(args: dict) -> str:
     from .mcp.orch_tools import enki_kickoff
     result = enki_kickoff(
@@ -697,6 +751,8 @@ TOOL_HANDLERS = {
     "enki_report": _handle_report,
     "enki_wave": _handle_wave,
     "enki_decompose": _handle_decompose,
+    "enki_debate": _handle_debate,
+    "enki_debate_update": _handle_debate_update,
     "enki_kickoff": _handle_kickoff,
     "enki_kickoff_update": _handle_kickoff_update,
     "enki_kickoff_complete": _handle_kickoff_complete,
@@ -724,6 +780,14 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         if name == "enki_decompose":
             from .mcp.orch_tools import enki_decompose
             result = enki_decompose(**args)
+            return [TextContent(type="text", text=json.dumps(result, indent=2))]
+        elif name == "enki_debate":
+            from .mcp.orch_tools import enki_debate
+            result = enki_debate(**args)
+            return [TextContent(type="text", text=json.dumps(result, indent=2))]
+        elif name == "enki_debate_update":
+            from .mcp.orch_tools import enki_debate_update
+            result = enki_debate_update(**args)
             return [TextContent(type="text", text=json.dumps(result, indent=2))]
         elif name == "enki_kickoff":
             from .mcp.orch_tools import enki_kickoff

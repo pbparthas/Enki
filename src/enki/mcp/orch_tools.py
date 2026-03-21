@@ -135,6 +135,18 @@ def _register_project_path(project: str, cwd: Path | None = None) -> str:
     return resolved_cwd
 
 
+def _get_project_path(project: str) -> str | None:
+    """Fetch registered project path from wisdom.db."""
+    with wisdom_db() as conn:
+        row = conn.execute(
+            "SELECT path FROM projects WHERE name = ? LIMIT 1",
+            (normalize_project_name(project),),
+        ).fetchone()
+    if not row:
+        return None
+    return (row["path"] or "").strip() or None
+
+
 # ── Goal & Triage ──
 
 
@@ -482,13 +494,12 @@ def enki_approve(
     write_project_state(project, "phase", target_phase)
     approval_messages = {
         "igi": (
-            "Igi approved. Phase → approved. "
+            "Igi approved. Phase → implement. "
             "Now call enki_kickoff() to begin pre-implementation kickoff. "
-            "PM will present spec, Architect will review feasibility, DBA/UI will join if needed. "
             "Do not spawn Architect directly — enki_kickoff() handles the sequence."
         ),
         "spec": (
-            "Spec approved. Phase → approved. "
+            "Spec approved post-debate. Phase → approved. "
             "Now spawn Igi for adversarial review: enki_spawn('igi', 'igi-review') → Task tool → enki_report. "
             "Present Igi findings to HITL → enki_approve(stage='igi')."
         ),
@@ -866,6 +877,338 @@ def enki_kickoff_complete(project: str | None = None) -> dict:
         "blockers_found": False,
         "blockers": [],
         "summary_path": str(kickoff_path),
+    }
+
+
+def enki_debate(project: str | None = None) -> dict:
+    """Run multi-round spec debate before HITL approval.
+
+    Round 1: Each agent reads spec-draft independently -> opening position.
+    Round 2: Each agent reads spec-draft + all round 1 positions -> rebuttal.
+    PM reconciliation: reads full debate -> writes spec-final + debate-summary.
+
+    Brownfield detection: includes historical_context agent if Researcher
+    Codebase Profile exists in project artifacts.
+
+    Resumable: safe to call again after session restart.
+    """
+    project = _resolve_project(project)
+    active = _require_active_goal(project)
+    if active.get("error"):
+        return active
+
+    goal_id = active["goal_id"]
+    spec_source = read_project_state(project, "spec_source") or "internal"
+
+    project_path = _get_project_path(project)
+    if not project_path:
+        return {"error": f"Project path not registered for {project}. Call enki_register first."}
+
+    docs_dir = Path(project_path) / "docs"
+    docs_dir.mkdir(parents=True, exist_ok=True)
+    spec_draft_path = docs_dir / "spec-draft.md"
+    spec_final_path = docs_dir / "spec-final.md"
+    debate_summary_path = docs_dir / "debate-summary.md"
+
+    if not spec_draft_path.exists():
+        return {
+            "error": (
+                "No spec-draft.md found in docs/. "
+                "PM must write the draft spec to docs/spec-draft.md before debate can begin."
+            )
+        }
+
+    artifacts_dir = _goal_artifacts_dir(project)
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    debate_artifact_path = artifacts_dir / f"debate-{goal_id}.md"
+    debate_id = f"debate-{goal_id}"
+
+    researcher_profiles = list(artifacts_dir.glob("spawn-researcher-*.md"))
+    has_researcher_profile = len(researcher_profiles) > 0
+
+    base_agents = ["cto", "devils_advocate", "tech_feasibility"]
+    if has_researcher_profile:
+        base_agents.append("historical_context")
+
+    existing = {}
+    if debate_artifact_path.exists():
+        try:
+            content = debate_artifact_path.read_text()
+            match = re.search(r"```json\n(.*?)\n```", content, re.DOTALL)
+            if match:
+                existing = json.loads(match.group(1))
+        except Exception:
+            existing = {}
+
+    status = existing.get("status", "")
+
+    if status == "complete":
+        return {
+            "message": (
+                "Debate already complete. "
+                "Present docs/debate-summary.md and docs/spec-final.md to HITL for review. "
+                "After HITL approves call enki_approve(stage='spec')."
+            ),
+            "debate_id": debate_id,
+            "agents_participated": existing.get("agents_participated", []),
+            "rounds_completed": existing.get("rounds_completed", 2),
+            "spec_final_path": str(spec_final_path),
+            "debate_summary_path": str(debate_summary_path),
+            "changes_made": existing.get("changes_made", False),
+            "resumed": True,
+        }
+
+    if not existing:
+        existing = {
+            "debate_id": debate_id,
+            "project": project,
+            "goal_id": goal_id,
+            "status": "in_progress",
+            "agents": base_agents,
+            "agents_participated": [],
+            "has_researcher_profile": has_researcher_profile,
+            "spec_source": spec_source,
+            "spec_draft_path": str(spec_draft_path),
+            "rounds": {
+                "round_1": {},
+                "round_2": {},
+                "reconciliation": {},
+            },
+            "rounds_completed": 0,
+            "changes_made": False,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        debate_artifact_path.write_text(_format_md(existing))
+
+    round_1_done = set(existing["rounds"].get("round_1", {}).keys())
+    round_2_done = set(existing["rounds"].get("round_2", {}).keys())
+    reconciliation_done = bool(existing["rounds"].get("reconciliation", {}).get("pm"))
+
+    agents = existing["agents"]
+    round_1_pending = [a for a in agents if a not in round_1_done]
+    round_2_pending = [a for a in agents if a not in round_2_done]
+
+    spawn_instructions = []
+
+    if round_1_pending:
+        for role in round_1_pending:
+            context = {
+                "debate_round": 1,
+                "debate_id": debate_id,
+                "spec_draft_path": str(spec_draft_path),
+                "instruction": (
+                    "You are participating in Round 1 of a spec debate. "
+                    f"Read the spec at {spec_draft_path}. "
+                    "Produce your opening position challenging the spec from your role perspective. "
+                    "Be specific - reference exact sections, assumptions, or decisions you challenge. "
+                    "Output structured JSON with: {'opening_position': str, 'challenges': [{issue, section, severity}], 'questions': [str]}"
+                ),
+            }
+            if role == "historical_context" and researcher_profiles:
+                context["codebase_profile_path"] = str(researcher_profiles[-1])
+                context["instruction"] += (
+                    f" Also read the Codebase Profile at {researcher_profiles[-1]} "
+                    "for historical context on past decisions and patterns."
+                )
+
+            spawn_result = enki_spawn(role, f"debate-r1-{role}", context, project)
+            spawn_instructions.append({
+                "round": 1,
+                "role": role,
+                "prompt_path": spawn_result.get("prompt_path"),
+                "context_artifact": spawn_result.get("context_artifact"),
+                "instruction": spawn_result.get("instruction"),
+            })
+
+    elif round_2_pending:
+        round_1_outputs = existing["rounds"].get("round_1", {})
+        for role in round_2_pending:
+            context = {
+                "debate_round": 2,
+                "debate_id": debate_id,
+                "spec_draft_path": str(spec_draft_path),
+                "round_1_positions": round_1_outputs,
+                "instruction": (
+                    "You are participating in Round 2 of a spec debate. "
+                    f"Read the spec at {spec_draft_path}. "
+                    "Read all Round 1 positions from the other debate agents provided in round_1_positions. "
+                    "Produce your rebuttal - agree, challenge, or build on specific points others raised. "
+                    "Be direct. Reference specific agent positions by name. "
+                    "Output structured JSON with: {'rebuttal': str, 'agreements': [{agent, point}], 'disagreements': [{agent, point, counter_argument}], 'new_concerns': [str]}"
+                ),
+            }
+            spawn_result = enki_spawn(role, f"debate-r2-{role}", context, project)
+            spawn_instructions.append({
+                "round": 2,
+                "role": role,
+                "prompt_path": spawn_result.get("prompt_path"),
+                "context_artifact": spawn_result.get("context_artifact"),
+                "instruction": spawn_result.get("instruction"),
+            })
+
+    elif not reconciliation_done:
+        round_1_outputs = existing["rounds"].get("round_1", {})
+        round_2_outputs = existing["rounds"].get("round_2", {})
+        context = {
+            "debate_round": "reconciliation",
+            "debate_id": debate_id,
+            "spec_draft_path": str(spec_draft_path),
+            "spec_final_path": str(spec_final_path),
+            "debate_summary_path": str(debate_summary_path),
+            "round_1_positions": round_1_outputs,
+            "round_2_rebuttals": round_2_outputs,
+            "instruction": (
+                "You are reconciling the spec debate. "
+                f"Read the draft spec at {spec_draft_path}. "
+                "Read all Round 1 positions and Round 2 rebuttals. "
+                "Your task: "
+                "1. Identify which challenges were valid and require spec changes. "
+                "2. Identify which challenges were rejected and why. "
+                f"3. Write the updated final spec to {spec_final_path} - incorporate valid changes, preserve original intent where challenges were rejected. "
+                f"4. Write debate-summary.md to {debate_summary_path} containing: "
+                "   - Key challenges raised per agent "
+                "   - How each was resolved (accepted/rejected/modified) "
+                "   - What changed from draft to final spec "
+                "   - What was rejected and the reasoning "
+                "5. Output JSON: {'changes_made': bool, 'changes_summary': str, 'rejected_summary': str}"
+            ),
+        }
+        spawn_result = enki_spawn("pm", "debate-reconcile", context, project)
+        spawn_instructions.append({
+            "round": "reconciliation",
+            "role": "pm",
+            "prompt_path": spawn_result.get("prompt_path"),
+            "context_artifact": spawn_result.get("context_artifact"),
+            "instruction": spawn_result.get("instruction"),
+        })
+
+    existing["spawn_instructions"] = spawn_instructions
+    debate_artifact_path.write_text(_format_md(existing))
+
+    if round_1_pending:
+        current_round = f"Round 1 ({len(round_1_pending)} agents pending)"
+        next_instruction = (
+            f"Execute {len(spawn_instructions)} agents sequentially via Task tool. "
+            "For each: read prompt_path verbatim -> read context_artifact -> Task tool foreground -> "
+            "call enki_debate_update(role=..., round=1, output={...}). "
+            "After all Round 1 agents complete: call enki_debate() again to proceed to Round 2."
+        )
+    elif round_2_pending:
+        current_round = f"Round 2 ({len(round_2_pending)} agents pending)"
+        next_instruction = (
+            f"Execute {len(spawn_instructions)} agents sequentially via Task tool. "
+            "For each: read prompt_path verbatim -> read context_artifact -> Task tool foreground -> "
+            "call enki_debate_update(role=..., round=2, output={...}). "
+            "After all Round 2 agents complete: call enki_debate() again to proceed to reconciliation."
+        )
+    else:
+        current_round = "Reconciliation"
+        next_instruction = (
+            "Execute PM reconciliation via Task tool. "
+            "Read prompt_path verbatim -> read context_artifact -> Task tool foreground -> "
+            "call enki_debate_update(role='pm', round='reconciliation', output={...}). "
+            "After PM completes: call enki_debate() again to finalize."
+        )
+
+    return {
+        "message": f"Debate {current_round}. {next_instruction}",
+        "debate_id": debate_id,
+        "current_round": current_round,
+        "agents": agents,
+        "agents_participated": existing["agents_participated"],
+        "spawn_instructions": spawn_instructions,
+        "debate_artifact_path": str(debate_artifact_path),
+        "has_researcher_profile": has_researcher_profile,
+        "status": "in_progress",
+    }
+
+
+def enki_debate_update(
+    role: str,
+    round: str,
+    output: dict,
+    project: str | None = None,
+) -> dict:
+    """Record a debate agent's output progressively.
+    Call after each debate agent completes via Task tool.
+    round: '1', '2', or 'reconciliation'
+    """
+    project = _resolve_project(project)
+    active = _require_active_goal(project)
+    if active.get("error"):
+        return active
+
+    goal_id = active["goal_id"]
+    artifacts_dir = _goal_artifacts_dir(project)
+    debate_artifact_path = artifacts_dir / f"debate-{goal_id}.md"
+
+    if not debate_artifact_path.exists():
+        return {"error": "No debate in progress. Call enki_debate() first."}
+
+    try:
+        content = debate_artifact_path.read_text()
+        match = re.search(r"```json\n(.*?)\n```", content, re.DOTALL)
+        existing = json.loads(match.group(1)) if match else {}
+    except Exception:
+        return {"error": "Failed to read debate artifact."}
+
+    round_key = f"round_{round}" if round in ("1", "2") else "reconciliation"
+    existing.setdefault("rounds", {})
+    existing.setdefault("agents_participated", [])
+
+    if round_key == "reconciliation":
+        existing["rounds"].setdefault("reconciliation", {})
+        existing["rounds"]["reconciliation"]["pm"] = output
+        existing["agents_participated"].append("pm-reconcile")
+        existing["changes_made"] = output.get("changes_made", False)
+        existing["status"] = "complete"
+        existing["rounds_completed"] = 2
+        existing["completed_at"] = datetime.now(timezone.utc).isoformat()
+        debate_artifact_path.write_text(_format_md(existing))
+        return {
+            "message": (
+                "PM reconciliation recorded. Debate complete. "
+                "Call enki_debate() to get final summary and next steps."
+            ),
+            "role_recorded": "pm-reconcile",
+            "status": "complete",
+        }
+
+    existing["rounds"].setdefault(round_key, {})
+    existing["rounds"][round_key][role] = output
+    agent_round_key = f"{role}-r{round}"
+    if agent_round_key not in existing["agents_participated"]:
+        existing["agents_participated"].append(agent_round_key)
+
+    agents = existing.get("agents", [])
+    round_done = set(existing["rounds"][round_key].keys())
+    all_done = all(a in round_done for a in agents)
+
+    debate_artifact_path.write_text(_format_md(existing))
+
+    if all_done:
+        existing["rounds_completed"] = int(round)
+        debate_artifact_path.write_text(_format_md(existing))
+        return {
+            "message": (
+                f"Round {round} complete - all agents recorded. "
+                "Call enki_debate() to proceed to next round."
+            ),
+            "role_recorded": agent_round_key,
+            "round_complete": True,
+            "rounds_completed": int(round),
+        }
+
+    remaining = [a for a in agents if a not in round_done]
+    return {
+        "message": (
+            f"Agent {role} Round {round} recorded. "
+            f"Remaining agents this round: {remaining}. "
+            "Continue executing remaining agents, then call enki_debate_update for each."
+        ),
+        "role_recorded": agent_round_key,
+        "round_complete": False,
+        "remaining_agents": remaining,
     }
 
 

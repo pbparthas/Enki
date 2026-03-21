@@ -65,8 +65,12 @@ def abzu_db():
 
 
 def uru_db():
-    """Connection to uru.db (enforcement logs)."""
-    return connect(_db_path("uru.db"))
+    """Connection to uru.db (enforcement logs). Auto-initializes uru schema."""
+    path = _db_path("uru.db")
+    from enki.gates.schemas import create_tables as create_uru
+    with connect(path) as conn:
+        create_uru(conn)
+    return connect(path)
 
 
 _em_initialized: set[str] = set()
