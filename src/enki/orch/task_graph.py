@@ -12,7 +12,8 @@ Max 4 concurrent subagents (2 tasks * 2 agents each).
 """
 
 import json
-import uuid
+import re
+import sqlite3
 from collections import defaultdict
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
@@ -21,6 +22,27 @@ from typing import Optional
 
 from enki.config import get_config
 from enki.db import em_db
+
+
+def _project_slug(project: str) -> str:
+    """Normalize project name for human-readable IDs."""
+    slug = (project or "").strip().lower().replace(" ", "-")
+    slug = re.sub(r"[^a-z0-9-]+", "-", slug)
+    slug = re.sub(r"-{2,}", "-", slug).strip("-")
+    return (slug or "default")[:20]
+
+
+def _extract_sprint_number(sprint_id: str) -> int | None:
+    match = re.search(r"-sprint-(\d+)$", sprint_id or "")
+    if match:
+        return int(match.group(1))
+    match = re.search(r"(?:^|-)sprint-(\d+)$", sprint_id or "")
+    if match:
+        return int(match.group(1))
+    match = re.search(r"(\d+)$", sprint_id or "")
+    if match:
+        return int(match.group(1))
+    return None
 
 
 class TaskStatus(str, Enum):
@@ -107,20 +129,37 @@ def create_task(
     work_type: str | None = None,
 ) -> str:
     """Create a task in the DAG. Returns task_id."""
-    task_id = str(uuid.uuid4())
     with em_db(project) as conn:
-        conn.execute(
-            "INSERT INTO task_state "
-            "(task_id, project_id, sprint_id, task_name, tier, "
-            "dependencies, assigned_files, work_type) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                task_id, project, sprint_id, task_name, tier,
-                json.dumps(dependencies or []),
-                json.dumps(assigned_files or []),
-                work_type,
-            ),
-        )
+        sprint_number = _extract_sprint_number(sprint_id) or 1
+        row = conn.execute(
+            "SELECT MAX(CAST(SUBSTR(task_id, INSTR(task_id, '-t') + 2) AS INTEGER)) AS max_num "
+            "FROM task_state WHERE sprint_id = ? AND project_id = ?",
+            (sprint_id, project),
+        ).fetchone()
+        next_task_num = (int(row["max_num"]) + 1) if row and row["max_num"] else 1
+
+        for attempt in range(10):
+            task_id = f"{_project_slug(project)}-s{sprint_number}-t{next_task_num}"
+            try:
+                conn.execute(
+                    "INSERT INTO task_state "
+                    "(task_id, project_id, sprint_id, task_name, tier, "
+                    "dependencies, assigned_files, work_type) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        task_id, project, sprint_id, task_name, tier,
+                        json.dumps(dependencies or []),
+                        json.dumps(assigned_files or []),
+                        work_type,
+                    ),
+                )
+                break
+            except sqlite3.IntegrityError:
+                next_task_num += 1
+        else:
+            raise RuntimeError(
+                f"Could not generate unique task_id after 10 attempts for {task_name}"
+            )
     return task_id
 
 
@@ -280,11 +319,12 @@ def get_next_wave(project: str, sprint_id: str) -> list[dict]:
     if len(in_progress_ids) >= max_parallel:
         return []
 
+    name_to_id = {t["task_name"]: t["task_id"] for t in tasks}
     ready = []
     for task in tasks:
         if task["status"] != "pending":
             continue
-        deps = set(task["dependencies"])
+        deps = {name_to_id.get(d, d) for d in task.get("dependencies") or []}
         if deps.issubset(completed_ids):
             ready.append(task)
 
@@ -299,7 +339,7 @@ def get_all_waves(project: str, sprint_id: str) -> list[list[dict]]:
     Simulates execution order without actually running tasks.
     """
     tasks = get_sprint_tasks(project, sprint_id)
-    task_map = {t["task_id"]: t for t in tasks}
+    name_to_id = {t["task_name"]: t["task_id"] for t in tasks}
     completed = set()
     waves = []
 
@@ -309,7 +349,7 @@ def get_all_waves(project: str, sprint_id: str) -> list[list[dict]]:
         for task in tasks:
             if task["task_id"] in completed:
                 continue
-            deps = set(task["dependencies"])
+            deps = {name_to_id.get(d, d) for d in task.get("dependencies") or []}
             if deps.issubset(completed):
                 wave.append(task)
         if not wave:
@@ -600,20 +640,41 @@ def get_file_overlap_map(
 
 def create_sprint(
     project: str,
-    sprint_number: int,
+    sprint_id: str | int | None = None,
     dependencies: list[str] | None = None,
 ) -> str:
     """Create a sprint. Returns sprint_id."""
-    sprint_id = str(uuid.uuid4())
     with em_db(project) as conn:
+        if sprint_id is None:
+            row = conn.execute(
+                "SELECT COALESCE(MAX(sprint_number), 0) + 1 AS next_num "
+                "FROM sprint_state WHERE project_id = ?",
+                (project,),
+            ).fetchone()
+            sprint_number = int(row["next_num"]) if row else 1
+        elif isinstance(sprint_id, int):
+            sprint_number = sprint_id
+        else:
+            parsed = _extract_sprint_number(sprint_id)
+            if parsed is None:
+                row = conn.execute(
+                    "SELECT COALESCE(MAX(sprint_number), 0) + 1 AS next_num "
+                    "FROM sprint_state WHERE project_id = ?",
+                    (project,),
+                ).fetchone()
+                sprint_number = int(row["next_num"]) if row else 1
+            else:
+                sprint_number = parsed
+
+        normalized_sprint_id = f"{_project_slug(project)}-sprint-{sprint_number}"
         conn.execute(
             "INSERT INTO sprint_state "
-            "(sprint_id, project_id, sprint_number, dependencies) "
-            "VALUES (?, ?, ?, ?)",
-            (sprint_id, project, sprint_number,
+            "(sprint_id, project_id, sprint_number, status, dependencies) "
+            "VALUES (?, ?, ?, 'active', ?)",
+            (normalized_sprint_id, project, sprint_number,
              json.dumps(dependencies or [])),
         )
-    return sprint_id
+    return normalized_sprint_id
 
 
 def get_sprint(project: str, sprint_id: str) -> dict | None:

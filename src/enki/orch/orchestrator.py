@@ -656,7 +656,7 @@ class Orchestrator:
             next_num = 2
 
         next_id = f"sprint-{next_num}"
-        create_sprint(self.project, next_id)
+        next_id = create_sprint(self.project, next_id)
 
         return {
             "previous_sprint": current_id,
@@ -773,8 +773,7 @@ class Orchestrator:
         if "error" in result:
             return result
 
-        sprint_id = "sprint-1"
-        create_sprint(self.project, sprint_id)
+        sprint_id = create_sprint(self.project, "sprint-1")
 
         task_id = create_task(
             project=self.project,
@@ -796,8 +795,7 @@ class Orchestrator:
             return {"error": "Spec must be approved before standard flow"}
 
         set_phase(self.project, "implement")
-        sprint_id = "sprint-1"
-        create_sprint(self.project, sprint_id)
+        sprint_id = create_sprint(self.project, "sprint-1")
 
         return {
             "flow": "standard",

@@ -1261,9 +1261,15 @@ def enki_decompose(tasks: list[dict], project: str = ".") -> dict:
         tasks: List of {name, files, dependencies} dicts
         project: Project ID
     """
-    sprint_id = "sprint-1"
-    create_sprint(project, sprint_id)
+    sprint_id = create_sprint(project, "sprint-1")
+    with em_db(project) as conn:
+        conn.execute(
+            "UPDATE sprint_state SET status = 'active' WHERE sprint_id = ?",
+            (sprint_id,),
+        )
 
+    # Pass 1: create all tasks, build name→id map
+    name_to_id = {}
     created = []
     for task_def in tasks:
         task_id = create_task(
@@ -1271,11 +1277,29 @@ def enki_decompose(tasks: list[dict], project: str = ".") -> dict:
             sprint_id=sprint_id,
             task_name=task_def["name"],
             tier="standard",
+            assigned_files=task_def.get("files", []),
+            dependencies=[],
         )
+        name_to_id[task_def["name"]] = task_id
         created.append({
             "task_id": task_id,
             "name": task_def["name"],
+            "files": task_def.get("files", []),
+            "dependencies": task_def.get("dependencies", []),
         })
+
+    # Pass 2: resolve dependency names to IDs and update task_state
+    with em_db(project) as conn:
+        for item in created:
+            resolved_deps = [
+                name_to_id.get(d, d)
+                for d in item["dependencies"]
+            ]
+            conn.execute(
+                "UPDATE task_state SET dependencies = ? WHERE task_id = ?",
+                (json.dumps(resolved_deps), item["task_id"]),
+            )
+            item["resolved_dependencies"] = resolved_deps
 
     return {
         "message": (
