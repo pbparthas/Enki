@@ -71,9 +71,28 @@ def create_tables(conn) -> None:
             completed_at TIMESTAMP,
             agent_outputs TEXT,
             retry_count INTEGER DEFAULT 0,
-            max_retries INTEGER DEFAULT 3
+            max_retries INTEGER DEFAULT 3,
+            session_id TEXT,
+            worktree_path TEXT,
+            task_phase TEXT DEFAULT 'test_design',
+            description TEXT
         )
     """)
+    for col, coltype, default in [
+        ("session_id", "TEXT", None),
+        ("worktree_path", "TEXT", None),
+        ("task_phase", "TEXT", "'test_design'"),
+        ("description", "TEXT", None),
+    ]:
+        try:
+            if default:
+                conn.execute(
+                    f"ALTER TABLE task_state ADD COLUMN {col} {coltype} DEFAULT {default}"
+                )
+            else:
+                conn.execute(f"ALTER TABLE task_state ADD COLUMN {col} {coltype}")
+        except Exception:
+            pass
 
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_task_sprint "
@@ -243,4 +262,23 @@ def create_tables(conn) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_hitl_approvals_project_stage "
         "ON hitl_approvals(project, stage)"
+    )
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS merge_queue (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            branch_name TEXT NOT NULL,
+            worktree_path TEXT NOT NULL,
+            sprint_branch TEXT NOT NULL,
+            queued_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            merged_at TIMESTAMP,
+            status TEXT DEFAULT 'queued',
+            conflict_files TEXT
+        )
+    """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_merge_queue_project_status "
+        "ON merge_queue(project_id, status)"
     )

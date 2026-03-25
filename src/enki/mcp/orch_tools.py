@@ -51,6 +51,7 @@ from enki.orch.mail import (
     send,
 )
 from enki.orch.task_graph import (
+    _project_slug,
     create_task,
     get_task,
     update_task_status,
@@ -104,6 +105,403 @@ APPROVAL_TARGET_PHASE = {
     "architect": "implement",
     "test": "validating",
 }
+
+PLAYBOOK_CONTENT = """# Enki PLAYBOOK — Exact Operational Sequences
+
+This is your step-by-step guide for every phase. Follow it exactly.
+When in doubt: `enki_phase(action='status')` to orient, then return here.
+
+---
+
+## HOW TO START ANY SESSION
+
+```
+1. enki_recall(query="project context recent decisions")
+2. enki_phase(action='status') → read current phase
+3. Go to the section for that phase below
+```
+
+If no project is active:
+```
+→ New project: enki_goal(description="...", project="name")
+→ Existing project not registered: enki_register(path=".")
+```
+
+---
+
+## PHASE: planning
+
+### What this phase is
+Requirements gathering. No code, no spec yet. You are understanding what to build.
+
+### Exact sequence
+
+**Greenfield (new codebase):**
+```
+1. enki_goal(description="...", project="name")
+2. enki_recall(query="similar projects past decisions")
+3. Q&A with human — validate: outcome, audience, constraints, success criteria, scope, risks
+4. enki_spawn('pm', 'spec-draft') → READ prompt_path verbatim → READ context_artifact
+   → Task tool FOREGROUND → wait for completion
+5. enki_report(role='pm', task_id='spec-draft', summary=..., status='completed')
+   → PM writes docs/spec-draft.md
+→ Go to PHASE: spec
+```
+
+**Brownfield (existing codebase):**
+```
+1. enki_goal(description="...", project="name")
+2. enki_recall(query="codebase patterns decisions")
+3. enki_spawn('researcher', 'codebase-profile') → Task tool FOREGROUND → wait
+4. enki_report(role='researcher', task_id='codebase-profile', summary=..., status='completed')
+5. Present codebase profile to human — confirm tech stack
+6. Q&A with human → same intake checklist
+7. enki_spawn('pm', 'spec-draft') → Task tool FOREGROUND → wait
+8. enki_report(role='pm', task_id='spec-draft', summary=..., status='completed')
+→ Go to PHASE: spec
+```
+
+**External spec (spec already exists):**
+```
+1. enki_goal(spec_path="/path/to/spec.md", project="name")
+2. enki_spawn('pm', 'spec-review') → Task tool FOREGROUND → wait
+   (PM reviews and endorses existing spec — does NOT rewrite)
+3. enki_report(role='pm', task_id='spec-review', summary=..., status='completed')
+→ Go to PHASE: spec (skip debate if spec is already final)
+```
+
+### NEVER in this phase
+- Do not call enki_wave
+- Do not call enki_decompose
+- Do not write any code
+
+---
+
+## PHASE: spec
+
+### What this phase is
+Spec debate, adversarial review, approval. The spec gets stress-tested before
+any implementation planning begins.
+
+### Exact sequence
+
+**Step 1 — Run debate (always for Standard/Full tier):**
+```
+enki_debate()
+→ Returns Round 1 spawn instructions
+
+For each agent in Round 1 (sequential, foreground):
+  enki_spawn(role, 'debate-r1-{role}') → Task tool FOREGROUND → wait
+  enki_report(role=role, task_id='debate-r1-{role}', summary=..., status='completed')
+  enki_debate_update(role=role, round='1', output={...from agent JSON output...})
+
+enki_debate() → Returns Round 2 spawn instructions
+
+For each agent in Round 2 (sequential, foreground):
+  enki_spawn(role, 'debate-r2-{role}') → Task tool FOREGROUND → wait
+  enki_report(role=role, task_id='debate-r2-{role}', summary=..., status='completed')
+  enki_debate_update(role=role, round='2', output={...from agent JSON output...})
+
+enki_debate() → Returns reconciliation spawn instructions
+
+enki_spawn('pm', 'debate-reconcile') → Task tool FOREGROUND → wait
+enki_report(role='pm', task_id='debate-reconcile', summary=..., status='completed')
+enki_debate_update(role='pm', round='reconciliation', output={...from PM JSON output...})
+
+enki_debate() → Returns complete with spec-final.md and debate-summary.md paths
+```
+
+**Step 2 — HITL review:**
+```
+Present docs/debate-summary.md to human
+Present docs/spec-final.md to human
+Wait for verbal approval
+enki_approve(stage='spec')
+```
+
+**Step 3 — Igi adversarial review:**
+```
+enki_spawn('igi', 'igi-review') → Task tool FOREGROUND → wait
+enki_report(role='igi', task_id='igi-review', summary=..., status='completed')
+Present Igi findings to human
+Wait for verbal approval
+enki_approve(stage='igi')
+→ Phase advances to 'approved' automatically
+```
+
+### NEVER in this phase
+- Do not skip debate for Standard or Full tier
+- Do not call enki_approve(stage='spec') before debate is complete
+- Do not call enki_approve(stage='igi') before presenting Igi findings to human
+
+---
+
+## PHASE: approved
+
+### What this phase is
+Pre-implementation kickoff and Architect impl spec. Feasibility confirmed,
+task DAG created.
+
+### Exact sequence
+
+**Step 1 — Kickoff:**
+```
+enki_kickoff()
+→ Returns PM + Architect spawn instructions
+
+enki_spawn('pm', 'kickoff-pm') → Task tool FOREGROUND → wait
+enki_report(role='pm', task_id='kickoff-pm', summary=..., status='completed')
+enki_kickoff_update(role='pm', output={...from PM JSON output...})
+
+enki_spawn('architect', 'kickoff-architect') → Task tool FOREGROUND → wait
+enki_report(role='architect', task_id='kickoff-architect', summary=..., status='completed')
+enki_kickoff_update(role='architect', output={...from Architect JSON output...})
+
+[If PM output signals dba_needed=true:]
+  enki_spawn('dba', 'kickoff-dba') → Task tool FOREGROUND → wait
+  enki_report(role='dba', task_id='kickoff-dba', summary=..., status='completed')
+  enki_kickoff_update(role='dba', output={...})
+
+[If PM output signals ui_needed=true:]
+  enki_spawn('ui_ux', 'kickoff-ui_ux') → Task tool FOREGROUND → wait
+  enki_report(role='ui_ux', task_id='kickoff-ui_ux', summary=..., status='completed')
+  enki_kickoff_update(role='ui_ux', output={...})
+
+enki_kickoff_complete()
+```
+
+If blockers found:
+```
+→ Present blockers to human
+→ Wait for resolution
+→ enki_approve(stage='spec-revision', note='resolution details')
+→ enki_kickoff() again → repeat from Step 1
+```
+
+If no blockers:
+```
+→ Present kickoff summary to human (verbal ok)
+→ Proceed to Step 2
+```
+
+**Step 2 — Architect impl spec:**
+```
+enki_spawn('architect', 'impl-spec') → Task tool FOREGROUND → wait
+enki_report(role='architect', task_id='impl-spec', summary=..., status='completed')
+```
+
+Architect output MUST contain a JSON block with tasks array:
+```json
+{
+  "tasks": [
+    {
+      "name": "Task name",
+      "description": "Exact description of what to implement",
+      "files": ["path/to/file.ts"],
+      "dependencies": ["Other task name"],
+      "acceptance_criteria": ["criterion 1", "criterion 2"]
+    }
+  ]
+}
+```
+
+**Step 3 — HITL approval:**
+```
+Present impl spec to human
+Wait for verbal approval
+enki_approve(stage='architect')
+→ Phase advances to 'implement' automatically
+```
+
+**Step 4 — Decompose:**
+```
+enki_decompose(tasks=[
+  {
+    "name": "...",
+    "description": "...",    ← REQUIRED — copy from Architect JSON output exactly
+    "files": [...],
+    "dependencies": [...]
+  },
+  ...
+])
+→ Creates sprint and task records in em.db
+```
+
+### NEVER in this phase
+- Do not call enki_wave before enki_decompose
+- Do not call enki_decompose without description for each task
+- Do not skip kickoff — always run it before Architect impl spec
+
+---
+
+## PHASE: implement
+
+### What this phase is
+Wave execution. You are the orchestrator. You NEVER implement code yourself.
+You spawn agents and report results.
+
+### Exact sequence per wave
+
+```
+enki_wave()
+→ Returns list of tasks and agents for this wave
+→ ALWAYS note the sprint_branch in the response
+```
+
+**For EACH task returned (one at a time, never parallel):**
+
+```
+Step 1: Dev
+  enki_spawn(role='dev', task_id='{task_id}')
+  → Read prompt_path verbatim (never substitute your own prompt)
+  → Read context_artifact completely (read in chunks if large)
+  → Task tool FOREGROUND — wait for completion
+  enki_report(role='dev', task_id='{task_id}', summary='...', status='completed')
+
+Step 2: QA
+  enki_spawn(role='qa', task_id='{task_id}')
+  → Read prompt_path verbatim
+  → Read context_artifact completely
+  → Task tool FOREGROUND — wait for completion
+  enki_report(role='qa', task_id='{task_id}', summary='...', status='completed')
+
+Step 3: Complete task ← MANDATORY, NEVER SKIP
+  enki_complete(task_id='{task_id}')
+  → This marks the task done, queues merge, releases session claim
+  → Without this, the wave will return the same task again forever
+```
+
+**After ALL tasks in the wave are complete:**
+```
+enki_mail_inbox()  → read agent messages
+enki_wave()        → get next wave OR sprint_complete signal
+```
+
+**When enki_wave returns sprint_complete=True:**
+```
+enki_phase(action='status')  → confirm all tasks done
+enki_phase(action='advance', to='validating')
+→ Go to PHASE: validating
+```
+
+**When enki_wave returns no tasks but sprint not complete:**
+```
+→ Some tasks are in_progress by other sessions or blocked
+→ enki_phase(action='status') to see which
+→ Wait or escalate if blocked
+```
+
+### NEVER in this phase
+- NEVER use Agent tool — ALWAYS use Task tool (Task tool sets required permissions)
+- NEVER run Dev and QA in parallel — sequential only
+- NEVER call enki_wave again before enki_complete for each task in the current wave
+- NEVER implement code yourself — spawn agents for all implementation work
+- NEVER call enki_report without having run the Task tool first
+
+### Conditional agent spawning (after Dev+QA complete)
+```
+If task files include .tsx/.jsx/.vue/.css → also spawn ui_ux
+If task involves auth/token/session/encrypt → also spawn infosec
+If task modifies hot path identified in codebase profile → also spawn performance
+
+For each conditional agent:
+  enki_spawn(role='{role}', task_id='{task_id}')
+  → Task tool FOREGROUND → wait
+  enki_report(role='{role}', task_id='{task_id}', summary=..., status='completed')
+  (then proceed to enki_complete as normal)
+```
+
+---
+
+## PHASE: validating
+
+### What this phase is
+Sprint-level review and final validation before completion.
+
+### Exact sequence
+```
+1. enki_spawn('validator', '{sprint_id}-validation') → Task tool FOREGROUND → wait
+2. enki_report(role='validator', task_id='{sprint_id}-validation', summary=..., status='completed')
+3. Present validator findings to human
+4. If issues found: spawn Dev to fix, re-run QA, re-run validator
+5. enki_spawn('reviewer', '{sprint_id}-sprint-review') → Task tool FOREGROUND → wait
+   (reviewer runs in SPRINT mode — reviews all files modified across sprint)
+6. enki_report(role='reviewer', task_id='{sprint_id}-sprint-review', summary=..., status='completed')
+7. Present review to human
+8. Wait for verbal approval
+9. enki_approve(stage='test')
+→ Phase advances to 'complete'
+```
+
+---
+
+## PHASE: complete
+
+### What this phase is
+Session wrap-up and memory persistence.
+
+### Exact sequence
+```
+1. enki_wrap()  → runs transcript → memory pipeline
+2. Present final summary to human
+```
+
+---
+
+## COMMON MISTAKES AND FIXES
+
+| Mistake | Why it happens | Fix |
+|---------|---------------|-----|
+| Agent tool instead of Task tool | Forgetting the rule | ALWAYS use Task tool for agent spawning. Agent tool bypasses permission grants. |
+| enki_wave returns same tasks | enki_complete not called | After dev+qa report for each task, call enki_complete(task_id) before calling enki_wave again |
+| Gate blocks with "architect not completed" | enki_report not called after architect | Always call enki_report after every agent Task completion |
+| enki_debate returns error about spec-draft | PM wrote spec to wrong path | PM must write to docs/spec-draft.md exactly |
+| Dev explores codebase instead of building | description missing from task | Check context_artifact — description should be there. If empty, impl spec had no description. |
+| Wave returns no tasks but sprint not done | Tasks in_progress from dead session | enki_wave auto-recovers on next call via tmux liveness check |
+| enki_complete fails validator gate | Validator was never spawned | Validator gate only fires if validator was actually spawned. Check task context. |
+
+---
+
+## QUICK ORIENTATION COMMANDS
+
+```bash
+# What phase am I in and what's next?
+enki_phase(action='status')
+
+# What's the sprint progress?
+enki_sprint_summary(sprint_id='...')
+
+# What tasks are ready now?
+enki_next_actions()
+
+# What's in my inbox?
+enki_mail_inbox()
+
+# Generate sprint DAG diagram
+enki_diagram(type='dag')
+
+# Generate pipeline status diagram  
+enki_diagram(type='pipeline')
+```
+
+---
+
+## TOOL QUICK REFERENCE
+
+| Tool | When | Never |
+|------|------|-------|
+| enki_wave | Start of each wave, after all enki_complete calls | Before enki_decompose, before enki_complete for current wave |
+| enki_spawn | When pipeline requires an agent | Use Agent tool — always use Task tool to run the agent |
+| enki_report | After EVERY agent Task completion | Call without running Task tool first |
+| enki_complete | After dev+qa both reported for a task | Skip it — wave will loop forever without it |
+| enki_decompose | Once, after architect approved, before first wave | Multiple times for same sprint |
+| enki_approve | After every human verbal approval | Auto-advance without human seeing the output |
+| enki_escalate | When blocked and human input needed | Improvise around blockers |
+| enki_diagram | On demand for visualization | — |
+"""
+
+# Valid task phases in order
+TASK_PHASES = ["test_design", "implementing", "verifying", "reviewing", "complete"]
 
 
 def _resolve_project(project: str | None) -> str:
@@ -336,8 +734,12 @@ def _ensure_project_mcp_json(cwd: Path) -> dict[str, bool | str]:
         return {"created": False, "existing": False, "warning": warning}
 
 
-def _ensure_pipeline_md(enki_root: Path) -> None:
-    pipeline_path = enki_root / "PIPELINE.md"
+def _ensure_pipeline_md(enki_root: Path | None = None) -> None:
+    root = enki_root or ENKI_ROOT
+    playbook_path = root / "PLAYBOOK.md"
+    if not playbook_path.exists():
+        playbook_path.write_text(PLAYBOOK_CONTENT)
+    pipeline_path = root / "PIPELINE.md"
     implement_section = (
         "### implement\n"
         "- Call enki_wave(project) to get next wave tasks and agents\n"
@@ -516,9 +918,11 @@ def enki_approve(
         ),
         "architect": (
             "Architect approved. Phase → implement. "
-            "Now call enki_decompose(tasks=[...]) with Architect's task breakdown. "
-            "Tasks format: [{'name': str, 'files': [str], 'dependencies': [str]}]. "
-            "Dependencies are task names not IDs. Then call enki_wave()."
+            "Call enki_decompose(tasks=[...]) with Architect's task breakdown. "
+            "Tasks format: ["
+            "{'name': str, 'description': str, 'files': [str], 'dependencies': [str]}]. "
+            "description is MANDATORY — copy verbatim from Architect JSON output. "
+            "After enki_decompose: call enki_wave()."
         ),
         "test": (
             "Test approved. Phase → validating. "
@@ -1264,7 +1668,8 @@ def enki_decompose(tasks: list[dict], project: str = ".") -> dict:
     """Break spec into task DAG.
 
     Args:
-        tasks: List of {name, files, dependencies} dicts
+        tasks: List of {name, description, files, dependencies} dicts
+               description is MANDATORY — it is what Dev implements from
         project: Project ID
     """
     sprint_id = create_sprint(project, "sprint-1")
@@ -1273,6 +1678,34 @@ def enki_decompose(tasks: list[dict], project: str = ".") -> dict:
             "UPDATE sprint_state SET status = 'active' WHERE sprint_id = ?",
             (sprint_id,),
         )
+
+    # Detect and store sprint base branch
+    _project_path = _get_project_path(project)
+    _sprint_base = "main"
+    if _project_path:
+        _cur = subprocess.run(
+            ["git", "branch", "--show-current"],
+            capture_output=True, text=True, cwd=_project_path, timeout=30,
+        )
+        _cur_branch = _cur.stdout.strip()
+        if _cur_branch and _cur_branch not in {"main", "master"}:
+            _sprint_base = _cur_branch
+        elif _cur_branch in {"main", "master"}:
+            _r = subprocess.run(
+                ["git", "checkout", "-b", sprint_id],
+                capture_output=True, text=True, cwd=_project_path, timeout=30,
+            )
+            if _r.returncode == 0:
+                _sprint_base = sprint_id
+    try:
+        write_project_state(project, f"sprint_base_{sprint_id}", _sprint_base)
+    except Exception:
+        with em_db(project) as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO project_state (key, value, updated_at) "
+                "VALUES (?, ?, CURRENT_TIMESTAMP)",
+                (f"sprint_base_{sprint_id}", _sprint_base),
+            )
 
     # Pass 1: create all tasks, build name→id map
     name_to_id = {}
@@ -1285,21 +1718,22 @@ def enki_decompose(tasks: list[dict], project: str = ".") -> dict:
             tier="standard",
             assigned_files=task_def.get("files", []),
             dependencies=[],
+            description=task_def.get("description", ""),
         )
         name_to_id[task_def["name"]] = task_id
         created.append({
             "task_id": task_id,
             "name": task_def["name"],
+            "description": task_def.get("description", ""),
             "files": task_def.get("files", []),
             "dependencies": task_def.get("dependencies", []),
         })
 
-    # Pass 2: resolve dependency names to IDs and update task_state
+    # Pass 2: resolve dependency names to IDs
     with em_db(project) as conn:
         for item in created:
             resolved_deps = [
-                name_to_id.get(d, d)
-                for d in item["dependencies"]
+                name_to_id.get(d, d) for d in item["dependencies"]
             ]
             conn.execute(
                 "UPDATE task_state SET dependencies = ? WHERE task_id = ?",
@@ -1307,15 +1741,23 @@ def enki_decompose(tasks: list[dict], project: str = ".") -> dict:
             )
             item["resolved_dependencies"] = resolved_deps
 
+    # Pass 3: auto-insert dependencies for file overlaps
+    from enki.orch.task_graph import insert_dependency_for_overlap
+    overlap_deps = insert_dependency_for_overlap(project, sprint_id)
+
     return {
         "message": (
             f"Sprint created with {len(created)} tasks. "
-            "Now call enki_wave() to spawn Dev+QA agents for Wave 1. "
-            "Do not read source files or plan implementation yourself — that is agent work."
+            + (f"{len(overlap_deps)} file-overlap dependencies auto-inserted. "
+               if overlap_deps else "")
+            + "Call enki_wave() to begin. "
+            "Do not read source files or implement directly — that is agent work."
         ),
         "sprint_id": sprint_id,
+        "sprint_branch": _sprint_base,
         "tasks": created,
         "total_tasks": len(created),
+        "overlap_dependencies_added": len(overlap_deps) if overlap_deps else 0,
     }
 
 
@@ -1368,7 +1810,45 @@ def enki_spawn(
         task = get_task(project, task_id) or {}
         merged_context = {"task": task, **(context or {})}
         merged_context = _inject_external_spec_mode(project, role_key, merged_context)
+        merged_context = _inject_architect_context(project, role_key, merged_context)
         filtered_context = _apply_blind_wall(role_key, merged_context)
+        # Inject mode and test_path based on task_phase for QA and Validator
+        if role_key in ("qa", "validator") and task_id:
+            task_phase = _get_task_phase(project, task_id)
+            mode_from_context = (context or {}).get("mode")
+            if not mode_from_context:
+                if role_key == "qa":
+                    if task_phase == "test_design":
+                        filtered_context["mode"] = "write"
+                        filtered_context["test_path"] = f"tests/tasks/{task_id}/"
+                        filtered_context["instruction"] = (
+                            "Write tests from acceptance criteria and API contracts only. "
+                            "Do NOT run tests. Implementation does not exist yet. "
+                            f"Write to tests/tasks/{task_id}/"
+                        )
+                    elif task_phase == "verifying":
+                        filtered_context["mode"] = "execute"
+                        filtered_context["test_path"] = f"tests/tasks/{task_id}/"
+                        filtered_context["instruction"] = (
+                            f"Run the pre-written test suite in tests/tasks/{task_id}/. "
+                            "Do NOT modify tests. Do NOT read Dev source code. "
+                            "Report exact failures with stack traces."
+                        )
+                elif role_key == "validator":
+                    if task_phase == "test_design":
+                        filtered_context["mode"] = "review-tests"
+                        filtered_context["instruction"] = (
+                            "Review QA's test suite for coverage completeness. "
+                            "Check: are all acceptance criteria covered? "
+                            "Flag gaps as concerns. Do NOT run tests."
+                        )
+                    elif task_phase == "verifying":
+                        filtered_context["mode"] = "compliance"
+                        filtered_context["instruction"] = (
+                            "Check Dev output against impl spec. "
+                            "Check QA execution results are complete. "
+                            "Flag hallucinations (extra features) and omissions (missing spec items)."
+                        )
 
         spawn_payload = {
             "role": role_key,
@@ -1421,64 +1901,219 @@ def enki_report(
     summary: str,
     status: str = "completed",
     project: str | None = None,
+    output: dict | None = None,
 ) -> dict:
-    """Record agent completion/failure (step 2) after Task execution."""
+    """Record agent completion. Advances task_phase and auto-files bugs."""
     project = _resolve_project(project)
     active = _require_active_goal(project)
     if active.get("error"):
         return active
+
     goal_id = active["goal_id"]
     role_key = role.strip().lower()
     if role_key not in VALID_AGENT_ROLES:
         return {"error": f"Unknown role: {role_key}"}
-    normalized_status = (status or "completed").strip().lower()
-    if normalized_status not in {"completed", "failed"}:
-        return {"error": "status must be 'completed' or 'failed'"}
+    status_key = status.strip().lower()
 
-    if not _has_agent_status(goal_id, f"{role_key}:{task_id}", "in_progress"):
-        return {"error": f"Cannot report for {role_key}:{task_id}. Agent was not spawned or already reported."}
+    # Validate agent was spawned (check in_progress status)
+    current = _get_agent_status(goal_id, f"{role_key}:{task_id}")
+    if current != "in_progress":
+        return {
+            "error": (
+                f"Cannot report for {role_key}:{task_id}. "
+                "Agent was not spawned or already reported."
+            )
+        }
 
-    _upsert_agent_status(goal_id, f"{role_key}:{task_id}", normalized_status)
+    # Record completion in uru_db
+    final_status = "completed" if status_key in ("completed", "done", "pass", "passed") else "failed"
+    _upsert_agent_status(goal_id, f"{role_key}:{task_id}", final_status)
 
+    # Store summary in task agent_outputs
+    try:
+        with em_db(project) as conn:
+            existing = conn.execute(
+                "SELECT agent_outputs FROM task_state WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+            outputs = {}
+            if existing and existing["agent_outputs"]:
+                try:
+                    outputs = json.loads(existing["agent_outputs"])
+                except Exception:
+                    outputs = {}
+            outputs[role_key] = {"summary": summary, "status": final_status}
+            conn.execute(
+                "UPDATE task_state SET agent_outputs = ? WHERE task_id = ?",
+                (json.dumps(outputs), task_id),
+            )
+    except Exception:
+        pass
+
+    # Auto-file bugs from output concerns array
+    filed_bugs = []
+    if output and isinstance(output.get("concerns"), list):
+        filed_bugs = _auto_file_concerns(
+            project, task_id, role_key, output["concerns"], goal_id
+        )
+
+    # Persist Architect impl spec if role=architect
+    if role_key == "architect":
+        try:
+            artifact_path = (
+                _goal_artifacts_dir(project) / f"spawn-architect-{task_id}.md"
+            )
+            if artifact_path.exists():
+                content = artifact_path.read_text()
+                import re as _re
+                match = _re.search(r"```json\n(.*?)\n```", content, _re.DOTALL)
+                if match:
+                    import uuid as _uuid
+                    with em_db(project) as conn:
+                        conn.execute(
+                            "INSERT OR REPLACE INTO pm_decisions "
+                            "(id, project_id, decision_type, proposed_action, context) "
+                            "VALUES (?, ?, 'architect_impl_spec', ?, ?)",
+                            (
+                                str(_uuid.uuid4()),
+                                project,
+                                f"Architect impl spec for task {task_id}",
+                                match.group(1)[:10000],
+                            ),
+                        )
+        except Exception:
+            pass
+
+    # Preserve artifact + mail trail
     artifact = _goal_artifacts_dir(project) / f"{role_key}-{task_id}.md"
     artifact.write_text(
         _format_md(
             {
                 "role": role_key,
                 "task_id": task_id,
-                "status": normalized_status,
+                "status": final_status,
                 "summary": summary,
                 "reported_at": datetime.now(timezone.utc).isoformat(),
             }
         )
     )
-
     findings = [summary]
-    if normalized_status == "failed":
+    if final_status == "failed":
         findings.append("failure reported")
-    _mail_em(project, role_key, task_id, normalized_status, findings)
+    _mail_em(project, role_key, task_id, final_status, findings)
+
+    # Task phase transitions
+    current_phase = _get_task_phase(project, task_id)
+    next_phase = None
+    next_action = ""
+
+    if role_key == "qa" and current_phase == "test_design" and final_status == "completed":
+        # QA finished writing tests — Validator will review them next
+        next_action = (
+            f"enki_spawn('validator', '{task_id}', {{'mode': 'review-tests'}}) "
+            "→ Task tool → enki_report"
+        )
+
+    elif role_key == "validator" and current_phase == "test_design":
+        if final_status == "completed" and not filed_bugs:
+            # Validator approved test coverage → advance to implementing
+            next_phase = "implementing"
+            next_action = (
+                "Test design approved. "
+                f"enki_spawn('dev', '{task_id}') → Task tool → enki_report"
+            )
+        else:
+            # Validator found gaps → back to QA
+            next_action = (
+                f"Test coverage gaps found ({len(filed_bugs)} bugs). "
+                f"enki_spawn('qa', '{task_id}', {{'mode': 'write'}}) → Task tool → enki_report"
+            )
+
+    elif role_key == "dev" and current_phase == "implementing":
+        if final_status == "completed":
+            next_phase = "verifying"
+            next_action = (
+                "Dev complete. "
+                f"enki_spawn('qa', '{task_id}', {{'mode': 'execute'}}) → Task tool → enki_report"
+            )
+        else:
+            next_action = "Dev failed. Check bugs. Re-spawn dev after fixes."
+
+    elif role_key == "qa" and current_phase == "verifying":
+        next_action = (
+            "QA execution complete. "
+            f"enki_spawn('validator', '{task_id}', {{'mode': 'compliance'}}) "
+            "→ Task tool → enki_report"
+        )
+
+    elif role_key == "validator" and current_phase == "verifying":
+        if final_status == "completed" and not filed_bugs:
+            next_phase = "reviewing"
+            next_action = (
+                "Compliance passed. "
+                f"enki_spawn('reviewer', '{task_id}') → Task tool → enki_report"
+            )
+        else:
+            # Reset to implementing — Dev must fix
+            next_phase = "implementing"
+            next_action = (
+                f"Compliance failed ({len(filed_bugs)} bugs). "
+                f"enki_spawn('dev', '{task_id}') → Task tool → enki_report after fixes"
+            )
+
+    elif role_key == "reviewer" and current_phase == "reviewing":
+        open_p1 = _get_open_bugs(project, task_id, severity="P1")
+        if open_p1:
+            # P1 found — back to implementing
+            next_phase = "implementing"
+            next_action = (
+                f"P1 violations found ({len(open_p1)}). "
+                f"enki_spawn('dev', '{task_id}') → Task tool → enki_report after fixes"
+            )
+        else:
+            # P2 only or clean — ready for completion
+            next_phase = "complete"
+            next_action = (
+                f"Review passed. Call enki_complete(task_id='{task_id}')"
+            )
+
+    elif role_key == "infosec" and current_phase == "reviewing":
+        if filed_bugs:
+            next_action = (
+                f"InfoSec P0 bugs filed ({len(filed_bugs)}). "
+                "EM must spawn Architect to triage scope (A/B/C). "
+                "Check enki_mail_inbox() for security escalation thread."
+            )
+        else:
+            next_action = f"InfoSec clean. Call enki_complete(task_id='{task_id}')"
+
+    # Apply phase transition
+    if next_phase:
+        _advance_task_phase(project, task_id, next_phase)
+
+    # Mark sprint_close complete when both infosec and sprint reviewer done
+    sprint = get_active_sprint(project)
+    if sprint and role_key in ("infosec", "reviewer"):
+        sid = sprint["sprint_id"]
+        infosec_ok = _has_agent_status(goal_id, f"infosec:{sid}-infosec", "completed")
+        reviewer_ok = _has_agent_status(goal_id, f"reviewer:{sid}-sprint-review", "completed")
+        if infosec_ok and reviewer_ok:
+            _upsert_agent_status(goal_id, f"sprint_close:{sid}", "completed")
 
     return {
-        "message": (
-            f"Agent {role_key} recorded as {normalized_status} for task {task_id}. "
-            + (
-                f"Run next agent in sequence via Task tool, then enki_report. "
-                f"After dev AND qa both reported completed for task {task_id}: "
-                f"call enki_complete(task_id='{task_id}'). "
-                f"After ALL tasks in this wave have enki_complete called: enki_mail_inbox() then enki_wave() for next wave."
-                if normalized_status == "completed"
-                else
-                "Agent failed. Call enki_escalate(task_id, reason) immediately — never take over agent work."
-            )
-        ),
+        "status": final_status,
+        "recorded": True,
         "role": role_key,
         "task_id": task_id,
-        "status": normalized_status,
+        "agent_status": final_status,
+        "task_phase": next_phase or current_phase,
+        "bugs_filed": len(filed_bugs),
+        "next": next_action,
     }
 
 
 def enki_wave(project: str | None = None) -> dict:
-    """Prepare next wave's Dev+QA agent runs for external Task execution."""
+    """Get next wave of tasks. Phase-aware dispatch with worktree isolation."""
     project = _resolve_project(project)
     active = _require_active_goal(project)
     if active.get("error"):
@@ -1489,130 +2124,363 @@ def enki_wave(project: str | None = None) -> dict:
 
     sprint = get_active_sprint(project)
     if not sprint:
-        return {"error": "No active sprint found."}
+        return {
+            "error": (
+                "No active sprint. Call enki_decompose(tasks=[...]) first. "
+                "Each task must include name, description, files, dependencies."
+            )
+        }
     sprint_id = sprint["sprint_id"]
-    tasks = get_next_wave(project, sprint_id)
-    if not tasks:
-        if is_sprint_complete(project, sprint_id):
+
+    # Branch safety check
+    project_path = _get_project_path(project)
+    sprint_branch = _get_sprint_base_branch(project, sprint_id)
+    if project_path:
+        _cur = subprocess.run(
+            ["git", "branch", "--show-current"],
+            capture_output=True, text=True, cwd=project_path, timeout=30,
+        )
+        _cur_branch = _cur.stdout.strip()
+        if _cur_branch in {"main", "master"}:
+            return {
+                "error": (
+                    f"Cannot start wave from protected branch '{_cur_branch}'. "
+                    f"Checkout sprint branch '{sprint_branch}' first."
+                )
+            }
+
+    # Process pending merges before getting next wave
+    merge_results = _process_merge_queue(project)
+
+    # Recover tasks from dead sessions
+    recovered = _recover_dead_session_tasks(project)
+
+    # Get session identity
+    session_id = os.environ.get("ENKI_SESSION_ID", "")
+    if not session_id:
+        _sid_file = ENKI_ROOT / "current_session_id"
+        if _sid_file.exists():
+            try:
+                session_id = _sid_file.read_text().strip()
+            except Exception:
+                pass
+    if not session_id:
+        session_id = str(uuid.uuid4())[:12]
+
+    # Phase-aware task dispatch
+    with em_db(project) as conn:
+        test_design_tasks = conn.execute(
+            "SELECT * FROM task_state WHERE sprint_id=? AND task_phase='test_design' "
+            "AND status='pending' ORDER BY task_id",
+            (sprint_id,),
+        ).fetchall()
+        implement_tasks = conn.execute(
+            "SELECT * FROM task_state WHERE sprint_id=? AND task_phase='implementing' "
+            "AND status='pending' ORDER BY task_id",
+            (sprint_id,),
+        ).fetchall()
+        verify_tasks = conn.execute(
+            "SELECT * FROM task_state WHERE sprint_id=? AND task_phase='verifying' "
+            "AND status='pending' ORDER BY task_id",
+            (sprint_id,),
+        ).fetchall()
+        review_tasks = conn.execute(
+            "SELECT * FROM task_state WHERE sprint_id=? AND task_phase='reviewing' "
+            "AND status='pending' ORDER BY task_id",
+            (sprint_id,),
+        ).fetchall()
+        total = conn.execute(
+            "SELECT COUNT(*) as c FROM task_state WHERE sprint_id=?",
+            (sprint_id,),
+        ).fetchone()["c"]
+        done = conn.execute(
+            "SELECT COUNT(*) as c FROM task_state WHERE sprint_id=? "
+            "AND task_phase='complete' AND status='completed'",
+            (sprint_id,),
+        ).fetchone()["c"]
+
+    # Sprint complete check
+    if done == total and total > 0:
+        sprint_close_done = _has_agent_status(goal_id, f"sprint_close:{sprint_id}", "completed")
+        if not sprint_close_done:
             return {
                 "message": (
-                    "All sprint tasks completed. Sprint done. "
-                    "Call enki_phase(action='status') to confirm, then enki_phase(action='advance', to='validating')."
+                    "All tasks complete. Sprint close pipeline required before validating. "
+                    "Call enki_sprint_close() to run InfoSec + sprint Reviewer."
                 ),
-                "sprint_complete": True,
+                "sprint_complete": False,
+                "sprint_close_required": True,
                 "sprint_id": sprint_id,
             }
         return {
-            "message": "No tasks ready. Some tasks may be in_progress or blocked. Check enki_phase(action='status').",
+            "message": (
+                "Sprint complete and close pipeline done. "
+                "Call enki_phase(action='status') then "
+                "enki_phase(action='advance', to='validating')."
+            ),
+            "sprint_complete": True,
+            "sprint_id": sprint_id,
+        }
+
+    all_ready = (
+        list(test_design_tasks) + list(implement_tasks) +
+        list(verify_tasks) + list(review_tasks)
+    )
+    if not all_ready:
+        return {
+            "message": (
+                "No tasks ready. Tasks may be in_progress or awaiting phase gates. "
+                "Call enki_phase(action='status') to diagnose."
+            ),
+            "sprint_complete": False,
+            "sprint_id": sprint_id,
+            "recovered_tasks": recovered,
+        }
+
+    MAX_PARALLEL = 2
+    wave_tasks: list[tuple[str, dict]] = []
+
+    def _claim_task(task_row) -> dict:
+        t = dict(task_row)
+        task_id_inner = t["task_id"]
+        sprint_slug = sprint_id.replace(f"{_project_slug(project)}-", "")
+        branch_name = f"{_project_slug(project)}/{sprint_slug}/{task_id_inner}"
+        worktree_path = None
+        if project_path:
+            worktree_path = _create_task_worktree(
+                project_path, task_id_inner, branch_name, sprint_branch
+            )
+        with em_db(project) as conn:
+            conn.execute(
+                "UPDATE task_state SET status='in_progress', session_id=?, "
+                "worktree_path=?, started_at=datetime('now') WHERE task_id=?",
+                (session_id, worktree_path, task_id_inner),
+            )
+        t["worktree_path"] = worktree_path
+        t["branch_name"] = branch_name
+        return t
+
+    candidates = (
+        [("verifying", t) for t in verify_tasks] +
+        [("reviewing", t) for t in review_tasks] +
+        [("implementing", t) for t in implement_tasks] +
+        [("test_design", t) for t in test_design_tasks]
+    )
+
+    for phase, task_row in candidates:
+        if len(wave_tasks) >= MAX_PARALLEL:
+            break
+        t = dict(task_row)
+        raw_deps = t.get("dependencies")
+        if isinstance(raw_deps, str):
+            deps = json.loads(raw_deps or "[]")
+        else:
+            deps = raw_deps or []
+        deps_ok = True
+        with em_db(project) as conn:
+            for dep_id in deps:
+                dep = conn.execute(
+                    "SELECT task_phase FROM task_state WHERE task_id=?",
+                    (dep_id,),
+                ).fetchone()
+                if not dep or dep["task_phase"] != "complete":
+                    deps_ok = False
+                    break
+        if not deps_ok:
+            continue
+        claimed = _claim_task(task_row)
+        wave_tasks.append((phase, claimed))
+
+    if not wave_tasks:
+        return {
+            "message": "Tasks exist but dependencies not yet satisfied. Wait for in-progress tasks to complete.",
             "sprint_complete": False,
             "sprint_id": sprint_id,
         }
 
-    for task in tasks:
-        update_task_status(project, task["task_id"], TaskStatus.IN_PROGRESS)
-
     wave_no = _next_wave_number(project)
-    agents = []
-    for task in tasks:
-        ctx = {
-            "task_name": task.get("task_name"),
-            "assigned_files": task.get("assigned_files", []),
-            "dependencies": task.get("dependencies", []),
-        }
-        dev = enki_spawn("dev", task["task_id"], ctx, project)
-        qa = enki_spawn("qa", task["task_id"], ctx, project)
-        for item in (dev, qa):
-            agents.append({
-                "role": item.get("role"),
-                "task_id": item.get("task_id"),
-                "prompt_path": item.get("prompt_path"),
-                "context_artifact": item.get("context_artifact"),
-            })
+    phase_instructions = {
+        "test_design": (
+            "PHASE: test_design\n"
+            "1. enki_spawn('qa', '{task_id}', {{'mode': 'write', "
+            "'test_path': 'tests/tasks/{task_id}/'}}) "
+            "→ Task tool FOREGROUND → wait\n"
+            "2. enki_report(role='qa', task_id='{task_id}', summary=..., status='completed')\n"
+            "3. enki_spawn('validator', '{task_id}', {{'mode': 'review-tests'}}) "
+            "→ Task tool FOREGROUND → wait\n"
+            "4. enki_report(role='validator', task_id='{task_id}', summary=..., "
+            "status='completed', output={{...validator JSON...}})\n"
+            "→ If validator passes: task advances to implementing, call enki_wave()\n"
+            "→ If validator fails: bugs filed, re-spawn qa with mode=write"
+        ),
+        "implementing": (
+            "PHASE: implementing\n"
+            "1. enki_spawn('dev', '{task_id}') → Task tool FOREGROUND → wait\n"
+            "2. enki_report(role='dev', task_id='{task_id}', summary=..., status='completed')\n"
+            "→ Task advances to verifying, call enki_wave()"
+        ),
+        "verifying": (
+            "PHASE: verifying\n"
+            "1. enki_spawn('qa', '{task_id}', {{'mode': 'execute', "
+            "'test_path': 'tests/tasks/{task_id}/'}}) "
+            "→ Task tool FOREGROUND → wait\n"
+            "2. enki_report(role='qa', task_id='{task_id}', summary=..., status='completed')\n"
+            "3. enki_spawn('validator', '{task_id}', {{'mode': 'compliance'}}) "
+            "→ Task tool FOREGROUND → wait\n"
+            "4. enki_report(role='validator', task_id='{task_id}', summary=..., "
+            "status='completed', output={{...validator JSON...}})\n"
+            "→ If passes: advances to reviewing\n"
+            "→ If fails: bugs filed, resets to implementing"
+        ),
+        "reviewing": (
+            "PHASE: reviewing\n"
+            "1. enki_spawn('reviewer', '{task_id}') → Task tool FOREGROUND → wait\n"
+            "2. enki_report(role='reviewer', task_id='{task_id}', summary=..., "
+            "status='completed', output={{...reviewer JSON...}})\n"
+            "3. [If task files trigger infosec/performance/ui_ux: spawn conditionally]\n"
+            "4. enki_report for each conditional agent\n"
+            "5. enki_complete(task_id='{task_id}') ← MANDATORY"
+        ),
+    }
 
-    report_path = _goal_artifacts_dir(project) / f"wave-{wave_no}.md"
-    wave_instruction = (
-        "Execute agents sequentially in foreground — one at a time, not in parallel. "
-        "Start Dev agent first. Wait for completion. "
-        "Call enki_report(role='dev', task_id=..., status='completed'). "
-        "Then start QA agent. Wait for completion. "
-        "Call enki_report(role='qa', task_id=..., status='completed'). "
-        "Do not background agents — foreground execution inherits write permissions."
-    )
-    report_path.write_text(
-        _format_md(
-            {
-                "goal_id": goal_id,
-                "wave_number": wave_no,
-                "task_ids": [t["task_id"] for t in tasks],
-                "agents": agents,
-                "execution_mode": "foreground_sequential",
-                "execution_order": ["dev", "qa"],
-                "instruction": wave_instruction,
-            }
+    task_instructions = []
+    for phase, t in wave_tasks:
+        instr = phase_instructions.get(phase, "").format(task_id=t["task_id"])
+        task_instructions.append(
+            f"Task {t['task_id']} [{t['task_name'][:30]}] — {instr}"
         )
-    )
+
+    wave_artifact = _goal_artifacts_dir(project) / f"wave-{wave_no}.md"
+    wave_artifact.write_text(_format_md({
+        "wave_number": wave_no,
+        "sprint_id": sprint_id,
+        "sprint_branch": sprint_branch,
+        "session_id": session_id,
+        "tasks": [
+            {"task_id": t["task_id"], "task_name": t["task_name"],
+             "phase": ph, "worktree_path": t.get("worktree_path")}
+            for ph, t in wave_tasks
+        ],
+        "recovered_tasks": recovered,
+        "merge_results": merge_results,
+    }))
 
     return {
         "message": (
-            f"Wave {wave_no} ready — {len(tasks)} task(s), {len(agents)} agents. "
-            "MANDATORY SEQUENCE PER TASK: "
-            "(1) enki_spawn dev → Task tool foreground → enki_report(role='dev', task_id=...). "
-            "(2) enki_spawn qa → Task tool foreground → enki_report(role='qa', task_id=...). "
-            "(3) enki_complete(task_id=...) — REQUIRED after dev+qa done, marks task done in DB. "
-            "Repeat steps 1-3 for each task in this wave. "
-            "After ALL tasks completed: enki_mail_inbox() → enki_wave() for next wave. "
-            "If enki_wave returns sprint_complete=True: call enki_phase(action='status')."
+            f"Wave {wave_no} — {len(wave_tasks)} task(s). "
+            + (f"{recovered} orphaned task(s) recovered. " if recovered else "")
+            + "ALWAYS use Task tool, NEVER Agent tool. "
+            "Follow exact phase sequence for each task below."
         ),
         "wave_number": wave_no,
-        "agents": agents,
-        "execution_mode": "foreground_sequential",
-        "instruction": wave_instruction,
+        "sprint_id": sprint_id,
+        "sprint_branch": sprint_branch,
+        "session_id": session_id,
+        "tasks": [
+            {
+                "task_id": t["task_id"],
+                "task_name": t["task_name"],
+                "phase": ph,
+                "description": t.get("description", ""),
+                "assigned_files": (
+                    json.loads(t.get("assigned_files") or "[]")
+                    if isinstance(t.get("assigned_files"), str)
+                    else (t.get("assigned_files") or [])
+                ),
+                "worktree_path": t.get("worktree_path"),
+                "branch_name": t.get("branch_name"),
+            }
+            for ph, t in wave_tasks
+        ],
+        "instructions": task_instructions,
+        "recovered_tasks": recovered,
+        "merge_results": merge_results,
     }
 
 
 def enki_complete(task_id: str, project: str | None = None) -> dict:
-    """Mark completion only if validator/QA/wave checks are satisfied."""
+    """Finalise a task. Gates: task_phase=complete, no open P1 bugs."""
     project = _resolve_project(project)
     active = _require_active_goal(project)
     if active.get("error"):
         return active
-    goal_id = active["goal_id"]
+    _ = active["goal_id"]
 
-    missing = []
-    validator_was_spawned = (
-        _has_agent_status(goal_id, f"validator:{task_id}", "in_progress") or
-        _has_agent_status(goal_id, f"validator:{task_id}", "completed")
-    )
-    if validator_was_spawned and not _has_agent_status(goal_id, f"validator:{task_id}", "completed"):
-        missing.append("validator completion for task")
+    task = get_task(project, task_id)
+    if not task:
+        return {"error": f"Task {task_id} not found."}
 
-    qa_ok = _has_agent_status(goal_id, f"qa:{task_id}", "completed")
-    if not qa_ok:
-        missing.append("QA pass for task")
+    # Gate 1: task_phase must be 'complete' (set by enki_report after reviewer passes)
+    task_phase = task.get("task_phase") or _get_task_phase(project, task_id)
+    if task_phase != "complete":
+        return {
+            "error": (
+                f"Task {task_id} is in phase '{task_phase}', not ready for completion. "
+                "Full sequence required: test_design → implementing → verifying → reviewing → complete. "
+                f"Current phase: {task_phase}."
+            )
+        }
 
-    with em_db(project) as conn:
-        open_bugs = conn.execute(
-            "SELECT COUNT(*) AS c FROM bugs WHERE task_id = ? AND status != 'closed'",
-            (task_id,),
-        ).fetchone()["c"]
-    if open_bugs:
-        missing.append("no unresolved QA failures")
-
-    if not _all_wave_tasks_completed(project):
-        missing.append("all wave tasks completed")
-
-    if missing:
-        return {"error": f"Cannot complete. Required: {', '.join(missing)}"}
+    # Gate 2: no open P1 bugs for this task
+    open_p1 = _get_open_bugs(project, task_id, severity="P1")
+    if open_p1:
+        bug_ids = [b.get("id", "?") for b in open_p1]
+        return {
+            "error": (
+                f"Task {task_id} has {len(open_p1)} open P1 bug(s): {bug_ids}. "
+                "Resolve all P1 bugs before completing."
+            )
+        }
 
     update_task_status(project, task_id, TaskStatus.COMPLETED)
+
+    # Register assigned files for diagram support
+    task_files = task.get("assigned_files") or []
+    if isinstance(task_files, str):
+        try:
+            task_files = json.loads(task_files)
+        except Exception:
+            task_files = []
+    if task_files:
+        with em_db(project) as conn:
+            for fp in task_files:
+                if fp:
+                    try:
+                        conn.execute(
+                            "INSERT OR REPLACE INTO file_registry "
+                            "(project_id, file_path, task_id, action) "
+                            "VALUES (?, ?, ?, 'modified')",
+                            (project, fp, task_id),
+                        )
+                    except Exception:
+                        pass
+
+    # Queue merge into sprint base branch
+    worktree_path = task.get("worktree_path")
+    sprint_branch_val = None
+    if worktree_path:
+        sprint = get_active_sprint(project)
+        _sid = sprint["sprint_id"] if sprint else task.get("sprint_id", "sprint-1")
+        sprint_branch_val = _get_sprint_base_branch(project, _sid)
+        _slug = _sid.replace(f"{_project_slug(project)}-", "")
+        _branch = f"{_project_slug(project)}/{_slug}/{task_id}"
+        with em_db(project) as conn:
+            conn.execute(
+                "INSERT INTO merge_queue "
+                "(task_id, project_id, branch_name, worktree_path, sprint_branch) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (task_id, project, _branch, worktree_path, sprint_branch_val),
+            )
+            conn.execute(
+                "UPDATE task_state SET session_id=NULL WHERE task_id=?",
+                (task_id,),
+            )
+
     return {
-        "message": (
-            f"Task {task_id} complete. "
-            "Call enki_wave() for next wave. "
-            "If all waves done: enki_phase(action='status') to confirm, then enki_wrap() to close session."
-        ),
-        "completion_status": "completed",
-        "summary": f"Task {task_id} completed with validator+QA gates satisfied.",
+        "status": "completed",
+        "task_id": task_id,
+        "merge_queued": worktree_path is not None,
+        "next": "enki_mail_inbox() then enki_wave() for next wave.",
     }
 
 
@@ -1786,21 +2654,32 @@ def enki_bug(
     description: str | None = None,
     severity: str = "medium",
     bug_id: str | None = None,
+    filed_by: str = "Human",
+    task_id: str | None = None,
     project: str | None = None,
 ) -> dict:
     """File or manage bugs."""
     project = _resolve_project(project)
     priority_map = {"critical": "P0", "high": "P1", "medium": "P2", "low": "P3"}
-    priority = priority_map.get(severity, "P2")
+    sev = (severity or "medium").upper()
+    priority = sev if sev in {"P0", "P1", "P2", "P3"} else priority_map.get((severity or "medium").lower(), "P2")
 
     if action == "file":
+        assigned_to = "architect" if filed_by == "infosec" else None
         internal_id = file_bug(
             project=project,
             title=title or "Untitled bug",
             description=description or "",
-            filed_by="Human",
+            filed_by=filed_by,
             priority=priority,
+            task_id=task_id,
         )
+        if assigned_to:
+            with em_db(project) as conn:
+                conn.execute(
+                    "UPDATE bugs SET assigned_to = ? WHERE id = ?",
+                    (assigned_to, internal_id),
+                )
         with em_db(project) as conn:
             row = conn.execute(
                 "SELECT bug_number FROM bugs WHERE id = ?",
@@ -1844,6 +2723,224 @@ def enki_status_update(project: str | None = None) -> dict:
 def enki_sprint_summary(sprint_id: str, project: str = ".") -> dict:
     """Get sprint summary."""
     return get_sprint_summary(project, sprint_id)
+
+
+def enki_sprint_close(project: str | None = None) -> dict:
+    """Run sprint-close pipeline: InfoSec + sprint Reviewer + test consolidation.
+
+    Must be called when enki_wave returns sprint_close_required=True.
+    Gates the advance to validating phase.
+    """
+    project = _resolve_project(project)
+    active = _require_active_goal(project)
+    if active.get("error"):
+        return active
+    _ = active["goal_id"]
+
+    sprint = get_active_sprint(project)
+    if not sprint:
+        return {"error": "No active sprint."}
+    sprint_id = sprint["sprint_id"]
+
+    # Get all files modified across sprint from file_registry
+    with em_db(project) as conn:
+        files = conn.execute(
+            "SELECT DISTINCT file_path FROM file_registry WHERE project_id=?",
+            (project,),
+        ).fetchall()
+    all_files = [r["file_path"] for r in files]
+
+    return {
+        "message": (
+            "Sprint close pipeline. Execute in order:\n\n"
+            "STEP 1 — Test Consolidation (Reviewer sprint mode):\n"
+            f"  enki_spawn('reviewer', '{sprint_id}-consolidation', "
+            f"{{'mode': 'sprint', 'sprint_id': '{sprint_id}', "
+            "  'task': 'consolidate tests from tests/tasks/* into tests/unit/ "
+            "and tests/integration/'}})\n"
+            "  → Task tool FOREGROUND → wait\n"
+            f"  enki_report(role='reviewer', task_id='{sprint_id}-consolidation', "
+            "summary=..., status='completed')\n\n"
+            "STEP 2 — Full Test Suite Run:\n"
+            "  Run all tests. All must pass before continuing.\n\n"
+            "STEP 3 — Sprint InfoSec (UNCONDITIONAL):\n"
+            f"  enki_spawn('infosec', '{sprint_id}-infosec', "
+            f"{{'mode': 'sprint', 'files': {all_files[:50]}, "
+            f"'sprint_id': '{sprint_id}'}})\n"
+            "  → Task tool FOREGROUND → wait\n"
+            f"  enki_report(role='infosec', task_id='{sprint_id}-infosec', "
+            "summary=..., status='completed', output={...infosec JSON...})\n"
+            "  → P0 bugs auto-filed and routed to Architect for scope triage\n"
+            "  → Check enki_mail_inbox() for security escalation threads\n\n"
+            "STEP 4 — Sprint Reviewer (cross-task consistency):\n"
+            f"  enki_spawn('reviewer', '{sprint_id}-sprint-review', "
+            f"{{'mode': 'sprint', 'sprint_id': '{sprint_id}', "
+            f"'files': {all_files[:50]}}})\n"
+            "  → Task tool FOREGROUND → wait\n"
+            f"  enki_report(role='reviewer', task_id='{sprint_id}-sprint-review', "
+            "summary=..., status='completed', output={...reviewer JSON...})\n\n"
+            "STEP 5 — Verify clean:\n"
+            "  All P0 bugs must be resolved or marked accepted-risk.\n"
+            "  All P1 bugs must be resolved.\n"
+            "  Then: enki_phase(action='advance', to='validating')"
+        ),
+        "sprint_id": sprint_id,
+        "files_in_scope": len(all_files),
+        "steps": ["test_consolidation", "full_test_run", "infosec", "sprint_review", "verify_clean"],
+    }
+
+
+def enki_diagram(type: str = "dag", project: str | None = None) -> dict:
+    """Generate Mermaid diagrams from project state on demand.
+    Types: dag (sprint task graph), files (file ownership),
+           pipeline (phase status), codebase (directory structure)
+    """
+    project = _resolve_project(project)
+    dtype = (type or "dag").strip().lower()
+    dispatch = {
+        "dag": _diagram_dag,
+        "files": _diagram_files,
+        "pipeline": _diagram_pipeline,
+        "codebase": _diagram_codebase,
+    }
+    fn = dispatch.get(dtype)
+    if not fn:
+        return {"error": f"Unknown type '{type}'. Use: dag, files, pipeline, codebase"}
+    return fn(project)
+
+
+def _diagram_dag(project: str) -> dict:
+    sprint = get_active_sprint(project)
+    if not sprint:
+        return {"error": "No active sprint."}
+    tasks = get_sprint_tasks(project, sprint["sprint_id"])
+    if not tasks:
+        return {"error": "No tasks in sprint."}
+    icons = {
+        "completed": "✅", "in_progress": "🔄", "pending": "⏳",
+        "failed": "❌", "blocked": "🚫", "hitl": "👤", "skipped": "⏭️",
+    }
+    lines = ["graph LR"]
+    for t in tasks:
+        icon = icons.get(t["status"], "⏳")
+        name = t["task_name"][:28].replace('"', "'")
+        lines.append(f'  {t["task_id"]}["{icon} {t["task_id"]}<br/>{name}"]')
+        if t["status"] == "completed":
+            lines.append(
+                f'  style {t["task_id"]} fill:#90EE90,stroke:#228B22,color:#000'
+            )
+        elif t["status"] == "in_progress":
+            lines.append(
+                f'  style {t["task_id"]} fill:#FFD700,stroke:#B8860B,color:#000'
+            )
+        elif t["status"] in ("failed", "hitl"):
+            lines.append(
+                f'  style {t["task_id"]} fill:#FFB6C1,stroke:#DC143C,color:#000'
+            )
+    name_to_id = {t["task_name"]: t["task_id"] for t in tasks}
+    for t in tasks:
+        for dep in (t.get("dependencies") or []):
+            lines.append(f"  {name_to_id.get(dep, dep)} --> {t['task_id']}")
+    return {
+        "message": f"Sprint DAG for {sprint['sprint_id']}.",
+        "diagram_type": "dag",
+        "sprint_id": sprint["sprint_id"],
+        "mermaid": "```mermaid\n" + "\n".join(lines) + "\n```",
+        "task_count": len(tasks),
+    }
+
+
+def _diagram_files(project: str) -> dict:
+    with em_db(project) as conn:
+        rows = conn.execute(
+            "SELECT fr.file_path, fr.task_id, fr.action, ts.task_name "
+            "FROM file_registry fr LEFT JOIN task_state ts ON fr.task_id=ts.task_id "
+            "WHERE fr.project_id=? ORDER BY fr.file_path", (project,)
+        ).fetchall()
+    if not rows:
+        return {
+            "error": "No files registered yet.",
+            "hint": "Files register as tasks complete via enki_complete.",
+        }
+    lines = ["graph LR"]
+    seen: set[str] = set()
+    for row in rows:
+        tid = row["task_id"]
+        fname = row["file_path"].split("/")[-1]
+        safe = row["file_path"].replace("/", "_").replace(".", "_").replace("-", "_")
+        act = "✏️" if row["action"] == "modified" else "🆕"
+        if tid not in seen:
+            lines.append(f'  {tid}["{tid}<br/>{(row["task_name"] or "")[:20]}"]')
+            seen.add(tid)
+        lines.append(f'  {tid} -->|"{act}"| {safe}["{fname}"]')
+    return {
+        "message": f"File map for {project}.",
+        "diagram_type": "files",
+        "mermaid": "```mermaid\n" + "\n".join(lines) + "\n```",
+        "file_count": len(rows),
+    }
+
+
+def _diagram_pipeline(project: str) -> dict:
+    active = _get_active_goal(project)
+    if not active:
+        return {"error": "No active goal."}
+    current = (active.get("phase") or "planning").lower()
+    phases = ["planning", "spec", "approved", "implement", "validating", "complete"]
+    lines = ["graph LR"]
+    for p in phases:
+        if p == current:
+            lines.append(f'  {p}["🎯 {p.upper()}"]')
+            lines.append(
+                f"  style {p} fill:#FFD700,stroke:#B8860B,color:#000,font-weight:bold"
+            )
+        elif phases.index(p) < phases.index(current):
+            lines.append(f'  {p}["✅ {p}"]')
+            lines.append(f"  style {p} fill:#90EE90,stroke:#228B22,color:#000")
+        else:
+            lines.append(f'  {p}["⏳ {p}"]')
+    for i in range(len(phases) - 1):
+        lines.append(f"  {phases[i]} --> {phases[i + 1]}")
+    return {
+        "message": f"Pipeline: {project} at {current}.",
+        "diagram_type": "pipeline",
+        "current_phase": current,
+        "mermaid": "```mermaid\n" + "\n".join(lines) + "\n```",
+    }
+
+
+def _diagram_codebase(project: str) -> dict:
+    with em_db(project) as conn:
+        rows = conn.execute(
+            "SELECT fr.file_path FROM file_registry fr "
+            "WHERE fr.project_id=? ORDER BY fr.file_path", (project,)
+        ).fetchall()
+    if not rows:
+        return {
+            "error": "No files registered yet.",
+            "hint": "Files populate as tasks complete.",
+        }
+    from collections import defaultdict
+    dirs: dict[str, list[str]] = defaultdict(list)
+    for row in rows:
+        parts = row["file_path"].split("/")
+        dirs[parts[0] if len(parts) > 1 else "root"].append(parts[-1])
+    lines = ["graph TD"]
+    for dname, files in sorted(dirs.items()):
+        safe_d = dname.replace("-", "_").replace(".", "_")
+        lines.append(f'  {safe_d}["{dname}/"]')
+        for fname in files[:8]:
+            safe_f = (dname + "_" + fname).replace(".", "_").replace("-", "_")
+            lines.append(f'  {safe_d} --> {safe_f}["{fname}"]')
+        if len(files) > 8:
+            lines.append(f'  {safe_d} --> more_{safe_d}["...+{len(files)-8} more"]')
+    return {
+        "message": f"Codebase: {project} ({len(rows)} files).",
+        "diagram_type": "codebase",
+        "mermaid": "```mermaid\n" + "\n".join(lines) + "\n```",
+        "total_files": len(rows),
+        "directories": sorted(dirs.keys()),
+    }
 
 
 # ── Memory Bridge ──
@@ -1916,6 +3013,43 @@ def _inject_external_spec_mode(project: str, role: str, context: dict) -> dict:
     enriched["external_spec_path"] = spec_path
     enriched["external_spec_contents"] = spec_text
     enriched["pm_output_requirement"] = "PM output in this mode: a PM Endorsement document, not a full spec rewrite."
+    return enriched
+
+
+def _inject_architect_context(project: str, role: str, context: dict) -> dict:
+    """Inject spec and codebase profile for Architect role."""
+    if role != "architect":
+        return context
+    enriched = dict(context)
+
+    # Inject spec content
+    project_path = _get_project_path(project)
+    if project_path:
+        for spec_name in ("spec-final.md", "spec-draft.md"):
+            spec_path = Path(project_path) / "docs" / spec_name
+            if spec_path.exists():
+                try:
+                    enriched["spec_content"] = spec_path.read_text()
+                    enriched["spec_path"] = str(spec_path)
+                    break
+                except Exception:
+                    pass
+
+    # Inject most recent researcher profile if exists
+    artifacts_dir = _goal_artifacts_dir(project)
+    if artifacts_dir.exists():
+        researcher_files = sorted(
+            artifacts_dir.glob("spawn-researcher-*.md"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        if researcher_files:
+            try:
+                enriched["codebase_profile"] = researcher_files[0].read_text()
+                enriched["codebase_profile_path"] = str(researcher_files[0])
+            except Exception:
+                pass
+
     return enriched
 
 
@@ -2010,6 +3144,33 @@ def _phase_missing_preconditions(
         if not _has_hitl_approval(project, "architect"):
             return "HITL approval record for stage 'architect'"
     elif target == "validating":
+        sprint = get_active_sprint(project)
+        if sprint:
+            sprint_id = sprint["sprint_id"]
+            # Check sprint close pipeline ran
+            if not _has_agent_status(goal_id, f"sprint_close:{sprint_id}", "completed"):
+                # Check if enki_sprint_close was called and InfoSec ran
+                infosec_done = _has_agent_status(
+                    goal_id, f"infosec:{sprint_id}-infosec", "completed"
+                )
+                if not infosec_done:
+                    return (
+                        "Sprint close pipeline not complete. "
+                        "Call enki_sprint_close() and complete all steps "
+                        "(InfoSec + sprint Reviewer) before advancing to validating."
+                    )
+            # Check no open P0 bugs across sprint
+            with em_db(project) as conn:
+                open_p0 = conn.execute(
+                    "SELECT COUNT(*) as c FROM bugs "
+                    "WHERE project_id=? AND status='open' AND priority='P0'",
+                    (project,),
+                ).fetchone()["c"]
+            if open_p0 > 0:
+                return (
+                    f"{open_p0} open P0 bug(s) must be resolved or marked "
+                    "accepted-risk before advancing to validating."
+                )
         if not _all_wave_tasks_completed(project):
             return "all waves completed"
     elif target == "complete":
@@ -2058,6 +3219,157 @@ def _get_agent_status(goal_id: str, agent_role: str) -> str | None:
             (goal_id, agent_role),
         ).fetchone()
     return row["status"] if row else None
+
+
+def _get_task_phase(project: str, task_id: str) -> str:
+    """Get current task_phase for a task. Defaults to test_design."""
+    with em_db(project) as conn:
+        row = conn.execute(
+            "SELECT task_phase FROM task_state WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()
+    if not row or not row["task_phase"]:
+        return "test_design"
+    return row["task_phase"]
+
+
+def _advance_task_phase(project: str, task_id: str, new_phase: str) -> bool:
+    """Advance task to new_phase. Returns True if advanced, False if invalid."""
+    if new_phase not in TASK_PHASES:
+        return False
+    with em_db(project) as conn:
+        conn.execute(
+            "UPDATE task_state SET task_phase = ? WHERE task_id = ?",
+            (new_phase, task_id),
+        )
+    return True
+
+
+def _has_agent_completed(goal_id: str, role_key: str) -> bool:
+    """Check if an agent has completed for a goal."""
+    return _has_agent_status(goal_id, role_key, "completed")
+
+
+def _auto_file_concerns(
+    project: str,
+    task_id: str,
+    role: str,
+    concerns: list[dict],
+    goal_id: str,
+) -> list[str]:
+    """Auto-file bugs from agent concerns array. Returns list of bug IDs filed."""
+    _ = goal_id
+    if not concerns:
+        return []
+
+    route_map = {
+        "infosec": "architect",
+        "validator": "dev",
+        "reviewer": "dev",
+        "qa": "dev",
+        "performance": "dev",
+    }
+    assigned_to = route_map.get(role, "dev")
+
+    severity_map = {
+        "infosec": "P0",
+        "validator": "P1",
+        "reviewer": "P1",
+        "qa": "P1",
+        "performance": "P2",
+    }
+    default_severity = severity_map.get(role, "P2")
+
+    filed_ids: list[str] = []
+    for concern in concerns:
+        if not isinstance(concern, dict):
+            continue
+        content = concern.get("content", str(concern))
+        severity = concern.get("severity", default_severity)
+        if role == "reviewer" and "P2" in content:
+            severity = "P2"
+
+        try:
+            result = enki_bug(
+                action="file",
+                title=f"[{role.upper()}] {content[:100]}",
+                description=content,
+                severity=severity,
+                filed_by=role,
+                task_id=task_id,
+                project=project,
+            )
+            if result.get("bug_id"):
+                filed_ids.append(result["bug_id"])
+
+            # Ensure assignment target is set as routing policy
+            if assigned_to and result.get("bug_id"):
+                resolved = resolve_bug_identifier(project, result["bug_id"])
+                if resolved:
+                    internal_id, _human_id = resolved
+                    with em_db(project) as conn:
+                        conn.execute(
+                            "UPDATE bugs SET assigned_to = ? WHERE id = ?",
+                            (assigned_to, internal_id),
+                        )
+
+            if role == "infosec" and result.get("bug_id"):
+                _mail_security_escalation(
+                    project, task_id, result["bug_id"], content
+                )
+        except Exception:
+            pass
+
+    return filed_ids
+
+
+def _mail_security_escalation(
+    project: str,
+    task_id: str,
+    bug_id: str,
+    description: str,
+) -> None:
+    """File a mail thread routing InfoSec bug to Architect via EM."""
+    try:
+        thread_id = create_thread(project, "security_review")
+        body = (
+            f"Bug {bug_id} filed for task {task_id}.\n\n"
+            f"Finding: {description}\n\n"
+            "Requires Architect scope triage:\n"
+            "  Scope A: Implementation fix only → assign to Dev\n"
+            "  Scope B: Design change required → escalate to HITL\n"
+            "  Scope C: Accepted risk → document in pm_decisions\n\n"
+            "Spawn Architect with this bug context to determine scope."
+        )
+        send(
+            project=project,
+            thread_id=thread_id,
+            from_agent="INFOSEC",
+            to_agent="EM",
+            subject=f"Security finding requires Architect scope decision: {bug_id}",
+            body=body,
+            importance="high",
+            task_id=task_id,
+        )
+    except Exception:
+        pass
+
+
+def _get_open_bugs(project: str, task_id: str, severity: str | None = None) -> list[dict]:
+    """Get open bugs for a task, optionally filtered by severity."""
+    with em_db(project) as conn:
+        if severity:
+            rows = conn.execute(
+                "SELECT * FROM bugs WHERE task_id = ? AND status = 'open' "
+                "AND priority = ?",
+                (task_id, severity),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM bugs WHERE task_id = ? AND status = 'open'",
+                (task_id,),
+            ).fetchall()
+    return [dict(r) for r in rows]
 
 
 def _has_any_scoped_agent_status(goal_id: str, role_key: str, status: str) -> bool:
@@ -2164,6 +3476,155 @@ def _has_validator_signoff(project: str, goal_id: str) -> bool:
             (project,),
         ).fetchone()
     return row is not None
+
+
+def _is_tmux_session_alive(session_id: str) -> bool:
+    """Check if a tmux session is still running."""
+    if not session_id:
+        return False
+    try:
+        r = subprocess.run(
+            ["tmux", "has-session", "-t", session_id],
+            capture_output=True, timeout=5,
+        )
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def _recover_dead_session_tasks(project: str) -> int:
+    """Reset in_progress tasks whose session is dead. Returns count reset."""
+    reset = 0
+    with em_db(project) as conn:
+        rows = conn.execute(
+            "SELECT task_id, session_id FROM task_state "
+            "WHERE status = 'in_progress' AND session_id IS NOT NULL"
+        ).fetchall()
+        for row in rows:
+            if not _is_tmux_session_alive(row["session_id"]):
+                conn.execute(
+                    "UPDATE task_state SET status='pending', session_id=NULL, "
+                    "started_at=NULL WHERE task_id=?",
+                    (row["task_id"],)
+                )
+                reset += 1
+    return reset
+
+
+def _get_sprint_base_branch(project: str, sprint_id: str) -> str:
+    """Get sprint base branch from project state. Falls back to current branch."""
+    try:
+        stored = read_project_state(project, f"sprint_base_{sprint_id}")
+    except Exception:
+        with em_db(project) as conn:
+            row = conn.execute(
+                "SELECT value FROM project_state WHERE key = ? LIMIT 1",
+                (f"sprint_base_{sprint_id}",),
+            ).fetchone()
+        stored = row["value"] if row else None
+    if stored:
+        return stored
+    project_path = _get_project_path(project)
+    if project_path:
+        r = subprocess.run(
+            ["git", "branch", "--show-current"],
+            capture_output=True, text=True, cwd=project_path, timeout=30,
+        )
+        branch = r.stdout.strip()
+        if branch and branch not in {"main", "master"}:
+            return branch
+    return "main"
+
+
+def _process_merge_queue(project: str) -> list[dict]:
+    """Process pending merges FIFO into sprint base. Returns results."""
+    project_path = _get_project_path(project)
+    if not project_path:
+        return []
+    results = []
+    with em_db(project) as conn:
+        queued = conn.execute(
+            "SELECT id, task_id, branch_name, worktree_path, sprint_branch "
+            "FROM merge_queue WHERE project_id=? AND status='queued' "
+            "ORDER BY queued_at ASC",
+            (project,)
+        ).fetchall()
+    for item in queued:
+        try:
+            subprocess.run(
+                ["git", "checkout", item["sprint_branch"]],
+                capture_output=True, text=True, cwd=project_path, timeout=30,
+            )
+            r = subprocess.run(
+                ["git", "merge", "--no-ff", item["branch_name"],
+                 "-m", f"Merge task {item['task_id']}"],
+                capture_output=True, text=True, timeout=60, cwd=project_path,
+            )
+            if r.returncode == 0:
+                with em_db(project) as conn:
+                    conn.execute(
+                        "UPDATE merge_queue SET status='merged', "
+                        "merged_at=datetime('now') WHERE id=?",
+                        (item["id"],)
+                    )
+                worktree = item["worktree_path"]
+                if worktree and Path(worktree).exists():
+                    subprocess.run(
+                        ["git", "worktree", "remove", "--force", worktree],
+                        capture_output=True, timeout=30, cwd=project_path,
+                    )
+                    subprocess.run(
+                        ["git", "branch", "-d", item["branch_name"]],
+                        capture_output=True, timeout=30, cwd=project_path,
+                    )
+                results.append({"task_id": item["task_id"], "status": "merged"})
+            else:
+                conflict = (r.stdout + r.stderr)[:2000]
+                with em_db(project) as conn:
+                    conn.execute(
+                        "UPDATE merge_queue SET status='conflict', "
+                        "conflict_files=? WHERE id=?",
+                        (conflict, item["id"])
+                    )
+                    conn.execute(
+                        "UPDATE task_state SET status='pending', session_id=NULL, "
+                        "worktree_path=NULL, started_at=NULL, agent_outputs=? "
+                        "WHERE task_id=?",
+                        (f"Merge conflict: {conflict[:500]}", item["task_id"])
+                    )
+                subprocess.run(
+                    ["git", "merge", "--abort"],
+                    capture_output=True, timeout=30, cwd=project_path,
+                )
+                results.append({"task_id": item["task_id"], "status": "conflict"})
+        except Exception as e:
+            results.append({"task_id": item["task_id"], "status": "error", "error": str(e)})
+    return results
+
+
+def _create_task_worktree(
+    project_path: str,
+    task_id: str,
+    branch_name: str,
+    sprint_branch: str,
+) -> str | None:
+    """Create git worktree for a task branched from sprint base. Returns path or None."""
+    worktree_path = str(Path(project_path) / ".worktrees" / task_id)
+    try:
+        r = subprocess.run(
+            ["git", "worktree", "add", worktree_path,
+             "-b", branch_name, sprint_branch],
+            capture_output=True, text=True, timeout=30, cwd=project_path,
+        )
+        if r.returncode == 0:
+            return worktree_path
+        r2 = subprocess.run(
+            ["git", "worktree", "add", worktree_path, branch_name],
+            capture_output=True, text=True, timeout=30, cwd=project_path,
+        )
+        return worktree_path if r2.returncode == 0 else None
+    except Exception:
+        return None
 
 
 def _goal_artifacts_dir(project: str) -> Path:

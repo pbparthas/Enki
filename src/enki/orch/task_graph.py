@@ -127,6 +127,7 @@ def create_task(
     dependencies: list[str] | None = None,
     assigned_files: list[str] | None = None,
     work_type: str | None = None,
+    description: str | None = None,
 ) -> str:
     """Create a task in the DAG. Returns task_id."""
     with em_db(project) as conn:
@@ -144,13 +145,14 @@ def create_task(
                 conn.execute(
                     "INSERT INTO task_state "
                     "(task_id, project_id, sprint_id, task_name, tier, "
-                    "dependencies, assigned_files, work_type) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    "dependencies, assigned_files, work_type, description) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         task_id, project, sprint_id, task_name, tier,
                         json.dumps(dependencies or []),
                         json.dumps(assigned_files or []),
                         work_type,
+                        description or "",
                     ),
                 )
                 break
@@ -486,6 +488,17 @@ def insert_dependency_for_overlap(
             added.append((t2_id, t1_id))
 
     return added
+
+
+def get_tasks_by_phase(project: str, sprint_id: str, phase: str) -> list[dict]:
+    """Get all tasks in a specific task_phase for a sprint."""
+    with em_db(project) as conn:
+        rows = conn.execute(
+            "SELECT * FROM task_state WHERE sprint_id = ? AND task_phase = ? "
+            "AND status != 'completed'",
+            (sprint_id, phase),
+        ).fetchall()
+    return [dict(r) for r in rows]
 
 
 # ── Cycle Detection & Recovery ──

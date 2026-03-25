@@ -12,6 +12,13 @@ set -euo pipefail
 INPUT=$(cat)
 TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name // empty')
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
+
+# Write session ID for MCP tools to read
+SESSION_FILE="$HOME/.enki/current_session_id"
+if [[ -n "$SESSION_ID" ]]; then
+    echo "$SESSION_ID" > "$SESSION_FILE" 2>/dev/null || true
+fi
+
 PROJECT=$(echo "$INPUT" | jq -r '.project // empty')
 
 if [[ -z "$SESSION_ID" ]]; then

@@ -199,6 +199,7 @@ async def list_tools() -> list[Tool]:
                     "task_id": {"type": "string"},
                     "summary": {"type": "string"},
                     "status": {"type": "string", "enum": ["completed", "failed"], "default": "completed"},
+                    "output": {"type": "object", "description": "Optional structured agent output incl. concerns"},
                     "project": {"type": "string", "default": "default"},
                 },
                 "required": ["role", "task_id", "summary"],
@@ -357,6 +358,36 @@ async def list_tools() -> list[Tool]:
                     "project": {"type": "string", "default": "default"},
                 },
                 "required": ["sprint_id"],
+            },
+        ),
+        Tool(
+            name="enki_sprint_close",
+            description=(
+                "Run sprint close pipeline (test consolidation, full test run, InfoSec, sprint Reviewer) "
+                "before advancing implement -> validating."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "project": {"type": "string", "default": "default"},
+                },
+            },
+        ),
+        Tool(
+            name="enki_diagram",
+            description=(
+                "Generate Mermaid diagrams from project state: dag, files, pipeline, or codebase."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "type": {
+                        "type": "string",
+                        "enum": ["dag", "files", "pipeline", "codebase"],
+                        "default": "dag",
+                    },
+                    "project": {"type": "string", "default": "default"},
+                },
             },
         ),
         Tool(
@@ -566,6 +597,7 @@ def _handle_report(args: dict) -> str:
         task_id=args["task_id"],
         summary=args["summary"],
         status=args.get("status", "completed"),
+        output=args.get("output"),
         project=args.get("project"),
     )
     return json.dumps(result, indent=2)
@@ -671,6 +703,23 @@ def _handle_sprint_summary(args: dict) -> str:
     return json.dumps(result, indent=2)
 
 
+def _handle_sprint_close(args: dict) -> str:
+    from .mcp.orch_tools import enki_sprint_close
+    result = enki_sprint_close(
+        project=args.get("project", "default"),
+    )
+    return json.dumps(result, indent=2)
+
+
+def _handle_diagram(args: dict) -> str:
+    from .mcp.orch_tools import enki_diagram
+    result = enki_diagram(
+        type=args.get("type", "dag"),
+        project=args.get("project", "default"),
+    )
+    return json.dumps(result, indent=2)
+
+
 def _handle_status_update(args: dict) -> str:
     from .mcp.orch_tools import enki_status_update
     result = enki_status_update(
@@ -759,6 +808,8 @@ TOOL_HANDLERS = {
     "enki_escalate": _handle_escalate,
     "enki_mark_blocked": _handle_mark_blocked,
     "enki_sprint_summary": _handle_sprint_summary,
+    "enki_sprint_close": _handle_sprint_close,
+    "enki_diagram": _handle_diagram,
     "enki_status_update": _handle_status_update,
     "enki_mail_inbox": _handle_mail_inbox,
     "enki_mail_thread": _handle_mail_thread,
@@ -812,6 +863,14 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         elif name == "enki_sprint_summary":
             from .mcp.orch_tools import enki_sprint_summary
             result = enki_sprint_summary(**args)
+            return [TextContent(type="text", text=json.dumps(result, indent=2))]
+        elif name == "enki_sprint_close":
+            from .mcp.orch_tools import enki_sprint_close
+            result = enki_sprint_close(**args)
+            return [TextContent(type="text", text=json.dumps(result, indent=2))]
+        elif name == "enki_diagram":
+            from .mcp.orch_tools import enki_diagram
+            result = enki_diagram(**args)
             return [TextContent(type="text", text=json.dumps(result, indent=2))]
         elif name == "enki_status_update":
             from .mcp.orch_tools import enki_status_update

@@ -500,7 +500,7 @@ def test_enki_spawn_requires_goal_and_returns_summary(tmp_path):
         with uru_db() as conn:
             row = conn.execute(
                 "SELECT status FROM agent_status WHERE goal_id = ? AND agent_role = ?",
-                (goal["goal_id"], "dev"),
+                (goal["goal_id"], f"dev:{task_id}"),
             ).fetchone()
         assert row["status"] == "in_progress"
     db_mod._em_initialized = old_init
@@ -593,7 +593,7 @@ def test_enki_report_flow(tmp_path):
 
         no_spawn = enki_report(role="dev", task_id=task_id, summary="done", project=PROJECT)
         assert "error" in no_spawn
-        assert "in_progress" in no_spawn["error"]
+        assert "not spawned" in no_spawn["error"]
 
         enki_spawn(role="dev", task_id=task_id, context={}, project=PROJECT)
         ok = enki_report(role="dev", task_id=task_id, summary="Implemented endpoint", project=PROJECT)
@@ -603,7 +603,7 @@ def test_enki_report_flow(tmp_path):
         with uru_db() as conn:
             row = conn.execute(
                 "SELECT status FROM agent_status WHERE goal_id = ? AND agent_role = ?",
-                (goal["goal_id"], "dev"),
+                (goal["goal_id"], f"dev:{task_id}"),
             ).fetchone()
         assert row["status"] == "completed"
 
@@ -728,19 +728,15 @@ def test_enki_wave_preconditions_and_returns_spawn_list(tmp_path):
         _insert_hitl_spec_approval(PROJECT)
         result = enki_wave(project=PROJECT)
         assert "wave_number" in result
-        assert "instruction" in result
-        assert result["execution_mode"] == "foreground_sequential"
-        assert "sequentially in foreground" in result["instruction"]
-        roles = [a["role"] for a in result["agents"]]
-        assert "dev" in roles
-        assert "qa" in roles
-        assert all("context_artifact" in a for a in result["agents"])
-        assert all("prompt_path" in a for a in result["agents"])
+        assert "instructions" in result
+        assert result["sprint_id"] == sprint
+        assert result["tasks"]
+        assert all("phase" in t for t in result["tasks"])
         wave_report = root / "artifacts" / PROJECT / f"wave-{result['wave_number']}.md"
         assert wave_report.exists()
         report_text = wave_report.read_text()
-        assert '"execution_mode": "foreground_sequential"' in report_text
-        assert "Do not background agents" in report_text
+        assert '"session_id"' in report_text
+        assert '"tasks"' in report_text
     db_mod._em_initialized = old_init
 
 
@@ -806,7 +802,8 @@ def test_enki_phase_status_implement_with_wave_in_progress(tmp_path):
         goal_id = read_project_state(PROJECT, "goal_id")
         with uru_db() as conn:
             conn.execute(
-                "INSERT INTO agent_status (goal_id, agent_role, status) VALUES (?, 'dev', 'in_progress')",
+                "INSERT INTO agent_status (goal_id, agent_role, status) "
+                "VALUES (?, 'dev:test-task-1', 'in_progress')",
                 (goal_id,),
             )
         status = enki_phase("status", project=PROJECT)
@@ -912,7 +909,7 @@ def test_enki_complete_preconditions_and_success(tmp_path):
     with _patch_env(root), patch("enki.mcp.orch_tools.ENKI_ROOT", root):
         from enki.db import init_all
         from enki.mcp.orch_tools import enki_complete, enki_goal
-        from enki.orch.task_graph import TaskStatus, create_sprint, create_task, update_task_status
+        from enki.orch.task_graph import create_sprint, create_task
 
         init_all()
         goal = enki_goal("add endpoint", project=PROJECT)
@@ -921,15 +918,17 @@ def test_enki_complete_preconditions_and_success(tmp_path):
 
         blocked = enki_complete(task_id=task_id, project=PROJECT)
         assert "error" in blocked
-        assert "Cannot complete. Required:" in blocked["error"]
+        assert "not ready for completion" in blocked["error"]
 
-        _insert_agent_status(goal["goal_id"], f"validator:{task_id}", "completed")
-        _insert_agent_status(goal["goal_id"], f"qa:{task_id}", "completed")
-        update_task_status(PROJECT, task_id, TaskStatus.COMPLETED)
+        with db_mod.em_db(PROJECT) as conn:
+            conn.execute(
+                "UPDATE task_state SET task_phase = 'complete' WHERE task_id = ?",
+                (task_id,),
+            )
 
         result = enki_complete(task_id=task_id, project=PROJECT)
-        assert result["completion_status"] == "completed"
-        assert "summary" in result
+        assert result["status"] == "completed"
+        assert result["task_id"] == task_id
     db_mod._em_initialized = old_init
 
 
