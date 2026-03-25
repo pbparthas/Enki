@@ -51,3 +51,4 @@ wisdom.db
 abzu.db
 em.db
 *.db-journal
+.worktrees/
