@@ -340,13 +340,19 @@ def _ensure_pipeline_md(enki_root: Path) -> None:
     pipeline_path = enki_root / "PIPELINE.md"
     implement_section = (
         "### implement\n"
-        "- Call enki_wave(project) to get next wave\n"
-        "- Execute Dev agent in FOREGROUND via Task tool — wait for completion\n"
-        "- Call enki_report(role='dev', task_id=..., status='completed')\n"
-        "- Execute QA agent in FOREGROUND via Task tool — wait for completion\n"
-        "- Call enki_report(role='qa', task_id=..., status='completed')\n"
-        "- Repeat until enki_wave returns no more tasks\n"
+        "- Call enki_wave(project) to get next wave tasks and agents\n"
+        "- For EACH task in the wave:\n"
+        "  1. Run Dev agent via Task tool foreground — wait for completion\n"
+        "  2. Call enki_report(role='dev', task_id=..., status='completed')\n"
+        "  3. Run QA agent via Task tool foreground — wait for completion\n"
+        "  4. Call enki_report(role='qa', task_id=..., status='completed')\n"
+        "  5. Call enki_complete(task_id=...) — MANDATORY, marks task done\n"
+        "- After ALL tasks in wave have enki_complete called:\n"
+        "  - Call enki_mail_inbox() to read agent messages\n"
+        "  - Call enki_wave() for next wave\n"
+        "- When enki_wave returns sprint_complete=True: call enki_phase(action='status')\n"
         "- NEVER background agents — foreground only for permission inheritance\n"
+        "- NEVER call enki_wave() before enki_complete() for each task\n"
     )
     if not pipeline_path.exists():
         pipeline_path.write_text("# Enki Pipeline — Operational Reference\n\n" + implement_section)
@@ -1380,7 +1386,6 @@ def enki_spawn(
         artifact = _goal_artifacts_dir(project) / f"spawn-{role_key}-{task_id}.md"
         artifact.write_text(_format_md(spawn_payload))
 
-        _upsert_agent_status(goal_id, role_key, "in_progress")
         _upsert_agent_status(goal_id, f"{role_key}:{task_id}", "in_progress")
         return {
             "message": (
@@ -1430,10 +1435,9 @@ def enki_report(
     if normalized_status not in {"completed", "failed"}:
         return {"error": "status must be 'completed' or 'failed'"}
 
-    if not _has_agent_status(goal_id, f"{role_key}:{task_id}", "in_progress") and not _has_agent_status(goal_id, role_key, "in_progress"):
-        return {"error": f"Cannot report for {role_key}. Required: agent_status is in_progress."}
+    if not _has_agent_status(goal_id, f"{role_key}:{task_id}", "in_progress"):
+        return {"error": f"Cannot report for {role_key}:{task_id}. Agent was not spawned or already reported."}
 
-    _upsert_agent_status(goal_id, role_key, normalized_status)
     _upsert_agent_status(goal_id, f"{role_key}:{task_id}", normalized_status)
 
     artifact = _goal_artifacts_dir(project) / f"{role_key}-{task_id}.md"
@@ -1458,8 +1462,10 @@ def enki_report(
         "message": (
             f"Agent {role_key} recorded as {normalized_status} for task {task_id}. "
             + (
-                "Run next agent in sequence, then enki_report. "
-                "After all wave agents reported: enki_mail_inbox() then enki_wave()."
+                f"Run next agent in sequence via Task tool, then enki_report. "
+                f"After dev AND qa both reported completed for task {task_id}: "
+                f"call enki_complete(task_id='{task_id}'). "
+                f"After ALL tasks in this wave have enki_complete called: enki_mail_inbox() then enki_wave() for next wave."
                 if normalized_status == "completed"
                 else
                 "Agent failed. Call enki_escalate(task_id, reason) immediately — never take over agent work."
@@ -1487,7 +1493,23 @@ def enki_wave(project: str | None = None) -> dict:
     sprint_id = sprint["sprint_id"]
     tasks = get_next_wave(project, sprint_id)
     if not tasks:
-        return {"error": "No tasks ready for next wave."}
+        if is_sprint_complete(project, sprint_id):
+            return {
+                "message": (
+                    "All sprint tasks completed. Sprint done. "
+                    "Call enki_phase(action='status') to confirm, then enki_phase(action='advance', to='validating')."
+                ),
+                "sprint_complete": True,
+                "sprint_id": sprint_id,
+            }
+        return {
+            "message": "No tasks ready. Some tasks may be in_progress or blocked. Check enki_phase(action='status').",
+            "sprint_complete": False,
+            "sprint_id": sprint_id,
+        }
+
+    for task in tasks:
+        update_task_status(project, task["task_id"], TaskStatus.IN_PROGRESS)
 
     wave_no = _next_wave_number(project)
     agents = []
@@ -1532,11 +1554,14 @@ def enki_wave(project: str | None = None) -> dict:
 
     return {
         "message": (
-            f"Wave {wave_no} ready with {len(agents)} agents. "
-            "Execute sequentially — Dev first, then QA. Never parallel. Never Background. "
-            "For each agent: read prompt_path verbatim → read context_artifact in chunks → Task tool foreground → enki_report. "
-            "After all agents reported: call enki_mail_inbox() to read agent messages. "
-            "Then call enki_wave() for next wave, or enki_complete(task_id) if this is the final wave."
+            f"Wave {wave_no} ready — {len(tasks)} task(s), {len(agents)} agents. "
+            "MANDATORY SEQUENCE PER TASK: "
+            "(1) enki_spawn dev → Task tool foreground → enki_report(role='dev', task_id=...). "
+            "(2) enki_spawn qa → Task tool foreground → enki_report(role='qa', task_id=...). "
+            "(3) enki_complete(task_id=...) — REQUIRED after dev+qa done, marks task done in DB. "
+            "Repeat steps 1-3 for each task in this wave. "
+            "After ALL tasks completed: enki_mail_inbox() → enki_wave() for next wave. "
+            "If enki_wave returns sprint_complete=True: call enki_phase(action='status')."
         ),
         "wave_number": wave_no,
         "agents": agents,
@@ -1554,7 +1579,11 @@ def enki_complete(task_id: str, project: str | None = None) -> dict:
     goal_id = active["goal_id"]
 
     missing = []
-    if not _has_agent_status(goal_id, f"validator:{task_id}", "completed"):
+    validator_was_spawned = (
+        _has_agent_status(goal_id, f"validator:{task_id}", "in_progress") or
+        _has_agent_status(goal_id, f"validator:{task_id}", "completed")
+    )
+    if validator_was_spawned and not _has_agent_status(goal_id, f"validator:{task_id}", "completed"):
         missing.append("validator completion for task")
 
     qa_ok = _has_agent_status(goal_id, f"qa:{task_id}", "completed")
@@ -1952,8 +1981,10 @@ def _phase_missing_preconditions(
 ) -> str | None:
     if target == "spec":
         if current == "planning" and tier != "minimal":
-            igi_status = _get_agent_status(goal_id, "igi")
-            if igi_status != "completed":
+            igi_completed = _has_agent_status(goal_id, "igi", "completed") or _has_any_scoped_agent_status(
+                goal_id, "igi", "completed"
+            )
+            if not igi_completed:
                 return (
                     "BLOCKED. Igi (challenge review) not completed.\n\n"
                     "Spawn Igi for independent challenge review:\n"
@@ -1971,7 +2002,10 @@ def _phase_missing_preconditions(
         if not _has_hitl_approval(project, "spec"):
             return "HITL approval record for stage 'spec'"
     elif target == "implement":
-        if not _has_agent_status(goal_id, "architect", "completed"):
+        architect_completed = _has_agent_status(goal_id, "architect", "completed") or _has_any_scoped_agent_status(
+            goal_id, "architect", "completed"
+        )
+        if not architect_completed:
             return "Architect agent completed"
         if not _has_hitl_approval(project, "architect"):
             return "HITL approval record for stage 'architect'"
@@ -2024,6 +2058,16 @@ def _get_agent_status(goal_id: str, agent_role: str) -> str | None:
             (goal_id, agent_role),
         ).fetchone()
     return row["status"] if row else None
+
+
+def _has_any_scoped_agent_status(goal_id: str, role_key: str, status: str) -> bool:
+    with uru_db() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM agent_status WHERE goal_id = ? AND status = ? "
+            "AND agent_role LIKE ? LIMIT 1",
+            (goal_id, status, f"{role_key}:%"),
+        ).fetchone()
+    return row is not None
 
 
 def _count_challenge_notes(project: str, goal_started_at: str | None) -> int:
@@ -2108,7 +2152,9 @@ def _all_wave_tasks_completed(project: str) -> bool:
 
 
 def _has_validator_signoff(project: str, goal_id: str) -> bool:
-    if _has_agent_status(goal_id, "validator", "completed"):
+    if _has_agent_status(goal_id, "validator", "completed") or _has_any_scoped_agent_status(
+        goal_id, "validator", "completed"
+    ):
         return True
     with em_db(project) as conn:
         row = conn.execute(
@@ -2219,15 +2265,15 @@ def _wave_status(project: str) -> str:
                 row = conn.execute(
                     "SELECT COUNT(*) AS c FROM agent_status "
                     "WHERE goal_id = ? AND status = 'in_progress' "
-                    "AND (agent_role = 'dev' OR agent_role = 'qa' "
-                    "OR agent_role LIKE 'dev:%' OR agent_role LIKE 'qa:%')",
+                    "AND (agent_role LIKE 'dev:%' OR agent_role LIKE 'qa:%')",
                     (goal_id,),
                 ).fetchone()
             if row and int(row["c"] or 0) > 0:
                 return f"Wave {active_wave} in progress"
+            return f"Wave {active_wave} ready — agents not yet running"
     except Exception:
         pass
-    return f"Wave {active_wave} in progress"
+    return f"Wave {active_wave} status unknown"
 
 
 def _format_md(payload: dict) -> str:
