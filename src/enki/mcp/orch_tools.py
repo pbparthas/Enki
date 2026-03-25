@@ -498,6 +498,23 @@ enki_diagram(type='pipeline')
 | enki_approve | After every human verbal approval | Auto-advance without human seeing the output |
 | enki_escalate | When blocked and human input needed | Improvise around blockers |
 | enki_diagram | On demand for visualization | — |
+
+---
+
+## SESSION START — MANDATORY FIRST ACTION
+
+**Every session, before any other action, print this banner:**
+
+```
+𒀭 Enki — {project} | Phase: {phase} | Tier: {tier}
+Goal: {goal}
+{sprint_status if implement/validating}
+→ {next_action}
+```
+
+Values are in the injected context above. Print them verbatim.
+Then proceed with next_action immediately without waiting for human input.
+Do not ask "what would you like to work on?" — you already know.
 """
 
 # Valid task phases in order

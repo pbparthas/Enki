@@ -4,6 +4,33 @@ from pathlib import Path
 from enki.db import ENKI_ROOT
 
 
+def _split_h2_sections(content: str) -> list[tuple[str, str]]:
+    sections: list[tuple[str, str]] = []
+    current_header = ""
+    current_lines: list[str] = []
+    for line in content.split("\n"):
+        if line.startswith("## "):
+            if current_lines:
+                sections.append((current_header, "\n".join(current_lines)))
+            current_header = line.strip()
+            current_lines = [line]
+        else:
+            current_lines.append(line)
+    if current_lines:
+        sections.append((current_header, "\n".join(current_lines)))
+    return sections
+
+
+def _truncate_text(text: str, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+    clipped = text[:max_chars].rstrip()
+    last_break = max(clipped.rfind("\n"), clipped.rfind(". "))
+    if last_break > 0:
+        clipped = clipped[:last_break].rstrip()
+    return f"{clipped}\n\n[truncated for session context budget]"
+
+
 def _get_em_db_path(project: str) -> Path | None:
     """Return em.db path for a project if it exists."""
     try:
@@ -103,8 +130,186 @@ def generate_new_project_block() -> str:
     ])
 
 
+def get_playbook_section(phase: str) -> str:
+    """Extract only the relevant phase section from PLAYBOOK.md.
+
+    Always includes: SESSION START, COMMON MISTAKES, TOOL QUICK REFERENCE.
+    Phase-specific: only the current phase section.
+    Saves ~1,600 tokens vs injecting full PLAYBOOK.
+    """
+    playbook_path = ENKI_ROOT / "PLAYBOOK.md"
+    if not playbook_path.exists():
+        # Fallback to PIPELINE.md
+        pipeline_path = ENKI_ROOT / "PIPELINE.md"
+        if pipeline_path.exists():
+            return pipeline_path.read_text().strip()
+        return ""
+
+    content = playbook_path.read_text()
+    phase_key = (phase or "none").strip().lower()
+
+    # Sections always included regardless of phase
+    always_include = {
+        "## SESSION START",
+        "## COMMON MISTAKES",
+        "## TOOL QUICK REFERENCE",
+        "## HOW TO START ANY SESSION",
+    }
+
+    sections = _split_h2_sections(content)
+
+    # Target phase header
+    phase_header = f"## PHASE: {phase_key}"
+
+    # Prefer latest copy when duplicate sections exist.
+    selected: dict[str, str] = {}
+    for header, body in sections:
+        header_upper = header.upper()
+        is_always = any(h.upper() in header_upper for h in always_include)
+        is_phase = header.upper() == phase_header.upper()
+        if is_always or is_phase:
+            selected[header_upper] = body.strip()
+
+    ordered_headers = [
+        "## HOW TO START ANY SESSION",
+        "## SESSION START — MANDATORY FIRST ACTION",
+        phase_header.upper(),
+        "## TOOL QUICK REFERENCE",
+        "## COMMON MISTAKES AND FIXES",
+    ]
+    result: list[str] = []
+    for wanted in ordered_headers:
+        match = next((v for k, v in selected.items() if wanted in k), "")
+        if match:
+            result.append(match)
+
+    combined = "\n\n".join(result)
+    if phase_key in {"implement", "validating"}:
+        return _truncate_text(combined, 2200)
+    return combined
+
+
+def get_skill_essentials() -> str:
+    """Extract only tool reference tables and enum values from SKILL.md.
+
+    Strips the Pipeline Sequence section (duplicated in PLAYBOOK.md).
+    Saves ~500 tokens vs injecting full SKILL.md.
+    """
+    skill_path = ENKI_ROOT / "SKILL.md"
+    if not skill_path.exists():
+        return ""
+    content = skill_path.read_text()
+    sections = _split_h2_sections(content)
+
+    essentials: list[str] = []
+    for header, body in sections:
+        header_upper = header.upper()
+        if "## COMPLETE MCP TOOL REFERENCE" in header_upper:
+            lines = body.split("\n")
+            keep: list[str] = []
+            in_orch = False
+            for line in lines:
+                if line.startswith("### "):
+                    in_orch = line.strip().upper().startswith("### ORCHESTRATION TOOLS")
+                if in_orch:
+                    keep.append(line)
+            if keep:
+                essentials.append("\n".join(keep).strip())
+        elif "## VALID ENUM VALUES" in header_upper:
+            essentials.append(body.strip())
+
+    if not essentials:
+        cutoff_markers = [
+            "## Pipeline Sequence",
+            "## Agent Execution Mechanics",
+        ]
+        cutoff = len(content)
+        for marker in cutoff_markers:
+            pos = content.find(marker)
+            if pos > 0 and pos < cutoff:
+                cutoff = pos
+        return _truncate_text(content[:cutoff].strip(), 700)
+
+    return _truncate_text("\n\n".join(essentials), 700)
+
+
+def get_persona(phase: str) -> str:
+    """Return full or compact persona based on phase.
+
+    Full persona for planning/spec/approved — personality matters.
+    Compact persona for implement/validating/complete — CC is mostly calling tools.
+    Saves ~420 tokens per implement-phase session.
+    """
+    phase_key = (phase or "none").strip().lower()
+    high_interaction_phases = {"planning", "spec", "approved"}
+
+    # Try compact persona first for execution phases
+    if phase_key not in high_interaction_phases:
+        compact_path = ENKI_ROOT / "persona" / "PERSONA_COMPACT.md"
+        if compact_path.exists():
+            compact = compact_path.read_text().strip()
+            if compact:
+                return compact
+
+    # Full persona for planning phases or if compact doesn't exist
+    full_path = ENKI_ROOT / "persona" / "PERSONA.md"
+    if full_path.exists():
+        return full_path.read_text().strip()
+    return ""
+
+
+def get_abzu_memory_cached(project: str, goal: str, tier: str) -> str:
+    """Run Abzu memory injection with 2-hour cache.
+
+    During long sprints the memory results are stable.
+    Cache avoids re-running FTS5 search on every session restart.
+    """
+    import hashlib
+    import time
+
+    cache_dir = ENKI_ROOT / "cache"
+    cache_dir.mkdir(exist_ok=True)
+    # Use project + goal hash as cache key
+    cache_key = hashlib.md5(f"{project}:{goal}".encode()).hexdigest()[:8]
+    cache_path = cache_dir / f"abzu-{project}-{cache_key}.txt"
+
+    # Use cache if less than 2 hours old
+    if cache_path.exists():
+        age = time.time() - cache_path.stat().st_mtime
+        if age < 7200:
+            try:
+                return cache_path.read_text().strip()
+            except Exception:
+                pass
+
+    # Re-run and cache
+    try:
+        from enki.memory.abzu import inject_session_start
+        result = (inject_session_start(project, goal, tier) or "").strip()
+        if result:
+            try:
+                cache_path.write_text(result)
+            except Exception:
+                pass
+        return result
+    except Exception:
+        return ""
+
+
 def build_session_start_context(project: str, goal: str, tier: str, phase: str) -> str:
-    """Assemble session-start context in strict operational order."""
+    """Assemble phase-aware session-start context.
+
+    Token budget by phase:
+    - Banner:          ~100 tokens  (always)
+    - Sprint status:   ~80 tokens   (implement/validating only)
+    - PLAYBOOK section: ~400 tokens (phase-relevant section only)
+    - Persona:         ~80 tokens   (compact for implement/validating)
+                      ~500 tokens  (full for planning/spec/approved)
+    - Uru state:       ~50 tokens   (always)
+    - Abzu memory:     ~200 tokens  (cached, always)
+    Total implement:   ~910 tokens  (vs ~3,500 before)
+    Total planning:    ~1,330 tokens (vs ~3,500 before)
+    """
     parts: list[str] = []
 
     # 1) Orientation banner
@@ -119,21 +324,15 @@ def build_session_start_context(project: str, goal: str, tier: str, phase: str) 
         if sprint_status:
             parts.append(sprint_status)
 
-    # 3) PLAYBOOK (operational reference)
-    playbook_path = ENKI_ROOT / "PLAYBOOK.md"
-    pipeline_path = ENKI_ROOT / "PIPELINE.md"
-    ref_path = playbook_path if playbook_path.exists() else pipeline_path
-    if ref_path.exists():
-        text = ref_path.read_text().strip()
-        if text:
-            parts.append(text)
+    # 3) Phase-relevant PLAYBOOK section (not full file)
+    playbook_section = get_playbook_section(phase)
+    if playbook_section:
+        parts.append(playbook_section)
 
-    # 4) Persona
-    persona_path = ENKI_ROOT / "persona" / "PERSONA.md"
-    if persona_path.exists():
-        persona = persona_path.read_text().strip()
-        if persona:
-            parts.append(persona)
+    # 4) Phase-appropriate persona
+    persona = get_persona(phase)
+    if persona:
+        parts.append(persona)
 
     # 5) Uru enforcement state
     try:
@@ -144,13 +343,9 @@ def build_session_start_context(project: str, goal: str, tier: str, phase: str) 
     except Exception:
         pass
 
-    # 6) Abzu memory
-    try:
-        from enki.memory.abzu import inject_session_start
-        memory_ctx = (inject_session_start(project, goal, tier) or "").strip()
-        if memory_ctx:
-            parts.append(memory_ctx)
-    except Exception:
-        pass
+    # 6) Abzu memory (cached)
+    memory_ctx = get_abzu_memory_cached(project, goal, tier)
+    if memory_ctx:
+        parts.append(memory_ctx)
 
     return "\n\n".join(parts).strip()
