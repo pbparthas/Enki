@@ -38,6 +38,7 @@ htmlcov/
 
 # Enki data (user-specific)
 .enki/
+.enki/cache/
 
 # OS
 .DS_Store
