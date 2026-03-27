@@ -9,6 +9,7 @@ from pathlib import Path
 
 EXPECTED_HOOK_VERSIONS = {
     "enki-session-start.sh": "v4.1.0",
+    "enki-subagent-start.sh": "v4.1.0",
     "enki-pre-tool-use.sh": "v4.0.1",
     "enki-post-tool-use.sh": "v4.0.1",
     "enki-pre-compact.sh": "v4.0.1",

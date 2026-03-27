@@ -124,6 +124,7 @@ async def list_tools() -> list[Tool]:
                     "project": {"type": "string", "description": "Optional project ID", "default": "default"},
                     "tier": {"type": "string", "enum": ["minimal", "standard", "full"]},
                     "spec_path": {"type": "string", "description": "Optional authored spec path"},
+                    "force": {"type": "boolean", "default": False},
                 },
                 "required": [],
             },
@@ -374,6 +375,19 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="enki_wave_reconcile",
+            description=(
+                "Diagnose and recover stuck wave states: orphaned in-progress tasks, "
+                "stuck merge queue rows, and task_phase mismatches."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "project": {"type": "string", "default": "default"},
+                },
+            },
+        ),
+        Tool(
             name="enki_diagram",
             description=(
                 "Generate Mermaid diagrams from project state: dag, files, pipeline, or codebase."
@@ -411,6 +425,11 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "agent": {"type": "string", "default": "EM", "description": "Inbox owner"},
                     "project": {"type": "string", "default": "default"},
+                    "ack_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional message IDs to acknowledge as read",
+                    },
                 },
             },
         ),
@@ -555,6 +574,7 @@ def _handle_goal(args: dict) -> str:
         args.get("spec_path"),
         args.get("goal"),
         args.get("tier"),
+        args.get("force", False),
     )
     return json.dumps(result, indent=2)
 
@@ -711,6 +731,14 @@ def _handle_sprint_close(args: dict) -> str:
     return json.dumps(result, indent=2)
 
 
+def _handle_wave_reconcile(args: dict) -> str:
+    from .mcp.orch_tools import enki_wave_reconcile
+    result = enki_wave_reconcile(
+        project=args.get("project", "default"),
+    )
+    return json.dumps(result, indent=2)
+
+
 def _handle_diagram(args: dict) -> str:
     from .mcp.orch_tools import enki_diagram
     result = enki_diagram(
@@ -733,6 +761,7 @@ def _handle_mail_inbox(args: dict) -> str:
     result = enki_mail_inbox(
         agent=args.get("agent", "EM"),
         project=args.get("project", "default"),
+        ack_ids=args.get("ack_ids"),
     )
     return json.dumps(result, indent=2)
 
@@ -809,6 +838,7 @@ TOOL_HANDLERS = {
     "enki_mark_blocked": _handle_mark_blocked,
     "enki_sprint_summary": _handle_sprint_summary,
     "enki_sprint_close": _handle_sprint_close,
+    "enki_wave_reconcile": _handle_wave_reconcile,
     "enki_diagram": _handle_diagram,
     "enki_status_update": _handle_status_update,
     "enki_mail_inbox": _handle_mail_inbox,
@@ -868,6 +898,10 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             from .mcp.orch_tools import enki_sprint_close
             result = enki_sprint_close(**args)
             return [TextContent(type="text", text=json.dumps(result, indent=2))]
+        elif name == "enki_wave_reconcile":
+            from .mcp.orch_tools import enki_wave_reconcile
+            result = enki_wave_reconcile(**args)
+            return [TextContent(type="text", text=json.dumps(result, indent=2))]
         elif name == "enki_diagram":
             from .mcp.orch_tools import enki_diagram
             result = enki_diagram(**args)
@@ -912,7 +946,11 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 def get_tools() -> list[dict]:
     """Sync wrapper: return tool definitions as dicts."""
     import asyncio
-    tools = asyncio.get_event_loop().run_until_complete(list_tools())
+    loop = asyncio.new_event_loop()
+    try:
+        tools = loop.run_until_complete(list_tools())
+    finally:
+        loop.close()
     return [{"name": t.name, "description": t.description, "inputSchema": t.inputSchema} for t in tools]
 
 

@@ -571,6 +571,7 @@ def enki_goal(
     spec_path: str | None = None,
     goal: str | None = None,
     tier: str | None = None,
+    force: bool = False,
 ) -> dict:
     """Set active goal and fully initialize project infrastructure."""
     requested_goal = (description or goal or "").strip()
@@ -625,6 +626,24 @@ def enki_goal(
     detected_tier = (tier or "").strip().lower() or detect_tier(requested_goal)
     previous_goal = read_project_state(project, "goal")
     existing_phase = read_project_state(project, "phase")
+
+    # Guard: if actively in sprint, preserve state unless explicitly forced.
+    if existing_phase in {"implement", "validating"} and not force:
+        active_sprint = get_active_sprint(project)
+        if active_sprint:
+            return {
+                "warning": (
+                    f"Project '{project}' is in '{existing_phase}' phase with active sprint "
+                    f"'{active_sprint['sprint_id']}'. enki_goal will not overwrite goal or tier. "
+                    "Call enki_phase(action='status') to see current state. "
+                    "Pass force=True only if you intend to restart from planning."
+                ),
+                "phase": existing_phase,
+                "sprint_id": active_sprint["sprint_id"],
+                "goal": read_project_state(project, "goal"),
+                "tier": read_project_state(project, "tier"),
+            }
+
     if existing_phase and existing_phase not in {"none", "planning"}:
         phase = existing_phase
         phase_preserved = True
@@ -1449,19 +1468,34 @@ def enki_debate(project: str | None = None) -> dict:
 
     elif round_2_pending:
         round_1_outputs = existing["rounds"].get("round_1", {})
+
+        # Anonymize Round 2 positions — evaluate on merit, not identity.
+        role_order = sorted(round_1_outputs.keys())
+        anon_map = {role_name: chr(65 + idx) for idx, role_name in enumerate(role_order)}
+        anonymized_positions = {
+            anon_map[role_name]: output
+            for role_name, output in round_1_outputs.items()
+        }
+
         for role in round_2_pending:
             context = {
                 "debate_round": 2,
                 "debate_id": debate_id,
                 "spec_draft_path": str(spec_draft_path),
-                "round_1_positions": round_1_outputs,
+                "round_1_positions": anonymized_positions,
+                "anonymization_note": (
+                    "Round 1 positions are labeled Response A, B, C (not by role name). "
+                    "Evaluate each position on its merits. "
+                    "Reference positions as 'Response A', 'Response B', etc. in your rebuttal."
+                ),
                 "instruction": (
                     "You are participating in Round 2 of a spec debate. "
                     f"Read the spec at {spec_draft_path}. "
-                    "Read all Round 1 positions from the other debate agents provided in round_1_positions. "
+                    "Read all Round 1 positions (anonymized as A/B/C). "
                     "Produce your rebuttal - agree, challenge, or build on specific points others raised. "
-                    "Be direct. Reference specific agent positions by name. "
-                    "Output structured JSON with: {'rebuttal': str, 'agreements': [{agent, point}], 'disagreements': [{agent, point, counter_argument}], 'new_concerns': [str]}"
+                    "Be direct. Reference positions as 'Response A', 'Response B', not by role. "
+                    "Output structured JSON with: {'rebuttal': str, 'agreements': [{'position': str, 'point': str}], "
+                    "'disagreements': [{'position': str, 'point': str, 'counter_argument': str}], 'new_concerns': [str]}"
                 ),
             }
             spawn_result = enki_spawn(role, f"debate-r2-{role}", context, project)
@@ -1728,21 +1762,49 @@ def enki_decompose(tasks: list[dict], project: str = ".") -> dict:
     name_to_id = {}
     created = []
     for task_def in tasks:
+        # Quality gate: reject thin task definitions
+        name = (task_def.get("name") or "").strip()
+        description = (task_def.get("description") or "").strip()
+        files = task_def.get("files") or []
+
+        if not name:
+            return {
+                "error": "Task missing required 'name' field.",
+                "task": task_def,
+            }
+        if len(description) < 30:
+            return {
+                "error": (
+                    f"Task '{name}' has insufficient description ({len(description)} chars). "
+                    "Minimum 30 characters required. "
+                    "Description must tell Dev exactly what to implement."
+                ),
+                "task": task_def,
+            }
+        if not files:
+            return {
+                "error": (
+                    f"Task '{name}' has no assigned_files. "
+                    "Every task must specify which files it creates or modifies."
+                ),
+                "task": task_def,
+            }
+
         task_id = create_task(
             project=project,
             sprint_id=sprint_id,
-            task_name=task_def["name"],
+            task_name=name,
             tier="standard",
-            assigned_files=task_def.get("files", []),
+            assigned_files=files,
             dependencies=[],
-            description=task_def.get("description", ""),
+            description=description,
         )
-        name_to_id[task_def["name"]] = task_id
+        name_to_id[name] = task_id
         created.append({
             "task_id": task_id,
-            "name": task_def["name"],
-            "description": task_def.get("description", ""),
-            "files": task_def.get("files", []),
+            "name": name,
+            "description": description,
+            "files": files,
             "dependencies": task_def.get("dependencies", []),
         })
 
@@ -1829,6 +1891,22 @@ def enki_spawn(
         merged_context = _inject_external_spec_mode(project, role_key, merged_context)
         merged_context = _inject_architect_context(project, role_key, merged_context)
         filtered_context = _apply_blind_wall(role_key, merged_context)
+
+        # Strip conversation context from adversarial review agents.
+        adversarial_roles = {"igi", "cto", "devils_advocate", "tech_feasibility", "historical_context"}
+        if role_key in adversarial_roles:
+            keep_keys = {
+                "spec_content", "spec_path", "spec_draft_path",
+                "debate_round", "debate_id", "instruction",
+                "round_1_positions", "anonymization_note", "codebase_profile",
+                "codebase_profile_path", "mode", "task_id",
+            }
+            filtered_context = {
+                k: v for k, v in filtered_context.items()
+                if k in keep_keys
+            }
+            if filtered_context.get("debate_round") == 1:
+                filtered_context.pop("round_1_positions", None)
         # Inject mode and test_path based on task_phase for QA and Validator
         if role_key in ("qa", "validator") and task_id:
             task_phase = _get_task_phase(project, task_id)
@@ -1887,9 +1965,10 @@ def enki_spawn(
         return {
             "message": (
                 f"Agent {role_key} prepared. "
-                f"1. Read prompt file verbatim: ~/.enki/prompts/{role_key}.md — never substitute your own prompt. "
-                f"2. Read context artifact in chunks if large: {artifact} — never skip, never summarize. "
-                "3. Run via Task tool in foreground — never Background tool. "
+                f"1. Read prompt file verbatim: ~/.enki/prompts/{role_key}.md\n"
+                f"2. Read context artifact from disk: {artifact}\n"
+                "   (read in chunks if large — never skip, never summarize)\n"
+                "3. Run via Task tool in foreground — never Background tool.\n"
                 f"4. After Task completes: call enki_report(role='{role_key}', task_id='{task_id}', summary=..., status='completed'|'failed')."
             ),
             "role": role_key,
@@ -2449,6 +2528,32 @@ def enki_complete(task_id: str, project: str | None = None) -> dict:
             )
         }
 
+    # Ship gate: assigned files must exist on disk before completion.
+    task_files = task.get("assigned_files") or []
+    if isinstance(task_files, str):
+        try:
+            task_files = json.loads(task_files)
+        except Exception:
+            task_files = []
+
+    if task_files:
+        project_path = _get_project_path(project)
+        if project_path:
+            missing_files = []
+            for fp in task_files:
+                full_path = Path(project_path) / fp
+                if not full_path.exists():
+                    missing_files.append(fp)
+            if missing_files:
+                return {
+                    "error": (
+                        f"Ship gate: {len(missing_files)} assigned file(s) not found on disk. "
+                        f"Missing: {missing_files}. "
+                        "Dev must create all assigned files before task can complete."
+                    ),
+                    "missing_files": missing_files,
+                }
+
     update_task_status(project, task_id, TaskStatus.COMPLETED)
 
     # Register assigned files for diagram support
@@ -2570,9 +2675,17 @@ def enki_wrap() -> dict:
     promoted = 0
     discarded = 0
     gemini_error = None
+    gemini_review_payload = None
     try:
-        decisions = gemini_review.run_api_review(project=project).get("bead_decisions", [])
-        promoted, discarded = _apply_wrap_gemini_decisions(project, decisions)
+        pending = _count_staged_candidates(project)
+        if pending > 0:
+            decisions = gemini_review.run_api_review(project=project).get("bead_decisions", [])
+            promoted, discarded = _apply_wrap_gemini_decisions(project, decisions)
+            gemini_review_payload = {
+                "candidates_reviewed": pending,
+                "promoted": promoted,
+                "discarded": discarded,
+            }
     except Exception as e:
         gemini_error = str(e)
 
@@ -2588,6 +2701,7 @@ def enki_wrap() -> dict:
         "promoted": promoted,
         "discarded": discarded,
         "gemini_error": gemini_error,
+        "gemini_review": gemini_review_payload,
     }
     report_path.write_text(_format_md(payload))
 
@@ -2652,9 +2766,42 @@ def enki_escalate(task_id: str, reason: str, project: str = ".") -> dict:
 # ── Mail ──
 
 
-def enki_mail_inbox(agent: str = "EM", project: str = ".") -> list[dict]:
-    """Get unread messages."""
-    return get_inbox(project, agent)
+def enki_mail_inbox(
+    agent: str = "EM",
+    project: str = ".",
+    ack_ids: list[str] | None = None,
+) -> list[dict]:
+    """Read inbox with explicit ack semantics.
+
+    Fetch marks messages as delivered; pass ack_ids to mark specific messages read.
+    """
+    project = _resolve_project(project)
+
+    if ack_ids:
+        with em_db(project) as conn:
+            for msg_id in ack_ids:
+                conn.execute(
+                    "UPDATE mail_messages SET status='read' WHERE id=? AND project_id=?",
+                    (msg_id, project),
+                )
+        return [{"acked": len(ack_ids), "message": "Messages acknowledged."}]
+
+    messages = get_inbox(project, agent)
+    with em_db(project) as conn:
+        for msg in messages:
+            conn.execute(
+                "UPDATE mail_messages SET status='delivered' WHERE id=? AND project_id=?",
+                (msg.get("id"), project),
+            )
+
+    if messages:
+        for msg in messages:
+            msg["_ack_instruction"] = (
+                f"After processing, call enki_mail_inbox(ack_ids=['{msg.get('id')}']) "
+                "to mark as fully consumed."
+            )
+
+    return messages
 
 
 def enki_mail_thread(thread_id: str, project: str = ".") -> list[dict]:
@@ -2804,6 +2951,94 @@ def enki_sprint_close(project: str | None = None) -> dict:
         "sprint_id": sprint_id,
         "files_in_scope": len(all_files),
         "steps": ["test_consolidation", "full_test_run", "infosec", "sprint_review", "verify_clean"],
+    }
+
+
+def enki_wave_reconcile(project: str | None = None) -> dict:
+    """Diagnose and recover stuck wave states."""
+    project = _resolve_project(project)
+    active = _require_active_goal(project)
+    if active.get("error"):
+        return active
+
+    sprint = get_active_sprint(project)
+    if not sprint:
+        return {"error": "No active sprint to reconcile."}
+
+    sprint_id = sprint["sprint_id"]
+    fixes: list[str] = []
+
+    with em_db(project) as conn:
+        # 1) Tasks in_progress with no session or dead session.
+        rows = conn.execute(
+            "SELECT task_id, session_id, task_phase FROM task_state "
+            "WHERE sprint_id=? AND status='in_progress'",
+            (sprint_id,),
+        ).fetchall()
+        for row in rows:
+            session_alive = _is_tmux_session_alive(row["session_id"]) if row["session_id"] else False
+            if not session_alive:
+                conn.execute(
+                    "UPDATE task_state SET status='pending', session_id=NULL, "
+                    "started_at=NULL WHERE task_id=?",
+                    (row["task_id"],),
+                )
+                fixes.append(
+                    f"Reset orphaned task {row['task_id']} "
+                    f"(session: {row['session_id'] or 'none'}) to pending"
+                )
+
+        # 2) Completed tasks with non-complete task_phase.
+        rows = conn.execute(
+            "SELECT task_id, task_phase FROM task_state "
+            "WHERE sprint_id=? AND status='completed' AND task_phase != 'complete'",
+            (sprint_id,),
+        ).fetchall()
+        for row in rows:
+            conn.execute(
+                "UPDATE task_state SET task_phase='complete' WHERE task_id=?",
+                (row["task_id"],),
+            )
+            fixes.append(
+                f"Advanced task {row['task_id']} task_phase to complete "
+                f"(was {row['task_phase']})"
+            )
+
+        # 3) Stuck merge queue rows.
+        rows = conn.execute(
+            "SELECT id, task_id FROM merge_queue "
+            "WHERE project_id=? AND status='merging'",
+            (project,),
+        ).fetchall()
+        for row in rows:
+            conn.execute(
+                "UPDATE merge_queue SET status='queued' WHERE id=?",
+                (row["id"],),
+            )
+            fixes.append(f"Reset stuck merge queue item for task {row['task_id']}")
+
+        counts = {}
+        for status in ("pending", "in_progress", "completed", "failed"):
+            counts[status] = conn.execute(
+                "SELECT COUNT(*) AS c FROM task_state WHERE sprint_id=? AND status=?",
+                (sprint_id, status),
+            ).fetchone()["c"]
+
+    if not fixes:
+        return {
+            "message": "No stuck states found. Wave is healthy.",
+            "sprint_id": sprint_id,
+            "task_counts": counts,
+            "fixes_applied": 0,
+        }
+
+    return {
+        "message": f"Reconciliation complete. {len(fixes)} fix(es) applied.",
+        "sprint_id": sprint_id,
+        "fixes_applied": len(fixes),
+        "fixes": fixes,
+        "task_counts": counts,
+        "next": "Call enki_wave() to resume.",
     }
 
 
@@ -4002,6 +4237,20 @@ def _stage_wrap_candidates(items: list[dict], project: str, session_id: str) -> 
                 )
             staged += 1
     return staged, duplicates
+
+
+def _count_staged_candidates(project: str) -> int:
+    """Count wrap candidates still staged for Gemini review."""
+    try:
+        with abzu_db() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS c FROM note_candidates "
+                "WHERE status='staged' AND project=?",
+                (project,),
+            ).fetchone()
+            return int(row["c"] or 0) if row else 0
+    except Exception:
+        return 0
 
 
 def _apply_wrap_gemini_decisions(project: str, decisions: list[dict]) -> tuple[int, int]:

@@ -230,11 +230,19 @@ def get_inbox(
 
     Returns messages ordered by importance (critical first) then chronologically.
     """
-    query = (
-        "SELECT * FROM mail_messages "
-        "WHERE project_id = ? AND to_agent = ? AND status = ?"
-    )
-    params: list = [project, agent, status]
+    if status == "unread":
+        query = (
+            "SELECT * FROM mail_messages "
+            "WHERE project_id = ? AND to_agent = ? "
+            "AND status IN ('unread', 'delivered')"
+        )
+        params: list = [project, agent]
+    else:
+        query = (
+            "SELECT * FROM mail_messages "
+            "WHERE project_id = ? AND to_agent = ? AND status = ?"
+        )
+        params = [project, agent, status]
 
     if importance:
         query += " AND importance = ?"

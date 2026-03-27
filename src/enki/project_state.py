@@ -19,6 +19,17 @@ def normalize_project_name(project: str | None) -> str:
     name = (project or "").strip()
     if not name or name == ".":
         return DEFAULT_PROJECT
+    # Case-insensitive canonicalization: preserve stored casing from wisdom.db.
+    try:
+        with db.wisdom_db() as conn:
+            row = conn.execute(
+                "SELECT name FROM projects WHERE LOWER(name) = LOWER(?) LIMIT 1",
+                (name,),
+            ).fetchone()
+            if row and row["name"]:
+                return str(row["name"])
+    except Exception:
+        pass
     return name
 
 

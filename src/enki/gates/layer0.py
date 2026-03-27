@@ -27,6 +27,14 @@ LAYER0_PROTECTED = {
     "pre-compact.sh",
     "post-compact.sh",
     "session-end.sh",
+    # Repo hook source files
+    "enki-session-start.sh",
+    "enki-session-end.sh",
+    "enki-pre-tool-use.sh",
+    "enki-post-tool-use.sh",
+    "enki-pre-compact.sh",
+    "enki-user-prompt.sh",
+    "enki-subagent-start.sh",
     # Core enforcement
     "uru.py",
     "layer0.py",
@@ -64,6 +72,7 @@ LAYER0_PROTECTED = {
 LAYER0_PROTECTED_PATHS = [
     ENKI_ROOT / "hooks",
     ENKI_ROOT / "prompts",
+    # Hook source files in scripts/hooks — CC must never edit these
     REPO_ROOT / "scripts" / "hooks",
 ]
 
