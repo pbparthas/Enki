@@ -2237,7 +2237,7 @@ def enki_wave(project: str | None = None) -> dict:
             capture_output=True, text=True, cwd=project_path, timeout=30,
         )
         _cur_branch = _cur.stdout.strip()
-        if _cur_branch in {"main", "master"}:
+        if _cur_branch in {"main", "master"} and sprint_branch not in {"main", "master", _cur_branch, ""}:
             return {
                 "error": (
                     f"Cannot start wave from protected branch '{_cur_branch}'. "
