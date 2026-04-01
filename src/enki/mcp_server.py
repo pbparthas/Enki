@@ -172,6 +172,8 @@ async def list_tools() -> list[Tool]:
                         "enum": ["igi", "spec", "architect", "test", "spec-revision"],
                     },
                     "note": {"type": "string"},
+                    "skip_council": {"type": "boolean", "default": False},
+                    "skip_council_reason": {"type": "string"},
                 },
                 "required": ["stage"],
             },
@@ -315,6 +317,42 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "project": {"type": "string", "default": "default"},
                 },
+            },
+        ),
+        Tool(
+            name="enki_impl_council",
+            description=(
+                "Implementation Council specialist review of architect impl spec. "
+                "Analysis mode (no approved_specialists): proposes panel for HITL review. "
+                "Execution mode (approved_specialists provided): prepares specialist runs and "
+                "triggers Architect reconciliation when specialists are complete. Resumable."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "project": {"type": "string", "default": "default"},
+                    "approved_specialists": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                },
+            },
+        ),
+        Tool(
+            name="enki_impl_council_update",
+            description=(
+                "Record Implementation Council specialist output. "
+                "Call after each specialist Task completion. "
+                "For specialist='architect', records reconciliation and marks council complete."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "specialist": {"type": "string"},
+                    "output": {"type": "object"},
+                    "project": {"type": "string", "default": "default"},
+                },
+                "required": ["specialist", "output"],
             },
         ),
         Tool(
@@ -595,6 +633,8 @@ def _handle_approve(args: dict) -> str:
         project=args.get("project"),
         stage=args["stage"],
         note=args.get("note"),
+        skip_council=args.get("skip_council", False),
+        skip_council_reason=args.get("skip_council_reason"),
     )
     return json.dumps(result, indent=2)
 
@@ -689,6 +729,25 @@ def _handle_kickoff_update(args: dict) -> str:
 def _handle_kickoff_complete(args: dict) -> str:
     from .mcp.orch_tools import enki_kickoff_complete
     result = enki_kickoff_complete(
+        project=args.get("project", "default"),
+    )
+    return json.dumps(result, indent=2)
+
+
+def _handle_impl_council(args: dict) -> str:
+    from .mcp.orch_tools import enki_impl_council
+    result = enki_impl_council(
+        project=args.get("project", "default"),
+        approved_specialists=args.get("approved_specialists"),
+    )
+    return json.dumps(result, indent=2)
+
+
+def _handle_impl_council_update(args: dict) -> str:
+    from .mcp.orch_tools import enki_impl_council_update
+    result = enki_impl_council_update(
+        specialist=args["specialist"],
+        output=args["output"],
         project=args.get("project", "default"),
     )
     return json.dumps(result, indent=2)
@@ -834,6 +893,8 @@ TOOL_HANDLERS = {
     "enki_kickoff": _handle_kickoff,
     "enki_kickoff_update": _handle_kickoff_update,
     "enki_kickoff_complete": _handle_kickoff_complete,
+    "enki_impl_council": _handle_impl_council,
+    "enki_impl_council_update": _handle_impl_council_update,
     "enki_escalate": _handle_escalate,
     "enki_mark_blocked": _handle_mark_blocked,
     "enki_sprint_summary": _handle_sprint_summary,
@@ -881,6 +942,14 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         elif name == "enki_kickoff_complete":
             from .mcp.orch_tools import enki_kickoff_complete
             result = enki_kickoff_complete(**args)
+            return [TextContent(type="text", text=json.dumps(result, indent=2))]
+        elif name == "enki_impl_council":
+            from .mcp.orch_tools import enki_impl_council
+            result = enki_impl_council(**args)
+            return [TextContent(type="text", text=json.dumps(result, indent=2))]
+        elif name == "enki_impl_council_update":
+            from .mcp.orch_tools import enki_impl_council_update
+            result = enki_impl_council_update(**args)
             return [TextContent(type="text", text=json.dumps(result, indent=2))]
         elif name == "enki_escalate":
             from .mcp.orch_tools import enki_escalate

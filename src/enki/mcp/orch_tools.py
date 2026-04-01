@@ -96,6 +96,11 @@ VALID_AGENT_ROLES = {
     "pm", "architect", "dba", "dev", "qa", "ui_ux", "validator",
     "reviewer", "infosec", "devops", "performance", "researcher", "em",
     "igi", "cto", "devils_advocate", "tech_feasibility", "historical_context",
+    "typescript-dev-reviewer", "typescript-qa-reviewer",
+    "typescript-reviewer", "typescript-infosec",
+    "python-dev-reviewer", "python-qa-reviewer",
+    "python-reviewer", "python-infosec",
+    "security-auditor", "ai-engineer",
 }
 APPROVAL_STAGES = {"igi", "spec", "architect", "test", "spec-revision"}
 APPROVAL_TARGET_PHASE = {
@@ -104,6 +109,38 @@ APPROVAL_TARGET_PHASE = {
     "spec-revision": "approved",
     "architect": "implement",
     "test": "validating",
+}
+
+PROMPT_ROLE_ALIASES = {
+    "typescript-dev-reviewer": "dev",
+    "typescript-qa-reviewer": "qa",
+    "typescript-reviewer": "reviewer",
+    "typescript-infosec": "infosec",
+    "python-dev-reviewer": "dev",
+    "python-qa-reviewer": "qa",
+    "python-reviewer": "reviewer",
+    "python-infosec": "infosec",
+    "security-auditor": "infosec",
+    "ai-engineer": "reviewer",
+}
+
+BRIEF_FIELD_MAP = {
+    "dev": "build_instructions",
+    "typescript-dev-reviewer": "build_instructions",
+    "python-dev-reviewer": "build_instructions",
+    "qa": "qa_test_strategy",
+    "typescript-qa-reviewer": "qa_test_strategy",
+    "python-qa-reviewer": "qa_test_strategy",
+    "reviewer": "review_checklist",
+    "typescript-reviewer": "review_checklist",
+    "python-reviewer": "review_checklist",
+    "infosec": "security_requirements",
+    "typescript-infosec": "security_requirements",
+    "python-infosec": "security_requirements",
+    "security-auditor": "security_requirements",
+    "validator": "validation_criteria",
+    "performance": "performance_notes",
+    "devops": "devops_notes",
 }
 
 PLAYBOOK_CONTENT = """# Enki PLAYBOOK — Exact Operational Sequences
@@ -905,6 +942,8 @@ def enki_approve(
     stage: str,
     project: str | None = None,
     note: str | None = None,
+    skip_council: bool = False,
+    skip_council_reason: str | None = None,
 ) -> dict:
     """Create HITL approval record and advance project phase."""
     project = _resolve_project(project)
@@ -913,6 +952,59 @@ def enki_approve(
         return {
             "error": f"Unknown stage: {stage}. Expected one of {sorted(APPROVAL_STAGES)}"
         }
+    active = _require_active_goal(project)
+    if active.get("error"):
+        return active
+
+    # Impl council gate for architect approval
+    if stage_key == "architect":
+        tier = (read_project_state(project, "tier") or active.get("tier") or "standard").strip().lower()
+        if tier in ("standard", "full") and not skip_council:
+            goal_id = active["goal_id"]
+            artifacts_dir = _goal_artifacts_dir(project)
+            council_artifact_path = artifacts_dir / f"impl-council-{goal_id}.json"
+            council_complete = False
+            if council_artifact_path.exists():
+                try:
+                    state = json.loads(council_artifact_path.read_text())
+                    council_complete = state.get("status") == "complete"
+                except Exception:
+                    council_complete = False
+            if not council_complete:
+                return {
+                    "error": (
+                        "Implementation Council required before architect approval "
+                        f"for {tier} tier. "
+                        "Call enki_impl_council() to run the specialist panel. "
+                        "To skip: enki_approve(stage='architect', skip_council=True, "
+                        "skip_council_reason='reason')"
+                    ),
+                    "tier": tier,
+                    "council_status": "incomplete",
+                }
+
+        if skip_council and tier in ("standard", "full"):
+            if not skip_council_reason:
+                return {
+                    "error": "skip_council_reason required when skipping council for standard/full tier."
+                }
+            try:
+                with em_db(project) as conn:
+                    conn.execute(
+                        "INSERT INTO pm_decisions "
+                        "(id, project_id, decision_type, proposed_action, context, human_response) "
+                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        (
+                            f"council-skip-{active['goal_id']}",
+                            project,
+                            "impl_council_skipped",
+                            "architect_approval_skip_council",
+                            skip_council_reason,
+                            "approved",
+                        ),
+                    )
+            except Exception:
+                pass
 
     with em_db(project) as conn:
         _ensure_hitl_approvals_table(conn)
@@ -1323,6 +1415,275 @@ def enki_kickoff_complete(project: str | None = None) -> dict:
         "blockers_found": False,
         "blockers": [],
         "summary_path": str(kickoff_path),
+    }
+
+
+def enki_impl_council(
+    project: str | None = None,
+    approved_specialists: list[str] | None = None,
+) -> dict:
+    """Implementation Council — specialist peer review of Architect impl spec."""
+    project = _resolve_project(project)
+    active = _require_active_goal(project)
+    if active.get("error"):
+        return active
+
+    goal_id = active["goal_id"]
+    artifacts_dir = _goal_artifacts_dir(project)
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    council_artifact_path = artifacts_dir / f"impl-council-{goal_id}.json"
+
+    state: dict = {}
+    if council_artifact_path.exists():
+        try:
+            state = json.loads(council_artifact_path.read_text())
+        except Exception:
+            state = {}
+
+    council_status = state.get("status", "")
+
+    if council_status == "complete":
+        return {
+            "message": "Implementation Council already complete.",
+            "council_id": f"impl-council-{goal_id}",
+            "specialists_ran": state.get("approved_specialists", []),
+            "tasks_enriched": state.get("tasks_enriched", 0),
+            "resumed": True,
+        }
+
+    if approved_specialists is None:
+        impl_spec = _load_impl_spec(project, goal_id)
+        if not impl_spec:
+            return {
+                "error": (
+                    "No impl spec found. Architect must write impl spec before calling "
+                    "enki_impl_council. Call enki_spawn('architect', 'impl-spec') first."
+                )
+            }
+
+        proposal = _propose_specialist_panel(project, impl_spec)
+        state = {
+            "status": "proposed",
+            "goal_id": goal_id,
+            "proposal": proposal,
+            "impl_spec_summary": {
+                "task_count": len(impl_spec.get("tasks", [])),
+                "tech_stack": impl_spec.get("tech_stack", {}),
+            },
+        }
+        council_artifact_path.write_text(json.dumps(state, indent=2))
+        return {
+            "message": "Implementation Council — specialist panel proposed. Review and approve.",
+            "council_id": f"impl-council-{goal_id}",
+            "proposed_specialists": proposal["proposed"],
+            "not_proposed": proposal["not_proposed"],
+            "next": (
+                "Review proposed panel, then call "
+                "enki_impl_council(approved_specialists=[...]). "
+                "You may add or remove specialists from the proposal."
+            ),
+        }
+
+    valid_roles = {
+        "typescript-dev-reviewer", "typescript-qa-reviewer",
+        "typescript-reviewer", "typescript-infosec",
+        "python-dev-reviewer", "python-qa-reviewer",
+        "python-reviewer", "python-infosec",
+        "infosec", "reviewer", "security-auditor",
+        "ai-engineer", "performance",
+    }
+    invalid = [s for s in approved_specialists if s not in valid_roles]
+    if invalid:
+        return {
+            "error": f"Unknown specialist roles: {invalid}. Valid roles: {sorted(valid_roles)}"
+        }
+
+    if council_status in ("", "proposed"):
+        state["status"] = "running"
+        state["approved_specialists"] = approved_specialists
+        state["completed_specialists"] = state.get("completed_specialists", [])
+        council_artifact_path.write_text(json.dumps(state, indent=2))
+
+    completed = state.get("completed_specialists", [])
+    approved = state.get("approved_specialists", approved_specialists)
+    pending = [s for s in approved if s not in completed]
+    spawn_instructions = []
+
+    if pending:
+        impl_spec = _load_impl_spec(project, goal_id)
+        if not impl_spec:
+            return {"error": "Impl spec not found. Cannot proceed with council."}
+
+        for specialist in pending:
+            context = {
+                "mode": "impl-spec-review",
+                "council_id": f"impl-council-{goal_id}",
+                "impl_spec": impl_spec,
+                "instruction": (
+                    f"You are participating in the Implementation Council as {specialist}. "
+                    "Review the implementation spec from your specialist perspective. "
+                    "Output spec-level concerns only — no code, no implementation details. "
+                    "For each concern, specify which task it affects, what the problem is, "
+                    "and what each relevant agent needs to know: "
+                    "build_instructions for Dev, qa_test_strategy for QA, "
+                    "review_checklist for Reviewer, security_requirements for InfoSec, "
+                    "validation_criteria for Validator. "
+                    "Output structured JSON per _base.md schema with concerns array."
+                ),
+            }
+            spawn_result = enki_spawn(specialist, f"impl-council-{specialist}", context, project)
+            spawn_instructions.append({
+                "specialist": specialist,
+                "prompt_path": spawn_result.get("prompt_path"),
+                "context_artifact": spawn_result.get("context_artifact"),
+                "instruction": spawn_result.get("instruction"),
+            })
+
+        council_artifact_path.write_text(json.dumps(state, indent=2))
+        return {
+            "message": f"Implementation Council — {len(pending)} specialist(s) pending.",
+            "council_id": f"impl-council-{goal_id}",
+            "spawn_instructions": spawn_instructions,
+            "completed": completed,
+            "pending": pending,
+            "next": (
+                "Run each specialist via Task tool (foreground, sequential). "
+                "After each: call enki_impl_council_update(specialist=..., output=...). "
+                "After all specialists complete: call enki_impl_council() again "
+                "to trigger Architect reconciliation."
+            ),
+        }
+
+    if council_status != "reconciling" and not state.get("reconciliation_done"):
+        all_concerns = state.get("specialist_outputs", {})
+        impl_spec = _load_impl_spec(project, goal_id)
+        context = {
+            "mode": "impl-council-reconcile",
+            "council_id": f"impl-council-{goal_id}",
+            "impl_spec": impl_spec,
+            "specialist_concerns": all_concerns,
+            "instruction": (
+                "You are reconciling the Implementation Council findings. "
+                "Read all specialist concerns and the original impl spec. "
+                "For each concern: decide accept/reject/modify with rationale. "
+                "Update task descriptions to incorporate accepted changes. "
+                "For EVERY task, produce agent_briefs with fields for each relevant role: "
+                "dev (build_instructions), qa (qa_test_strategy), "
+                "reviewer (review_checklist), infosec (security_requirements), "
+                "validator (validation_criteria), performance (performance_notes), "
+                "devops (devops_notes). "
+                "Output JSON per impl-council-reconcile schema."
+            ),
+        }
+        spawn_result = enki_spawn("architect", "impl-council-reconcile", context, project)
+        state["status"] = "reconciling"
+        council_artifact_path.write_text(json.dumps(state, indent=2))
+        return {
+            "message": "All specialists complete. Architect reconciliation required.",
+            "council_id": f"impl-council-{goal_id}",
+            "spawn_instructions": [{
+                "specialist": "architect",
+                "role": "reconciler",
+                "prompt_path": spawn_result.get("prompt_path"),
+                "context_artifact": spawn_result.get("context_artifact"),
+                "instruction": spawn_result.get("instruction"),
+            }],
+            "next": (
+                "Run Architect via Task tool (foreground). "
+                "After completion: call "
+                "enki_impl_council_update(specialist='architect', output={...})."
+            ),
+        }
+
+    return {
+        "message": "Implementation Council complete. Call enki_approve(stage='architect').",
+        "council_id": f"impl-council-{goal_id}",
+        "specialists_ran": approved,
+        "tasks_enriched": state.get("tasks_enriched", 0),
+    }
+
+
+def enki_impl_council_update(
+    specialist: str,
+    output: dict,
+    project: str | None = None,
+) -> dict:
+    """Record Implementation Council specialist output after Task completion."""
+    project = _resolve_project(project)
+    active = _require_active_goal(project)
+    if active.get("error"):
+        return active
+
+    goal_id = active["goal_id"]
+    artifacts_dir = _goal_artifacts_dir(project)
+    council_artifact_path = artifacts_dir / f"impl-council-{goal_id}.json"
+
+    if not council_artifact_path.exists():
+        return {"error": "No active impl council found. Call enki_impl_council() first."}
+
+    state = json.loads(council_artifact_path.read_text())
+
+    if specialist == "architect":
+        enriched_tasks = output.get("tasks", [])
+        council_decisions = output.get("council_decisions", [])
+        state["enriched_tasks"] = enriched_tasks
+        state["council_decisions"] = council_decisions
+        state["tasks_enriched"] = len(enriched_tasks)
+        state["reconciliation_done"] = True
+        state["status"] = "complete"
+
+        try:
+            with em_db(project) as conn:
+                conn.execute(
+                    "INSERT OR REPLACE INTO pm_decisions "
+                    "(id, project_id, decision_type, proposed_action, context, human_response) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        f"impl-council-{goal_id}",
+                        project,
+                        "impl_council_reconciliation",
+                        f"tasks_enriched:{len(enriched_tasks)}",
+                        json.dumps({
+                            "enriched_tasks": enriched_tasks,
+                            "council_decisions": council_decisions,
+                        })[:10000],
+                        "approved",
+                    ),
+                )
+        except Exception:
+            pass
+
+        council_artifact_path.write_text(json.dumps(state, indent=2))
+        return {
+            "message": f"Implementation Council complete. {len(enriched_tasks)} tasks enriched.",
+            "tasks_enriched": len(enriched_tasks),
+            "decisions_recorded": len(council_decisions),
+            "next": "Call enki_approve(stage='architect') then enki_decompose with enriched tasks.",
+        }
+
+    concerns = output.get("concerns", [])
+    if "specialist_outputs" not in state:
+        state["specialist_outputs"] = {}
+    state["specialist_outputs"][specialist] = concerns
+
+    completed = state.get("completed_specialists", [])
+    if specialist not in completed:
+        completed.append(specialist)
+    state["completed_specialists"] = completed
+
+    council_artifact_path.write_text(json.dumps(state, indent=2))
+    approved = state.get("approved_specialists", [])
+    remaining = [s for s in approved if s not in completed]
+    return {
+        "message": f"Specialist '{specialist}' output recorded. {len(concerns)} concerns.",
+        "concerns_recorded": len(concerns),
+        "completed": completed,
+        "remaining": remaining,
+        "next": (
+            f"Run next specialist: {remaining[0]}"
+            if remaining
+            else "All specialists complete. Call enki_impl_council() to trigger reconciliation."
+        ),
     }
 
 
@@ -1766,6 +2127,7 @@ def enki_decompose(tasks: list[dict], project: str = ".") -> dict:
         name = (task_def.get("name") or "").strip()
         description = (task_def.get("description") or "").strip()
         files = task_def.get("files") or []
+        agent_briefs = task_def.get("agent_briefs")
 
         if not name:
             return {
@@ -1799,6 +2161,15 @@ def enki_decompose(tasks: list[dict], project: str = ".") -> dict:
             dependencies=[],
             description=description,
         )
+        if agent_briefs:
+            try:
+                with em_db(project) as conn:
+                    conn.execute(
+                        "UPDATE task_state SET agent_briefs = ? WHERE task_id = ?",
+                        (json.dumps(agent_briefs), task_id),
+                    )
+            except Exception:
+                pass
         name_to_id[name] = task_id
         created.append({
             "task_id": task_id,
@@ -1806,6 +2177,7 @@ def enki_decompose(tasks: list[dict], project: str = ".") -> dict:
             "description": description,
             "files": files,
             "dependencies": task_def.get("dependencies", []),
+            "agent_briefs": agent_briefs,
         })
 
     # Pass 2: resolve dependency names to IDs
@@ -1885,11 +2257,31 @@ def enki_spawn(
     if role_key not in VALID_AGENT_ROLES:
         return {"error": f"Unknown role: {role_key}"}
     try:
+        prompt_path = _resolve_prompt_path(role_key)
         prompt = _load_authored_prompt(role_key)
+        prompt_display = f"~/.enki/prompts/{prompt_path.name}"
         task = get_task(project, task_id) or {}
         merged_context = {"task": task, **(context or {})}
         merged_context = _inject_external_spec_mode(project, role_key, merged_context)
         merged_context = _inject_architect_context(project, role_key, merged_context)
+
+        # Inject role-specific council briefs if available for this task.
+        if task_id and role_key in BRIEF_FIELD_MAP:
+            try:
+                with em_db(project) as conn:
+                    row = conn.execute(
+                        "SELECT agent_briefs FROM task_state WHERE task_id = ?",
+                        (task_id,),
+                    ).fetchone()
+                if row and row["agent_briefs"]:
+                    briefs = json.loads(row["agent_briefs"])
+                    brief_field = BRIEF_FIELD_MAP[role_key]
+                    brief_content = briefs.get(brief_field) or briefs.get(role_key)
+                    if brief_content:
+                        merged_context[brief_field] = brief_content
+            except Exception:
+                pass
+
         filtered_context = _apply_blind_wall(role_key, merged_context)
 
         # Strip conversation context from adversarial review agents.
@@ -1949,7 +2341,7 @@ def enki_spawn(
             "role": role_key,
             "task_id": task_id,
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "prompt_path": str(ENKI_ROOT / "prompts" / f"{role_key}.md"),
+            "prompt_path": prompt_display,
             "prompt": prompt,
             "context": filtered_context,
             "execution_mode": "foreground_sequential",
@@ -1965,7 +2357,7 @@ def enki_spawn(
         return {
             "message": (
                 f"Agent {role_key} prepared. "
-                f"1. Read prompt file verbatim: ~/.enki/prompts/{role_key}.md\n"
+                f"1. Read prompt file verbatim: {prompt_display}\n"
                 f"2. Read context artifact from disk: {artifact}\n"
                 "   (read in chunks if large — never skip, never summarize)\n"
                 "3. Run via Task tool in foreground — never Background tool.\n"
@@ -1978,7 +2370,7 @@ def enki_spawn(
                 "Run this agent in foreground via Task tool. "
                 "Wait for completion before starting next agent."
             ),
-            "prompt_path": f"~/.enki/prompts/{role_key}.md",
+            "prompt_path": prompt_display,
             "context_artifact": str(artifact),
             "task_id": task_id,
         }
@@ -3231,6 +3623,117 @@ def enki_profile(
 # ── Private helpers ──
 
 
+def _propose_specialist_panel(project: str, impl_spec: dict) -> dict:
+    """Analyse impl spec and propose a specialist panel with reasoning."""
+    tasks = impl_spec.get("tasks", [])
+    all_files = [f for t in tasks for f in (t.get("files") or [])]
+    all_text = " ".join(
+        (t.get("description", "") + " " + t.get("name", ""))
+        for t in tasks
+    ).lower()
+    tier = read_project_state(project, "tier") or "standard"
+
+    proposed: list[dict] = []
+    not_proposed: list[dict] = []
+
+    extensions = {Path(f).suffix.lower() for f in all_files}
+    ts_files = bool({".ts", ".tsx"} & extensions)
+    py_files = bool({".py"} & extensions)
+
+    if ts_files:
+        proposed.append({
+            "role": "typescript-dev-reviewer",
+            "reason": (
+                f"{sum(1 for f in all_files if f.endswith(('.ts', '.tsx')))} TypeScript files. "
+                "Will check type safety strategy, generic patterns, strict mode compliance."
+            ),
+        })
+        proposed.append({
+            "role": "typescript-qa-reviewer",
+            "reason": "TypeScript services need Vitest patterns, async testing, proper mocking.",
+        })
+    else:
+        not_proposed.append({"role": "typescript-dev-reviewer", "reason": "No TypeScript files"})
+        not_proposed.append({"role": "typescript-qa-reviewer", "reason": "No TypeScript files"})
+
+    if py_files:
+        proposed.append({
+            "role": "python-dev-reviewer",
+            "reason": (
+                f"{sum(1 for f in all_files if f.endswith('.py'))} Python files. "
+                "Will check type hints, Pydantic patterns, async patterns."
+            ),
+        })
+        proposed.append({
+            "role": "python-qa-reviewer",
+            "reason": "Python services need pytest patterns, fixture design, mock boundaries.",
+        })
+    else:
+        not_proposed.append({"role": "python-dev-reviewer", "reason": "No Python files"})
+        not_proposed.append({"role": "python-qa-reviewer", "reason": "No Python files"})
+
+    if tier in ("standard", "full"):
+        proposed.append({
+            "role": "infosec",
+            "reason": "Always included for Standard/Full tier — code-level vulnerability review.",
+        })
+        proposed.append({
+            "role": "reviewer",
+            "reason": "Always included — SOLID/DRY/coupling review at spec level.",
+        })
+
+    auth_keywords = {"auth", "jwt", "token", "session", "password", "oauth",
+                     "permission", "rbac", "role", "encrypt"}
+    if auth_keywords & set(all_text.split()):
+        proposed.append({
+            "role": "security-auditor",
+            "reason": "Auth/security patterns detected in task descriptions. Threat modeling required.",
+        })
+    else:
+        not_proposed.append({"role": "security-auditor", "reason": "No auth/security patterns detected"})
+
+    ai_keywords = {"llm", "embedding", "rag", "model", "inference", "prompt",
+                   "agent", "vector", "openai", "anthropic", "completion"}
+    if ai_keywords & set(all_text.split()):
+        proposed.append({
+            "role": "ai-engineer",
+            "reason": "AI/LLM integration detected. Evaluation strategy and prompt design review needed.",
+        })
+    else:
+        not_proposed.append({"role": "ai-engineer", "reason": "No AI/LLM integration detected"})
+
+    perf_keywords = {"performance", "latency", "throughput", "cache", "optimization",
+                     "concurrent", "async", "queue", "batch", "index"}
+    if perf_keywords & set(all_text.split()):
+        proposed.append({
+            "role": "performance",
+            "reason": "Performance-sensitive operations detected.",
+        })
+    else:
+        not_proposed.append({"role": "performance", "reason": "No performance-critical paths detected"})
+
+    return {"proposed": proposed, "not_proposed": not_proposed}
+
+
+def _load_impl_spec(project: str, goal_id: str) -> dict | None:
+    """Load Architect impl spec from artifact storage."""
+    _ = goal_id
+    artifacts_dir = _goal_artifacts_dir(project)
+    impl_spec_artifacts = list(artifacts_dir.glob("spawn-architect-impl-spec*.md"))
+    if not impl_spec_artifacts:
+        return None
+
+    artifact = sorted(impl_spec_artifacts)[-1]
+    try:
+        content = artifact.read_text()
+        match = re.search(r"```json\n(.*?)\n```", content, re.DOTALL)
+        if match:
+            return json.loads(match.group(1))
+    except Exception:
+        return None
+    return None
+
+
 def _inject_external_spec_mode(project: str, role: str, context: dict) -> dict:
     """Inject PM endorsement mode when an external spec is configured."""
     if role != "pm":
@@ -3885,8 +4388,20 @@ def _goal_artifacts_dir(project: str) -> Path:
     return path
 
 
-def _load_authored_prompt(role: str) -> str:
+def _resolve_prompt_path(role: str) -> Path:
     prompt_path = ENKI_ROOT / "prompts" / f"{role}.md"
+    if prompt_path.exists():
+        return prompt_path
+    alias_role = PROMPT_ROLE_ALIASES.get(role)
+    if alias_role:
+        alias_path = ENKI_ROOT / "prompts" / f"{alias_role}.md"
+        if alias_path.exists():
+            return alias_path
+    return prompt_path
+
+
+def _load_authored_prompt(role: str) -> str:
+    prompt_path = _resolve_prompt_path(role)
     if not prompt_path.exists():
         raise FileNotFoundError(f"Missing authored prompt: {prompt_path}")
     return prompt_path.read_text()

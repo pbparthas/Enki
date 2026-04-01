@@ -7,6 +7,24 @@ DDL copied verbatim from EM Orchestrator Spec v1.4, Section 20.
 """
 
 
+def migrate_add_agent_briefs(conn) -> None:
+    """Add agent_briefs column to task_state if not present."""
+    try:
+        conn.execute("ALTER TABLE task_state ADD COLUMN agent_briefs TEXT")
+        conn.commit()
+    except Exception:
+        pass
+
+
+def migrate_add_impl_council_state(conn) -> None:
+    """Add impl_council_state column to sprint_state if not present."""
+    try:
+        conn.execute("ALTER TABLE sprint_state ADD COLUMN impl_council_state TEXT")
+        conn.commit()
+    except Exception:
+        pass
+
+
 def create_tables(conn) -> None:
     """Create em.db tables."""
 
@@ -75,7 +93,8 @@ def create_tables(conn) -> None:
             session_id TEXT,
             worktree_path TEXT,
             task_phase TEXT DEFAULT 'test_design',
-            description TEXT
+            description TEXT,
+            agent_briefs TEXT
         )
     """)
     for col, coltype, default in [
@@ -83,6 +102,7 @@ def create_tables(conn) -> None:
         ("worktree_path", "TEXT", None),
         ("task_phase", "TEXT", "'test_design'"),
         ("description", "TEXT", None),
+        ("agent_briefs", "TEXT", None),
     ]:
         try:
             if default:
@@ -93,6 +113,7 @@ def create_tables(conn) -> None:
                 conn.execute(f"ALTER TABLE task_state ADD COLUMN {col} {coltype}")
         except Exception:
             pass
+    migrate_add_agent_briefs(conn)
 
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_task_sprint "
@@ -134,9 +155,11 @@ def create_tables(conn) -> None:
             status TEXT DEFAULT 'pending',
             dependencies TEXT,
             started_at TIMESTAMP,
-            completed_at TIMESTAMP
+            completed_at TIMESTAMP,
+            impl_council_state TEXT
         )
     """)
+    migrate_add_impl_council_state(conn)
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS bugs (
