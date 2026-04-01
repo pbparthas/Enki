@@ -66,6 +66,7 @@ LAYER0_PROTECTED = {
     "devops.md",
     "performance.md",
     "researcher.md",
+    "security-architect.md",
     "em.md",
 }
 

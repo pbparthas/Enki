@@ -201,6 +201,7 @@ async def list_tools() -> list[Tool]:
                     "role": {"type": "string"},
                     "task_id": {"type": "string"},
                     "summary": {"type": "string"},
+                    "mode": {"type": "string"},
                     "status": {"type": "string", "enum": ["completed", "failed"], "default": "completed"},
                     "output": {"type": "object", "description": "Optional structured agent output incl. concerns"},
                     "project": {"type": "string", "default": "default"},
@@ -657,6 +658,7 @@ def _handle_report(args: dict) -> str:
         task_id=args["task_id"],
         summary=args["summary"],
         status=args.get("status", "completed"),
+        mode=args.get("mode"),
         output=args.get("output"),
         project=args.get("project"),
     )

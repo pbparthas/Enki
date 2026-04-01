@@ -45,6 +45,17 @@ def _extract_sprint_number(sprint_id: str) -> int | None:
     return None
 
 
+def compute_checkpoint_interval(total_tasks: int) -> int | None:
+    """Compute Reviewer checkpoint interval based on sprint size."""
+    if total_tasks < 10:
+        return None
+    if total_tasks <= 20:
+        return total_tasks // 2
+    if total_tasks <= 40:
+        return total_tasks // 3
+    return total_tasks // 5
+
+
 class TaskStatus(str, Enum):
     PENDING = "pending"
     IN_PROGRESS = "in_progress"
