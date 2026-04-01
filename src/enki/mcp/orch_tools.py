@@ -2261,6 +2261,28 @@ def enki_spawn(
         prompt = _load_authored_prompt(role_key)
         prompt_display = f"~/.enki/prompts/{prompt_path.name}"
         task = get_task(project, task_id) or {}
+
+        # Deep Thought — transparent model routing.
+        try:
+            from enki.orch.deep_thought import select_model
+            complexity_score, model_recommended = select_model(
+                role=role_key,
+                task=task or {},
+                graph_context=None,
+            )
+        except Exception:
+            complexity_score, model_recommended = 0, "claude-sonnet-4-6"
+
+        if task_id:
+            try:
+                with em_db(project) as conn:
+                    conn.execute(
+                        "UPDATE task_state SET model_used = ? WHERE task_id = ?",
+                        (model_recommended, task_id),
+                    )
+            except Exception:
+                pass
+
         merged_context = {"task": task, **(context or {})}
         merged_context = _inject_external_spec_mode(project, role_key, merged_context)
         merged_context = _inject_architect_context(project, role_key, merged_context)
@@ -2356,11 +2378,12 @@ def enki_spawn(
         _upsert_agent_status(goal_id, f"{role_key}:{task_id}", "in_progress")
         return {
             "message": (
-                f"Agent {role_key} prepared. "
+                f"Agent {role_key} prepared. Model: {model_recommended} "
+                f"(complexity score: {complexity_score}).\n"
                 f"1. Read prompt file verbatim: {prompt_display}\n"
                 f"2. Read context artifact from disk: {artifact}\n"
                 "   (read in chunks if large — never skip, never summarize)\n"
-                "3. Run via Task tool in foreground — never Background tool.\n"
+                f"3. Run via Task tool in foreground (model={model_recommended}) — never Background tool.\n"
                 f"4. After Task completes: call enki_report(role='{role_key}', task_id='{task_id}', summary=..., status='completed'|'failed')."
             ),
             "role": role_key,
@@ -2373,6 +2396,8 @@ def enki_spawn(
             "prompt_path": prompt_display,
             "context_artifact": str(artifact),
             "task_id": task_id,
+            "model_recommended": model_recommended,
+            "complexity_score": complexity_score,
         }
     except Exception as e:
         return {
@@ -3278,7 +3303,38 @@ def enki_status_update(project: str | None = None) -> dict:
 
 def enki_sprint_summary(sprint_id: str, project: str = ".") -> dict:
     """Get sprint summary."""
-    return get_sprint_summary(project, sprint_id)
+    project = _resolve_project(project)
+    result = get_sprint_summary(project, sprint_id)
+    if result.get("error"):
+        return result
+
+    try:
+        session_id = _get_current_session_id()
+        if session_id:
+            with uru_db() as conn:
+                drift_row = conn.execute(
+                    "SELECT cumulative_score, nudge_count, escalated "
+                    "FROM session_drift WHERE session_id = ?",
+                    (session_id,),
+                ).fetchone()
+            if drift_row:
+                score = float(drift_row["cumulative_score"] or 0.0)
+                escalated = bool(drift_row["escalated"])
+                result["drift"] = {
+                    "cumulative_score": round(score, 1),
+                    "nudge_count": int(drift_row["nudge_count"] or 0),
+                    "escalated": escalated,
+                    "status": (
+                        "escalated"
+                        if escalated
+                        else "warning" if score >= 8
+                        else "clean"
+                    ),
+                }
+    except Exception:
+        pass
+
+    return result
 
 
 def enki_sprint_close(project: str | None = None) -> dict:
@@ -4386,6 +4442,21 @@ def _goal_artifacts_dir(project: str) -> Path:
     path = ENKI_ROOT / "artifacts" / normalize_project_name(project)
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def _get_current_session_id() -> str | None:
+    """Return current session id from env or ENKI_ROOT marker file."""
+    session_id = (os.environ.get("ENKI_SESSION_ID") or "").strip()
+    if session_id:
+        return session_id
+    sid_file = ENKI_ROOT / "current_session_id"
+    if sid_file.exists():
+        try:
+            sid = sid_file.read_text().strip()
+            return sid or None
+        except Exception:
+            return None
+    return None
 
 
 def _resolve_prompt_path(role: str) -> Path:

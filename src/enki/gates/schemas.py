@@ -5,6 +5,39 @@ uru.db: Enforcement logs, feedback proposals, nudge state.
 DDL copied verbatim from Uru Gates Spec v1.1, Section 11.
 """
 
+DRIFT_SCHEMA = """
+CREATE TABLE IF NOT EXISTS drift_events (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    timestamp TEXT NOT NULL,
+    tool_name TEXT,
+    tool_input_summary TEXT,
+    drift_contribution REAL DEFAULT 0,
+    cumulative_drift REAL DEFAULT 0,
+    event_type TEXT DEFAULT 'scored',
+    pattern_matched TEXT,
+    details TEXT
+);
+
+CREATE TABLE IF NOT EXISTS session_drift (
+    session_id TEXT PRIMARY KEY,
+    cumulative_score REAL DEFAULT 0,
+    last_updated TEXT,
+    nudge_count INTEGER DEFAULT 0,
+    escalated INTEGER DEFAULT 0,
+    project TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_drift_session ON drift_events(session_id);
+CREATE INDEX IF NOT EXISTS idx_drift_time ON drift_events(timestamp);
+"""
+
+
+def _migrate_drift_tables(conn) -> None:
+    """Add drift scoring tables if not present."""
+    conn.executescript(DRIFT_SCHEMA)
+    conn.commit()
+
 
 def create_tables(conn) -> None:
     """Create uru.db tables."""
@@ -82,3 +115,4 @@ def create_tables(conn) -> None:
         "CREATE INDEX IF NOT EXISTS idx_agent_status_goal "
         "ON agent_status(goal_id, agent_role, status)"
     )
+    _migrate_drift_tables(conn)

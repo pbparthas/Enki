@@ -25,6 +25,15 @@ def migrate_add_impl_council_state(conn) -> None:
         pass
 
 
+def migrate_add_model_used(conn) -> None:
+    """Add model_used column to task_state if not present."""
+    try:
+        conn.execute("ALTER TABLE task_state ADD COLUMN model_used TEXT")
+        conn.commit()
+    except Exception:
+        pass
+
+
 def create_tables(conn) -> None:
     """Create em.db tables."""
 
@@ -94,7 +103,8 @@ def create_tables(conn) -> None:
             worktree_path TEXT,
             task_phase TEXT DEFAULT 'test_design',
             description TEXT,
-            agent_briefs TEXT
+            agent_briefs TEXT,
+            model_used TEXT
         )
     """)
     for col, coltype, default in [
@@ -103,6 +113,7 @@ def create_tables(conn) -> None:
         ("task_phase", "TEXT", "'test_design'"),
         ("description", "TEXT", None),
         ("agent_briefs", "TEXT", None),
+        ("model_used", "TEXT", None),
     ]:
         try:
             if default:
@@ -114,6 +125,7 @@ def create_tables(conn) -> None:
         except Exception:
             pass
     migrate_add_agent_briefs(conn)
+    migrate_add_model_used(conn)
 
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_task_sprint "

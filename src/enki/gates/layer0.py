@@ -41,6 +41,7 @@ LAYER0_PROTECTED = {
     "abzu.py",
     "sanitization.py",
     "sanitization_patterns.json",
+    "drift-patterns.json",
     "verification.py",
     "hook_versioning.py",
     "test_approval.py",
