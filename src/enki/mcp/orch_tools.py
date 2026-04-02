@@ -146,6 +146,11 @@ BRIEF_FIELD_MAP = {
     "devops": "devops_notes",
 }
 
+GRAPH_AWARE_ROLES = {
+    "dev", "reviewer", "architect", "qa", "infosec",
+    "security-auditor", "performance",
+}
+
 PLAYBOOK_CONTENT = """# Enki PLAYBOOK — Exact Operational Sequences
 
 This is your step-by-step guide for every phase. Follow it exactly.
@@ -2335,6 +2340,25 @@ def enki_spawn(
             except Exception:
                 pass
 
+        if role_key in GRAPH_AWARE_ROLES:
+            assigned_files = merged_context.get("assigned_files") or []
+            if not assigned_files:
+                task_payload = merged_context.get("task") or {}
+                if isinstance(task_payload, dict):
+                    assigned_files = task_payload.get("assigned_files") or []
+            if isinstance(assigned_files, str):
+                try:
+                    assigned_files = json.loads(assigned_files or "[]")
+                except Exception:
+                    assigned_files = []
+            if isinstance(assigned_files, list) and assigned_files:
+                try:
+                    codebase_ctx = _build_codebase_context(project, assigned_files)
+                    if codebase_ctx:
+                        merged_context["codebase_context"] = codebase_ctx
+                except Exception:
+                    pass
+
         filtered_context = _apply_blind_wall(role_key, merged_context)
 
         # Strip conversation context from adversarial review agents.
@@ -3367,6 +3391,150 @@ def enki_status_update(project: str | None = None) -> dict:
     return {"status_text": text}
 
 
+def enki_graph_rebuild(
+    project: str | None = None,
+    incremental: bool = False,
+) -> dict:
+    """Build or rebuild the codebase knowledge graph for a project."""
+    project = _resolve_project(project)
+    active = _require_active_goal(project)
+    if active.get("error"):
+        return active
+
+    project_path = _get_project_path(project)
+    if not project_path:
+        return {
+            "error": (
+                f"Project path not registered for '{project}'. "
+                "Call enki_register(path='.') first."
+            )
+        }
+
+    try:
+        from enki.graph.scanner import run_full_scan, run_incremental_update
+
+        if incremental:
+            stats = run_incremental_update(project, project_path)
+        else:
+            stats = run_full_scan(project, project_path)
+    except ImportError:
+        return {
+            "error": (
+                "tree-sitter-languages not installed. "
+                "Run: pip install tree-sitter-languages==1.10.2"
+            )
+        }
+    except Exception as e:
+        return {"error": f"Graph build failed: {e}"}
+
+    return {
+        "message": f"Graph {'updated' if incremental else 'built'} for {project}.",
+        "project": project,
+        "incremental": incremental,
+        **stats,
+    }
+
+
+def enki_graph_query(
+    query_type: str,
+    target: str,
+    project: str | None = None,
+    limit: int = 10,
+) -> dict:
+    """Query the codebase knowledge graph."""
+    project = _resolve_project(project)
+
+    from enki.db import graph_db, graph_db_path
+
+    if not graph_db_path(project).exists():
+        return {
+            "error": (
+                "No graph.db found for this project. "
+                "Call enki_graph_rebuild() first."
+            )
+        }
+
+    try:
+        with graph_db(project) as conn:
+            if query_type == "blast_radius":
+                rows = conn.execute(
+                    "SELECT b.*, f.language FROM blast_radius b "
+                    "JOIN files f ON b.file_path = f.path "
+                    "WHERE b.file_path = ? OR b.symbol_id LIKE ?",
+                    (target, f"{target}%"),
+                ).fetchall()
+                return {
+                    "query_type": query_type,
+                    "target": target,
+                    "results": [dict(r) for r in rows[:limit]],
+                }
+
+            if query_type == "importers":
+                rows = conn.execute(
+                    "SELECT from_id, line_number FROM edges "
+                    "WHERE to_id = ? AND edge_type = 'imports' "
+                    "LIMIT ?",
+                    (target, limit),
+                ).fetchall()
+                return {
+                    "query_type": query_type,
+                    "target": target,
+                    "importers": [r["from_id"] for r in rows],
+                    "count": len(rows),
+                }
+
+            if query_type == "imports":
+                rows = conn.execute(
+                    "SELECT to_id, line_number FROM edges "
+                    "WHERE from_id = ? AND edge_type = 'imports' "
+                    "LIMIT ?",
+                    (target, limit),
+                ).fetchall()
+                return {
+                    "query_type": query_type,
+                    "target": target,
+                    "imports": [r["to_id"] for r in rows],
+                    "count": len(rows),
+                }
+
+            if query_type == "symbols":
+                rows = conn.execute(
+                    "SELECT name, kind, line_start, complexity, is_exported "
+                    "FROM symbols WHERE file_path = ? "
+                    "ORDER BY line_start LIMIT ?",
+                    (target, limit),
+                ).fetchall()
+                return {
+                    "query_type": query_type,
+                    "target": target,
+                    "symbols": [dict(r) for r in rows],
+                    "count": len(rows),
+                }
+
+            if query_type == "complexity":
+                rows = conn.execute(
+                    "SELECT name, kind, line_start, complexity "
+                    "FROM symbols WHERE file_path = ? "
+                    "ORDER BY complexity DESC LIMIT ?",
+                    (target, limit),
+                ).fetchall()
+                return {
+                    "query_type": query_type,
+                    "target": target,
+                    "hotspots": [dict(r) for r in rows],
+                }
+
+            return {
+                "error": (
+                    f"Unknown query_type '{query_type}'. "
+                    "Options: blast_radius, importers, imports, "
+                    "symbols, complexity, duplicates, callers"
+                )
+            }
+    except Exception as e:
+        return {"error": f"Graph query failed: {e}"}
+
+
 def enki_sprint_summary(sprint_id: str, project: str = ".") -> dict:
     """Get sprint summary."""
     project = _resolve_project(project)
@@ -3861,6 +4029,71 @@ def _get_impl_spec_path(project: str) -> Path | None:
     artifacts_dir = _goal_artifacts_dir(project)
     candidates = list(artifacts_dir.glob("spawn-architect-impl-spec*.md"))
     return sorted(candidates)[-1] if candidates else None
+
+
+def _build_codebase_context(project: str, assigned_files: list[str]) -> str | None:
+    """Build a codebase context block for assigned files from graph.db."""
+    from enki.db import graph_db, graph_db_path
+
+    if not graph_db_path(project).exists():
+        return None
+
+    lines = ["## Codebase Context (from knowledge graph)"]
+    try:
+        with graph_db(project) as conn:
+            for file_path in assigned_files[:5]:
+                importers = conn.execute(
+                    "SELECT COUNT(*) as c FROM edges "
+                    "WHERE to_id=? AND edge_type='imports'",
+                    (file_path,),
+                ).fetchone()["c"]
+
+                blast = conn.execute(
+                    "SELECT MAX(blast_score) as s, MAX(risk_level) as r "
+                    "FROM blast_radius WHERE file_path=?",
+                    (file_path,),
+                ).fetchone()
+
+                complexity = conn.execute(
+                    "SELECT MAX(complexity) as c FROM symbols WHERE file_path=?",
+                    (file_path,),
+                ).fetchone()["c"]
+
+                file_lines = [f"\n**{file_path}**"]
+                if importers > 0:
+                    file_lines.append(f"  - Imported by {importers} file(s)")
+                if blast and blast["s"] and blast["s"] > 0.1:
+                    risk = (blast["r"] or "low").upper()
+                    file_lines.append(
+                        "  - Blast radius: "
+                        f"{risk} — changes ripple widely"
+                        if blast["s"] > 0.5
+                        else f"  - Blast radius: {risk}"
+                    )
+                if complexity and complexity > 15:
+                    file_lines.append(
+                        "  - Max symbol complexity: "
+                        f"{complexity} (above threshold — consider splitting)"
+                    )
+
+                dupe = conn.execute(
+                    "SELECT to_id FROM edges "
+                    "WHERE from_id=? AND edge_type='duplicates' LIMIT 1",
+                    (file_path,),
+                ).fetchone()
+                if dupe:
+                    file_lines.append(
+                        f"  - Similar code exists in: {dupe['to_id']} — "
+                        "consider extracting shared logic"
+                    )
+
+                lines.extend(file_lines)
+    except Exception:
+        return None
+
+    if len(lines) <= 1:
+        return None
+    return "\n".join(lines)
 
 
 def _propose_specialist_panel(project: str, impl_spec: dict) -> dict:

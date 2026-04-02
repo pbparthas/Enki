@@ -51,5 +51,7 @@ ereshkigal.py
 wisdom.db
 abzu.db
 em.db
+graph.db
+**/graph.db
 *.db-journal
 .worktrees/

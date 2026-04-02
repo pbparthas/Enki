@@ -55,8 +55,8 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="enki_recall",
             description=(
-                "Search memory for relevant notes. When to call: at the START of every session "
-                "before doing any work, and before architectural decisions to check prior solutions."
+                "Search memory and/or codebase graph context. "
+                "When to call: at session start and before implementation decisions."
             ),
             inputSchema={
                 "type": "object",
@@ -64,9 +64,9 @@ async def list_tools() -> list[Tool]:
                     "query": {"type": "string", "description": "Search query"},
                     "scope": {
                         "type": "string",
-                        "enum": ["project", "global"],
-                        "description": "Search scope (default: project)",
-                        "default": "project",
+                        "enum": ["knowledge", "codebase", "all", "project", "global"],
+                        "description": "Search scope (default: all). project/global kept for backward compatibility.",
+                        "default": "all",
                     },
                     "project": {"type": "string", "description": "Optional project filter"},
                     "limit": {"type": "integer", "description": "Max results", "default": 5},
@@ -454,6 +454,40 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="enki_graph_rebuild",
+            description=(
+                "Build or rebuild codebase knowledge graph (graph.db) for the active project. "
+                "Use incremental=true to update only changed files."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "project": {"type": "string", "default": "default"},
+                    "incremental": {"type": "boolean", "default": False},
+                },
+            },
+        ),
+        Tool(
+            name="enki_graph_query",
+            description="Query graph.db (blast radius, imports/importers, symbols, complexity hotspots).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query_type": {
+                        "type": "string",
+                        "enum": [
+                            "blast_radius", "importers", "imports",
+                            "callers", "duplicates", "complexity", "symbols",
+                        ],
+                    },
+                    "target": {"type": "string"},
+                    "project": {"type": "string", "default": "default"},
+                    "limit": {"type": "integer", "default": 10},
+                },
+                "required": ["query_type", "target"],
+            },
+        ),
+        Tool(
             name="enki_mail_inbox",
             description=(
                 "Read unread messages in EM inbox. Call after each wave completes to read "
@@ -572,9 +606,9 @@ def _handle_recall(args: dict) -> str:
     from .mcp.memory_tools import enki_recall
     results = enki_recall(
         query=args["query"],
-        scope=args.get("scope", "project"),
         project=args.get("project"),
         limit=args.get("limit", 5),
+        scope=args.get("scope", "all"),
     )
     if not results:
         return "No relevant knowledge found."
@@ -817,6 +851,28 @@ def _handle_status_update(args: dict) -> str:
     return json.dumps(result, indent=2)
 
 
+def _handle_graph_rebuild(args: dict) -> str:
+    from .mcp.orch_tools import enki_graph_rebuild
+
+    result = enki_graph_rebuild(
+        project=args.get("project", "default"),
+        incremental=args.get("incremental", False),
+    )
+    return json.dumps(result, indent=2)
+
+
+def _handle_graph_query(args: dict) -> str:
+    from .mcp.orch_tools import enki_graph_query
+
+    result = enki_graph_query(
+        query_type=args["query_type"],
+        target=args["target"],
+        project=args.get("project", "default"),
+        limit=args.get("limit", 10),
+    )
+    return json.dumps(result, indent=2)
+
+
 def _handle_mail_inbox(args: dict) -> str:
     from .mcp.orch_tools import enki_mail_inbox
     result = enki_mail_inbox(
@@ -904,6 +960,8 @@ TOOL_HANDLERS = {
     "enki_wave_reconcile": _handle_wave_reconcile,
     "enki_diagram": _handle_diagram,
     "enki_status_update": _handle_status_update,
+    "enki_graph_rebuild": _handle_graph_rebuild,
+    "enki_graph_query": _handle_graph_query,
     "enki_mail_inbox": _handle_mail_inbox,
     "enki_mail_thread": _handle_mail_thread,
     "enki_next_actions": _handle_next_actions,
