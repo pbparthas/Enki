@@ -86,7 +86,7 @@ from enki.memory.staging import resolve_candidate_id
 
 logger = logging.getLogger(__name__)
 
-PHASE_ORDER = ["planning", "spec", "approved", "implement", "validating", "complete"]
+PHASE_ORDER = ["planning", "spec", "approved", "implement", "validating", "closing", "complete"]
 PHASE_ALIASES = {
     "spec-review": "spec",
     "approve": "approved",
@@ -96,6 +96,7 @@ PHASE_ALIASES = {
 VALID_AGENT_ROLES = {
     "pm", "architect", "dba", "dev", "qa", "ui_ux", "validator",
     "reviewer", "infosec", "devops", "performance", "researcher", "em",
+    "technical-writer",
     "igi", "cto", "devils_advocate", "tech_feasibility", "historical_context",
     "security-architect",
     "typescript-dev-reviewer", "typescript-qa-reviewer",
@@ -125,6 +126,7 @@ PROMPT_ROLE_ALIASES = {
     "security-auditor": "infosec",
     "security-architect": "infosec",
     "ai-engineer": "reviewer",
+    "technical-writer": "pm",
 }
 
 BRIEF_FIELD_MAP = {
@@ -3535,6 +3537,400 @@ def enki_graph_query(
         return {"error": f"Graph query failed: {e}"}
 
 
+def enki_validate(
+    scope: str = "sprint",
+    project: str | None = None,
+) -> dict:
+    """Validation state machine for sprint-end and project-end."""
+    project = _resolve_project(project)
+    active = _require_active_goal(project)
+    if active.get("error"):
+        return active
+
+    scope_key = (scope or "sprint").strip().lower()
+    if scope_key not in ("sprint", "project"):
+        return {"error": "scope must be 'sprint' or 'project'"}
+
+    sprint = get_active_sprint(project)
+    if not sprint:
+        return {"error": "No active sprint. Cannot validate."}
+    sprint_id = sprint["sprint_id"]
+
+    state = _load_validate_state(project, sprint_id)
+    if not state:
+        state = {
+            "scope": scope_key,
+            "status": "init",
+            "audits_complete": [],
+            "bugs_filed": [],
+            "fix_cycles": 0,
+            "spawn_instructions": [],
+        }
+    else:
+        state["scope"] = state.get("scope", scope_key)
+
+    status = state.get("status", "init")
+
+    if status == "init":
+        modified_files = _get_sprint_modified_files(project, sprint_id)
+        spec_path = _get_spec_final_path(project)
+        impl_spec_path = _get_impl_spec_path(project)
+        spawn_instructions = []
+
+        devops_context = {
+            "mode": "full-regression" if scope_key == "project" else "sprint-tests",
+            "modified_files": modified_files,
+            "sprint_id": sprint_id,
+        }
+        devops_spawn = enki_spawn("devops", f"{sprint_id}-tests", devops_context, project)
+        spawn_instructions.append({
+            "role": "devops",
+            "mode": devops_context["mode"],
+            "task_id": f"{sprint_id}-tests",
+            "prompt_path": devops_spawn.get("prompt_path"),
+            "context_artifact": devops_spawn.get("context_artifact"),
+        })
+
+        infosec_context = {
+            "mode": "sprint-audit",
+            "spec_final_path": str(spec_path) if spec_path else None,
+            "impl_spec_path": str(impl_spec_path) if impl_spec_path else None,
+            "modified_files": modified_files,
+            "sprint_id": sprint_id,
+        }
+        infosec_spawn = enki_spawn(
+            "infosec",
+            f"{sprint_id}-infosec-audit",
+            infosec_context,
+            project,
+        )
+        spawn_instructions.append({
+            "role": "infosec",
+            "mode": "sprint-audit",
+            "task_id": f"{sprint_id}-infosec-audit",
+            "prompt_path": infosec_spawn.get("prompt_path"),
+            "context_artifact": infosec_spawn.get("context_artifact"),
+        })
+
+        reviewer_context = {
+            "mode": "sprint-review",
+            "spec_final_path": str(spec_path) if spec_path else None,
+            "impl_spec_path": str(impl_spec_path) if impl_spec_path else None,
+            "modified_files": modified_files,
+            "sprint_id": sprint_id,
+        }
+        reviewer_spawn = enki_spawn(
+            "reviewer",
+            f"{sprint_id}-sprint-review",
+            reviewer_context,
+            project,
+        )
+        spawn_instructions.append({
+            "role": "reviewer",
+            "mode": "sprint-review",
+            "task_id": f"{sprint_id}-sprint-review",
+            "prompt_path": reviewer_spawn.get("prompt_path"),
+            "context_artifact": reviewer_spawn.get("context_artifact"),
+        })
+
+        if scope_key == "project":
+            validator_context = {
+                "mode": "project-compliance",
+                "spec_final_path": str(spec_path) if spec_path else None,
+                "modified_files": modified_files,
+                "sprint_id": sprint_id,
+            }
+            validator_spawn = enki_spawn(
+                "validator",
+                f"{sprint_id}-project-compliance",
+                validator_context,
+                project,
+            )
+            spawn_instructions.append({
+                "role": "validator",
+                "mode": "project-compliance",
+                "task_id": f"{sprint_id}-project-compliance",
+                "prompt_path": validator_spawn.get("prompt_path"),
+                "context_artifact": validator_spawn.get("context_artifact"),
+            })
+
+        state["status"] = "auditing"
+        state["spawn_instructions"] = spawn_instructions
+        _save_validate_state(project, sprint_id, state)
+        return {
+            "message": f"Validation started ({scope_key} scope). Run all auditors.",
+            "scope": scope_key,
+            "spawn_instructions": spawn_instructions,
+            "next": (
+                "Run each auditor via Task tool (foreground, sequential). "
+                "After each: call enki_validate_update(role=..., output=...). "
+                "After all complete: call enki_validate() again."
+            ),
+        }
+
+    if status == "auditing":
+        audits_complete = state.get("audits_complete", [])
+        required = ["devops", "infosec", "reviewer"]
+        if state.get("scope") == "project":
+            required.append("validator")
+        pending = [r for r in required if r not in audits_complete]
+        if pending:
+            return {
+                "message": f"Waiting for auditors to complete: {pending}",
+                "completed": audits_complete,
+                "pending": pending,
+            }
+        state["status"] = "prioritizing"
+        _save_validate_state(project, sprint_id, state)
+        status = "prioritizing"
+
+    if status == "prioritizing":
+        open_bugs = _get_draft_bugs(project)
+        if not open_bugs:
+            state["status"] = "clear"
+            _save_validate_state(project, sprint_id, state)
+            status = "clear"
+        else:
+            spec_path = _get_spec_final_path(project)
+            priority_context = {
+                "mode": "bug-prioritization",
+                "bugs": open_bugs,
+                "spec_final_path": str(spec_path) if spec_path else None,
+                "instruction": (
+                    "Review all draft bugs and assign final priority. "
+                    "P0: exploitable/blocking. P1: significant/required fix. "
+                    "P2: important but not blocking. P3: minor/informational. "
+                    "Output JSON: {bugs: [{bug_id, priority, rationale}]}"
+                ),
+            }
+            arch_spawn = enki_spawn(
+                "architect",
+                f"{sprint_id}-bug-priority",
+                priority_context,
+                project,
+            )
+            state["status"] = "awaiting_priority"
+            _save_validate_state(project, sprint_id, state)
+            return {
+                "message": "Bugs filed. Architect priority review required.",
+                "bugs_to_prioritize": len(open_bugs),
+                "spawn_instructions": [{
+                    "role": "architect",
+                    "mode": "bug-prioritization",
+                    "task_id": f"{sprint_id}-bug-priority",
+                    "prompt_path": arch_spawn.get("prompt_path"),
+                    "context_artifact": arch_spawn.get("context_artifact"),
+                }],
+                "next": (
+                    "Run Architect via Task tool. After completion call "
+                    "enki_validate_update(role='architect', output={bugs:[...]})."
+                ),
+            }
+
+    if status == "awaiting_priority":
+        blocking_bugs = _get_bugs_by_severity(project, ["P0", "P1"])
+        state["status"] = "fixing" if blocking_bugs else "clear"
+        _save_validate_state(project, sprint_id, state)
+        status = state["status"]
+
+    if status == "fixing":
+        blocking_bugs = _get_bugs_by_severity(project, ["P0", "P1"])
+        unfixed = [b for b in blocking_bugs if b.get("status") == "open"]
+        if not unfixed:
+            state["status"] = "revalidating"
+            _save_validate_state(project, sprint_id, state)
+            status = "revalidating"
+        else:
+            fix_cycle = int(state.get("fix_cycles", 0)) + 1
+            state["fix_cycles"] = fix_cycle
+            spawn_instructions = []
+            for bug in unfixed[:3]:
+                if int(bug.get("revalidation_cycle") or 0) >= 3:
+                    _escalate_bug(project, bug["id"])
+                    continue
+                fix_context = {
+                    "mode": "bug-fix",
+                    "bug_id": bug["id"],
+                    "bug_title": bug.get("title", ""),
+                    "bug_description": bug.get("description", ""),
+                    "files_to_fix": _bug_affected_files(bug),
+                    "reported_by": _bug_reporter(bug),
+                }
+                dev_spawn = enki_spawn("dev", f"bugfix-{bug['id']}", fix_context, project)
+                spawn_instructions.append({
+                    "role": "dev",
+                    "bug_id": bug["id"],
+                    "task_id": f"bugfix-{bug['id']}",
+                    "prompt_path": dev_spawn.get("prompt_path"),
+                    "context_artifact": dev_spawn.get("context_artifact"),
+                })
+
+            _save_validate_state(project, sprint_id, state)
+            if spawn_instructions:
+                return {
+                    "message": f"Fix cycle {fix_cycle}. {len(unfixed)} P0/P1 bugs to fix.",
+                    "spawn_instructions": spawn_instructions,
+                    "next": (
+                        "For each bug: run Dev -> QA execute -> Validator compliance. "
+                        "After all fixed: call enki_validate_update(role='fix-complete', "
+                        "output={fixed_bugs:[...]})."
+                    ),
+                }
+
+    if status == "revalidating":
+        needs_revalidation = _get_bugs_needing_revalidation(project)
+        if not needs_revalidation:
+            state["status"] = "clear"
+            _save_validate_state(project, sprint_id, state)
+            status = "clear"
+        else:
+            spawn_instructions = []
+            for bug in needs_revalidation:
+                reporter = _bug_reporter(bug) or "infosec"
+                reval_context = {
+                    "mode": "revalidate",
+                    "bug_id": bug["id"],
+                    "original_concern": bug.get("description", ""),
+                    "files_to_check": _bug_affected_files(bug),
+                    "fix_summary": bug.get("fix_summary", ""),
+                }
+                reporter_spawn = enki_spawn(
+                    reporter,
+                    f"revalidate-{bug['id']}",
+                    reval_context,
+                    project,
+                )
+                spawn_instructions.append({
+                    "role": reporter,
+                    "bug_id": bug["id"],
+                    "task_id": f"revalidate-{bug['id']}",
+                    "prompt_path": reporter_spawn.get("prompt_path"),
+                    "context_artifact": reporter_spawn.get("context_artifact"),
+                })
+            return {
+                "message": f"Reporter revalidation required for {len(needs_revalidation)} bugs.",
+                "spawn_instructions": spawn_instructions,
+                "next": (
+                    "Run each reporter via Task tool. After each: "
+                    "call enki_validate_update(role=reporter, "
+                    "output={bug_id:..., cleared:bool})."
+                ),
+            }
+
+    if status == "clear":
+        p2p3 = _get_bugs_by_severity(project, ["P2", "P3"])
+        scope_done = state.get("scope", scope_key)
+        disposition = "carry_to_next_sprint" if scope_done == "sprint" else "tech_debt"
+        return {
+            "message": f"Validation complete ({scope_done} scope). All P0/P1 resolved.",
+            "scope": scope_done,
+            "p2p3_bugs": len(p2p3),
+            "p2p3_disposition": disposition,
+            "next": (
+                "Call enki_sprint_close() to complete sprint and generate summary."
+                if scope_done == "sprint"
+                else "Call enki_project_close() to finalize the project."
+            ),
+        }
+
+    return {"error": f"Unknown validate state: {status}"}
+
+
+def enki_validate_update(
+    role: str,
+    output: dict,
+    project: str | None = None,
+) -> dict:
+    """Record auditor/fixer output during validation."""
+    project = _resolve_project(project)
+    sprint = get_active_sprint(project)
+    if not sprint:
+        return {"error": "No active sprint."}
+    sprint_id = sprint["sprint_id"]
+    state = _load_validate_state(project, sprint_id) or {}
+    role_key = (role or "").strip().lower()
+
+    if role_key in ("devops", "infosec", "reviewer", "validator"):
+        completed = state.get("audits_complete", [])
+        if role_key not in completed:
+            completed.append(role_key)
+        state["audits_complete"] = completed
+
+        bugs_filed = []
+        findings = []
+        for key in ("violations", "spec_gaps", "pattern_issues", "architectural_issues"):
+            val = output.get(key, [])
+            if isinstance(val, list):
+                findings.extend(val)
+        for issue in findings:
+            if not isinstance(issue, dict):
+                continue
+            severity_raw = str(issue.get("severity", "P2")).strip()
+            if severity_raw in ("error", "P0", "blocking"):
+                sev = "P0"
+            elif severity_raw in ("high", "P1"):
+                sev = "P1"
+            elif severity_raw in ("warning", "medium", "P2"):
+                sev = "P2"
+            else:
+                sev = "P3"
+            bug_id = _file_bug(
+                project=project,
+                title=issue.get("rule", issue.get("pattern", "Issue")),
+                description=issue.get("description", str(issue)),
+                severity=sev,
+                filed_by=role_key,
+                reporter=role_key,
+                affected_files=issue.get("files", issue.get("files_affected", [])),
+            )
+            if bug_id:
+                bugs_filed.append(bug_id)
+
+        state["bugs_filed"] = state.get("bugs_filed", []) + bugs_filed
+        _save_validate_state(project, sprint_id, state)
+        return {
+            "message": f"{role_key} output recorded. {len(bugs_filed)} bugs filed.",
+            "bugs_filed": bugs_filed,
+            "audits_complete": completed,
+        }
+
+    if role_key == "architect":
+        for bug_update in output.get("bugs", []):
+            if isinstance(bug_update, dict):
+                _update_bug_priority(
+                    project,
+                    bug_update.get("bug_id", ""),
+                    bug_update.get("priority", "P2"),
+                )
+        _save_validate_state(project, sprint_id, state)
+        return {"message": "Bug priorities assigned."}
+
+    if role_key == "fix-complete":
+        fix_summary = output.get("fix_summary", "")
+        for bug_id in output.get("fixed_bugs", []):
+            _mark_bug_needs_revalidation(project, bug_id, fix_summary)
+        state["status"] = "revalidating"
+        _save_validate_state(project, sprint_id, state)
+        return {"message": "Fixes recorded. Reporter revalidation queued."}
+
+    bug_id = output.get("bug_id")
+    cleared = bool(output.get("cleared", False))
+    if bug_id:
+        if cleared:
+            _close_bug(project, bug_id)
+        else:
+            _increment_revalidation_cycle(project, bug_id)
+            state["status"] = "fixing"
+            _save_validate_state(project, sprint_id, state)
+    return {
+        "message": (
+            f"Bug {bug_id} cleared."
+            if cleared
+            else f"Bug {bug_id} still open — fix cycle continues."
+        )
+    }
+
+
 def enki_sprint_summary(sprint_id: str, project: str = ".") -> dict:
     """Get sprint summary."""
     project = _resolve_project(project)
@@ -3571,105 +3967,291 @@ def enki_sprint_summary(sprint_id: str, project: str = ".") -> dict:
     return result
 
 
-def enki_sprint_close(project: str | None = None) -> dict:
-    """Run sprint-close pipeline: InfoSec + sprint Reviewer + test consolidation.
-
-    Must be called when enki_wave returns sprint_close_required=True.
-    Gates the advance to validating phase.
-    """
+def enki_sprint_close(
+    project: str | None = None,
+    is_final_sprint: bool | None = None,
+) -> dict:
+    """Close current sprint after validation completes."""
     project = _resolve_project(project)
     active = _require_active_goal(project)
     if active.get("error"):
         return active
-    _ = active["goal_id"]
 
     sprint = get_active_sprint(project)
     if not sprint:
-        return {"error": "No active sprint."}
+        return {"error": "No active sprint to close."}
     sprint_id = sprint["sprint_id"]
 
-    spec_path = _get_spec_final_path(project)
-    impl_spec_path = _get_impl_spec_path(project)
-    all_modified_files = _get_sprint_modified_files(project, sprint_id)
-
-    infosec_context = {
-        "mode": "sprint-audit",
-        "spec_final_path": str(spec_path) if spec_path else None,
-        "impl_spec_path": str(impl_spec_path) if impl_spec_path else None,
-        "modified_files": all_modified_files,
-        "sprint_id": sprint_id,
-        "instruction": (
-            "You are performing a sprint-level security audit. "
-            "Read spec-final.md and implementation spec, then review all modified files. "
-            "Focus on missed security requirements, concrete vulnerabilities, and cross-cutting risk."
-        ),
-    }
-    infosec_spawn = enki_spawn(
+    validate_state = _load_validate_state(project, sprint_id)
+    steps = [
+        "test_consolidation",
+        "full_test_run",
         "infosec",
-        f"{sprint_id}-infosec-audit",
-        infosec_context,
-        project,
-    )
+        "sprint_review",
+        "verify_clean",
+    ]
+    if not validate_state or validate_state.get("status") != "clear":
+        return {
+            "message": (
+                "Sprint close pipeline prepared. "
+                "STEP 1: consolidate tests and artifacts. "
+                "STEP 2: run full test sweep. "
+                "STEP 3: run InfoSec sprint-audit. "
+                "STEP 4: run Reviewer sprint-review. "
+                "STEP 5: resolve P0/P1 findings and verify clean before validating. "
+                "Validation not complete yet; call enki_validate(scope='sprint') first."
+            ),
+            "sprint_id": sprint_id,
+            "steps": steps,
+            "steps_detail": [
+                "infosec_sprint_audit",
+                "sprint_review",
+                "fix_p0_p1",
+                "advance_validating",
+            ],
+            "validate_status": (validate_state or {}).get("status", "not_started"),
+        }
 
-    reviewer_context = {
-        "mode": "sprint-review",
-        "spec_final_path": str(spec_path) if spec_path else None,
-        "impl_spec_path": str(impl_spec_path) if impl_spec_path else None,
-        "modified_files": all_modified_files,
-        "sprint_id": sprint_id,
-        "instruction": (
-            "You are performing a sprint-level code review. "
-            "Read spec-final.md and implementation spec, then review all modified files "
-            "for quality, architecture coherence, and spec-implementation gaps."
-        ),
-    }
-    reviewer_spawn = enki_spawn(
-        "reviewer",
-        f"{sprint_id}-sprint-review",
-        reviewer_context,
-        project,
-    )
+    summary = _generate_sprint_summary(project, sprint_id)
+    p2p3_bugs = _get_bugs_by_severity(project, ["P2", "P3"])
+    carried_tasks = []
+    for bug in p2p3_bugs:
+        carried_tasks.append({
+            "name": f"[Tech Debt] {bug.get('title', 'Untitled bug')}",
+            "description": bug.get("description", ""),
+            "files": _bug_affected_files(bug),
+            "source_bug_id": bug.get("id"),
+            "priority": bug.get("priority", bug.get("severity", "P2")),
+        })
+
+    try:
+        with em_db(project) as conn:
+            conn.execute(
+                "UPDATE sprint_state SET summary=?, status='completed' WHERE sprint_id=?",
+                (json.dumps(summary), sprint_id),
+            )
+    except Exception:
+        pass
+
+    merge_result = _merge_sprint_branch(project, sprint_id)
 
     return {
-        "message": (
-            "Sprint close pipeline prepared. "
-            "STEP 1: consolidate tests and artifacts. "
-            "STEP 2: run full test sweep. "
-            "STEP 3: run InfoSec sprint-audit. "
-            "STEP 4: run Reviewer sprint-review. "
-            "STEP 5: resolve P0/P1 findings and verify clean before validating."
-        ),
+        "message": "Sprint closed successfully.",
         "sprint_id": sprint_id,
-        "files_in_scope": len(all_modified_files),
-        "spawn_instructions": [
-            {
-                "role": "infosec",
-                "task_id": f"{sprint_id}-infosec-audit",
-                "prompt_path": infosec_spawn.get("prompt_path"),
-                "context_artifact": infosec_spawn.get("context_artifact"),
-                "instruction": infosec_spawn.get("instruction"),
-            },
-            {
-                "role": "reviewer",
-                "task_id": f"{sprint_id}-sprint-review",
-                "prompt_path": reviewer_spawn.get("prompt_path"),
-                "context_artifact": reviewer_spawn.get("context_artifact"),
-                "instruction": reviewer_spawn.get("instruction"),
-            },
-        ],
-        "steps": [
-            "test_consolidation",
-            "full_test_run",
-            "infosec",
-            "sprint_review",
-            "verify_clean",
-        ],
+        "summary": summary,
+        "p2p3_carried": len(carried_tasks),
+        "merge_result": merge_result,
+        "steps": steps,
         "steps_detail": [
             "infosec_sprint_audit",
             "sprint_review",
             "fix_p0_p1",
             "advance_validating",
         ],
+        "is_final_sprint": is_final_sprint,
+        "next": (
+            "Call enki_validate(scope='project') to run full project validation."
+            if is_final_sprint
+            else "Call enki_goal(description='...') to start next sprint."
+        ),
+        "next_sprint_seed_tasks": [] if is_final_sprint else carried_tasks,
+    }
+
+
+def enki_project_close(project: str | None = None) -> dict:
+    """Close the project after project-level validation completes."""
+    project = _resolve_project(project)
+    active = _require_active_goal(project)
+    if active.get("error"):
+        return active
+
+    sprint = get_active_sprint(project)
+    if sprint:
+        validate_state = _load_validate_state(project, sprint["sprint_id"])
+        if not validate_state or validate_state.get("status") != "clear":
+            return {
+                "error": (
+                    "Project validation not complete. "
+                    "Call enki_validate(scope='project') first."
+                )
+            }
+
+    project_path = _get_project_path(project)
+    if not project_path:
+        return {"error": "Project path not registered."}
+
+    results = {}
+    results["worktrees_merged"] = _merge_all_worktrees(project, project_path)
+    results["sprint_merged"] = _merge_sprint_to_main(project, project_path)
+    results["pushed"] = _git_push_main(project_path)
+    try:
+        _ = enki_wrap()
+        results["memory_wrap"] = "complete"
+    except Exception as e:
+        results["memory_wrap"] = f"failed: {e}"
+
+    write_project_state(project, "phase", "closing")
+    return {
+        "message": "Project close complete. Pending HITL acceptance.",
+        "project": project,
+        "results": results,
+        "hitl_required": True,
+        "hitl_question": (
+            "Project is ready for final acceptance.\n"
+            "Review project output, then call enki_phase(action='advance', to='complete').\n"
+            "Optionally call enki_document() to generate handover documentation."
+        ),
+    }
+
+
+def enki_document(
+    project: str | None = None,
+    docs: list[str] | None = None,
+) -> dict:
+    """Generate project documentation via staged agent summaries."""
+    project = _resolve_project(project)
+    active = _require_active_goal(project)
+    if active.get("error"):
+        return active
+
+    project_path = _get_project_path(project)
+    if not project_path:
+        return {"error": "Project path not registered."}
+
+    if docs is None:
+        docs = _detect_required_docs(project, project_path)
+
+    spec_path = _get_spec_final_path(project)
+    impl_spec_path = _get_impl_spec_path(project)
+    sprint = get_active_sprint(project)
+    all_files = _get_sprint_modified_files(project, sprint["sprint_id"]) if sprint else []
+
+    pm_context = {
+        "mode": "project-summary",
+        "spec_final_path": str(spec_path) if spec_path else None,
+        "impl_spec_path": str(impl_spec_path) if impl_spec_path else None,
+        "docs_to_generate": docs,
+        "instruction": (
+            "Generate a structured JSON project summary. "
+            "Read spec and summarize tasks, bugs, and key outcomes."
+        ),
+    }
+    pm_spawn = enki_spawn("pm", "project-summary", pm_context, project)
+
+    arch_context = {
+        "mode": "architecture-summary",
+        "impl_spec_path": str(impl_spec_path) if impl_spec_path else None,
+        "modified_files": all_files,
+        "instruction": (
+            "Generate structured architecture summary. "
+            "Use enki_graph_query for topology. Return components, relationships, decisions."
+        ),
+    }
+    arch_spawn = enki_spawn("architect", "architecture-summary", arch_context, project)
+
+    artifacts_dir = _goal_artifacts_dir(project)
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    doc_state_path = artifacts_dir / "document-state.json"
+    state = {"docs_to_generate": docs}
+    if doc_state_path.exists():
+        try:
+            existing = json.loads(doc_state_path.read_text())
+            if isinstance(existing, dict):
+                state.update(existing)
+        except Exception:
+            pass
+    doc_state_path.write_text(json.dumps(state, indent=2))
+
+    return {
+        "message": f"Documentation generation started. {len(docs)} documents to generate.",
+        "docs_to_generate": docs,
+        "spawn_instructions": [
+            {
+                "role": "pm",
+                "mode": "project-summary",
+                "prompt_path": pm_spawn.get("prompt_path"),
+                "context_artifact": pm_spawn.get("context_artifact"),
+                "instruction": "Run PM first, then enki_document_update(role='pm', output={...}).",
+            },
+            {
+                "role": "architect",
+                "mode": "architecture-summary",
+                "prompt_path": arch_spawn.get("prompt_path"),
+                "context_artifact": arch_spawn.get("context_artifact"),
+                "instruction": "Run Architect next, then enki_document_update(role='architect', output={...}).",
+            },
+        ],
+        "next": (
+            "Run PM then Architect via Task tool. After both complete: "
+            "call enki_document_update for each, then call enki_document() again if needed."
+        ),
+    }
+
+
+def enki_document_update(
+    role: str,
+    output: dict,
+    project: str | None = None,
+) -> dict:
+    """Record agent output during documentation generation."""
+    project = _resolve_project(project)
+    active = _require_active_goal(project)
+    if active.get("error"):
+        return active
+
+    artifacts_dir = _goal_artifacts_dir(project)
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    doc_state_path = artifacts_dir / "document-state.json"
+
+    state: dict = {}
+    if doc_state_path.exists():
+        try:
+            state = json.loads(doc_state_path.read_text())
+        except Exception:
+            state = {}
+    state[(role or "").strip().lower()] = output
+    doc_state_path.write_text(json.dumps(state, indent=2))
+
+    if "pm" in state and "architect" in state and "technical-writer" not in state:
+        docs_to_generate = state.get(
+            "docs_to_generate",
+            _detect_required_docs(project, _get_project_path(project) or ""),
+        )
+        spec_path = _get_spec_final_path(project)
+        tw_context = {
+            "mode": "generate-docs",
+            "pm_summary": state["pm"],
+            "architecture_summary": state["architect"],
+            "spec_final_path": str(spec_path) if spec_path else None,
+            "docs_to_generate": docs_to_generate,
+            "project_path": _get_project_path(project),
+            "instruction": (
+                "Generate all requested documentation files under docs/. "
+                "Use PM + Architect summaries as sources."
+            ),
+        }
+        tw_spawn = enki_spawn("technical-writer", "generate-docs", tw_context, project)
+        return {
+            "message": "PM + Architect complete. Technical Writer ready.",
+            "spawn_instructions": [{
+                "role": "technical-writer",
+                "mode": "generate-docs",
+                "prompt_path": tw_spawn.get("prompt_path"),
+                "context_artifact": tw_spawn.get("context_artifact"),
+            }],
+            "next": "Run Technical Writer via Task tool.",
+        }
+
+    if "technical-writer" in state:
+        files_written = output.get("files_written", [])
+        return {
+            "message": f"Documentation complete. {len(files_written)} files written.",
+            "files_written": files_written,
+        }
+
+    return {
+        "message": f"{role} output recorded.",
+        "pending": [r for r in ["pm", "architect"] if r not in state],
     }
 
 
@@ -4096,6 +4678,401 @@ def _build_codebase_context(project: str, assigned_files: list[str]) -> str | No
     return "\n".join(lines)
 
 
+def _load_validate_state(project: str, sprint_id: str) -> dict | None:
+    try:
+        with em_db(project) as conn:
+            row = conn.execute(
+                "SELECT validate_state FROM sprint_state WHERE sprint_id=?",
+                (sprint_id,),
+            ).fetchone()
+            if row and row["validate_state"]:
+                return json.loads(row["validate_state"])
+    except Exception:
+        pass
+    return None
+
+
+def _save_validate_state(project: str, sprint_id: str, state: dict) -> None:
+    try:
+        with em_db(project) as conn:
+            conn.execute(
+                "UPDATE sprint_state SET validate_state=? WHERE sprint_id=?",
+                (json.dumps(state), sprint_id),
+            )
+    except Exception:
+        pass
+
+
+def _bugs_has_column(project: str, col: str) -> bool:
+    try:
+        with em_db(project) as conn:
+            rows = conn.execute("PRAGMA table_info(bugs)").fetchall()
+            return any(r["name"] == col for r in rows)
+    except Exception:
+        return False
+
+
+def _get_draft_bugs(project: str) -> list[dict]:
+    try:
+        with em_db(project) as conn:
+            if _bugs_has_column(project, "severity"):
+                rows = conn.execute(
+                    "SELECT * FROM bugs WHERE status='open' AND severity='draft'"
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM bugs WHERE status='open' AND priority='draft'"
+                ).fetchall()
+            return [dict(r) for r in rows]
+    except Exception:
+        return []
+
+
+def _get_bugs_by_severity(project: str, severities: list[str]) -> list[dict]:
+    if not severities:
+        return []
+    placeholders = ",".join("?" for _ in severities)
+    try:
+        with em_db(project) as conn:
+            if _bugs_has_column(project, "severity"):
+                rows = conn.execute(
+                    f"SELECT * FROM bugs WHERE status='open' AND severity IN ({placeholders})",
+                    severities,
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    f"SELECT * FROM bugs WHERE status='open' AND priority IN ({placeholders})",
+                    severities,
+                ).fetchall()
+            return [dict(r) for r in rows]
+    except Exception:
+        return []
+
+
+def _get_bugs_needing_revalidation(project: str) -> list[dict]:
+    try:
+        with em_db(project) as conn:
+            rows = conn.execute(
+                "SELECT * FROM bugs WHERE reporter_revalidation_required=1 AND status='open'"
+            ).fetchall()
+            return [dict(r) for r in rows]
+    except Exception:
+        return []
+
+
+def _mark_bug_needs_revalidation(project: str, bug_id: str, fix_summary: str) -> None:
+    try:
+        with em_db(project) as conn:
+            if _bugs_has_column(project, "fix_summary"):
+                conn.execute(
+                    "UPDATE bugs SET reporter_revalidation_required=1, "
+                    "revalidation_cycle=revalidation_cycle+1, fix_summary=? WHERE id=?",
+                    (fix_summary, bug_id),
+                )
+            else:
+                conn.execute(
+                    "UPDATE bugs SET reporter_revalidation_required=1, "
+                    "revalidation_cycle=revalidation_cycle+1 WHERE id=?",
+                    (bug_id,),
+                )
+    except Exception:
+        pass
+
+
+def _increment_revalidation_cycle(project: str, bug_id: str) -> None:
+    try:
+        with em_db(project) as conn:
+            conn.execute(
+                "UPDATE bugs SET revalidation_cycle=revalidation_cycle+1 WHERE id=?",
+                (bug_id,),
+            )
+    except Exception:
+        pass
+
+
+def _close_bug(project: str, bug_id: str) -> None:
+    try:
+        with em_db(project) as conn:
+            conn.execute(
+                "UPDATE bugs SET status='closed', reporter_revalidation_required=0 WHERE id=?",
+                (bug_id,),
+            )
+    except Exception:
+        pass
+
+
+def _update_bug_priority(project: str, bug_id: str, priority: str) -> None:
+    resolved = resolve_bug_identifier(project, bug_id)
+    internal_id = resolved[0] if resolved else bug_id
+    try:
+        with em_db(project) as conn:
+            if _bugs_has_column(project, "severity"):
+                conn.execute(
+                    "UPDATE bugs SET severity=?, priority=? WHERE id=?",
+                    (priority, priority, internal_id),
+                )
+            else:
+                conn.execute(
+                    "UPDATE bugs SET priority=? WHERE id=?",
+                    (priority, internal_id),
+                )
+    except Exception:
+        pass
+
+
+def _escalate_bug(project: str, bug_id: str) -> None:
+    try:
+        with em_db(project) as conn:
+            conn.execute("UPDATE bugs SET status='escalated' WHERE id=?", (bug_id,))
+    except Exception:
+        pass
+
+
+def _file_bug(
+    project: str,
+    title: str,
+    description: str,
+    severity: str,
+    filed_by: str,
+    reporter: str,
+    affected_files: list[str] | None = None,
+) -> str | None:
+    affected_files = affected_files or []
+    try:
+        bug_id = file_bug(
+            project=project,
+            title=title,
+            description=description,
+            filed_by=filed_by,
+            priority=severity,
+        )
+        try:
+            with em_db(project) as conn:
+                if _bugs_has_column(project, "reporter"):
+                    conn.execute("UPDATE bugs SET reporter=? WHERE id=?", (reporter, bug_id))
+                if _bugs_has_column(project, "affected_files"):
+                    conn.execute(
+                        "UPDATE bugs SET affected_files=? WHERE id=?",
+                        (json.dumps(affected_files), bug_id),
+                    )
+        except Exception:
+            pass
+        return bug_id
+    except Exception:
+        return None
+
+
+def _bug_reporter(bug: dict) -> str:
+    reporter = bug.get("reporter") or bug.get("filed_by") or "infosec"
+    return str(reporter)
+
+
+def _bug_affected_files(bug: dict) -> list[str]:
+    files = bug.get("affected_files", [])
+    if isinstance(files, str):
+        try:
+            decoded = json.loads(files)
+            if isinstance(decoded, list):
+                return [str(x) for x in decoded]
+        except Exception:
+            return []
+    if isinstance(files, list):
+        return [str(x) for x in files]
+    return []
+
+
+def _generate_sprint_summary(project: str, sprint_id: str) -> dict:
+    try:
+        with em_db(project) as conn:
+            tasks = conn.execute(
+                "SELECT status, COUNT(*) as c FROM task_state "
+                "WHERE sprint_id=? GROUP BY status",
+                (sprint_id,),
+            ).fetchall()
+            task_counts = {r["status"]: r["c"] for r in tasks}
+            bugs = conn.execute(
+                "SELECT priority, status, COUNT(*) as c FROM bugs "
+                "WHERE project_id=? GROUP BY priority, status",
+                (project,),
+            ).fetchall()
+            bug_summary = {f"{r['priority']}_{r['status']}": r["c"] for r in bugs}
+        return {
+            "sprint_id": sprint_id,
+            "tasks": task_counts,
+            "bugs": bug_summary,
+            "total_tasks": sum(task_counts.values()),
+            "completed_tasks": task_counts.get("completed", 0),
+            "failed_tasks": task_counts.get("failed", 0),
+        }
+    except Exception:
+        return {"sprint_id": sprint_id, "error": "summary generation failed"}
+
+
+def _merge_all_worktrees(project: str, project_path: str) -> dict:
+    _ = project
+    results = {}
+    worktrees_dir = Path(project_path) / ".worktrees"
+    if not worktrees_dir.exists():
+        return {"message": "No worktrees directory found"}
+    for wt in worktrees_dir.iterdir():
+        if wt.is_dir():
+            try:
+                r = subprocess.run(
+                    ["git", "worktree", "remove", "--force", str(wt)],
+                    cwd=project_path,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                results[wt.name] = "removed" if r.returncode == 0 else (r.stderr or r.stdout)[:200]
+            except Exception as e:
+                results[wt.name] = str(e)
+    return results
+
+
+def _merge_sprint_to_main(project: str, project_path: str) -> dict:
+    try:
+        sprint = get_active_sprint(project)
+        if not sprint:
+            return {"message": "No active sprint"}
+        sprint_branch = _get_sprint_base_branch(project, sprint["sprint_id"])
+        if not sprint_branch or sprint_branch in ("main", "master"):
+            return {"message": "Sprint already on main/master"}
+        checkout = subprocess.run(
+            ["git", "checkout", "main"],
+            cwd=project_path,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if checkout.returncode != 0:
+            return {"merged": False, "output": (checkout.stderr or checkout.stdout)[:200]}
+        r = subprocess.run(
+            ["git", "merge", sprint_branch, "--no-ff", "-m", f"Merge {sprint_branch} into main"],
+            cwd=project_path,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        return {
+            "merged": r.returncode == 0,
+            "branch": sprint_branch,
+            "output": (r.stdout if r.returncode == 0 else r.stderr)[:200],
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def _merge_sprint_branch(project: str, sprint_id: str) -> dict:
+    project_path = _get_project_path(project)
+    if not project_path:
+        return {"merged": False, "warning": "project path not registered"}
+    _ = sprint_id
+    return _merge_sprint_to_main(project, project_path)
+
+
+def _git_push_main(project_path: str) -> dict:
+    try:
+        r = subprocess.run(
+            ["git", "push", "origin", "main"],
+            cwd=project_path,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if r.returncode != 0:
+            err = (r.stderr or r.stdout or "").lower()
+            if "no configured push destination" in err or "no such remote" in err:
+                return {"pushed": False, "warning": (r.stderr or r.stdout)[:200]}
+        return {
+            "pushed": r.returncode == 0,
+            "output": (r.stdout if r.returncode == 0 else r.stderr)[:200],
+        }
+    except Exception as e:
+        return {"warning": str(e)}
+
+
+def _detect_required_docs(project: str, project_path: str) -> list[str]:
+    docs = [
+        "README.md",
+        "CLAUDE.md",
+        "docs/HANDOVER.md",
+        "docs/ARCHITECTURE.md",
+        "docs/SECURITY.md",
+        "docs/FEATURES.md",
+        "docs/TESTING.md",
+        "docs/CONTRIBUTING.md",
+    ]
+    try:
+        with em_db(project) as conn:
+            count = conn.execute("SELECT COUNT(*) as c FROM pm_decisions").fetchone()["c"]
+            if count > 0:
+                docs.append("docs/ADR/")
+    except Exception:
+        pass
+
+    if not project_path:
+        return docs
+
+    try:
+        all_files = []
+        for root, dirs, files in os.walk(project_path):
+            dirs[:] = [
+                d for d in dirs if d not in {
+                    "node_modules", ".git", "__pycache__", ".venv",
+                    "dist", "build", ".worktrees",
+                }
+            ]
+            for f in files:
+                all_files.append(os.path.join(root, f))
+
+        file_str = " ".join(all_files).lower()
+        tech_stack_raw = read_project_state(project, "tech_stack") or "{}"
+        try:
+            tech_stack = json.loads(tech_stack_raw)
+        except Exception:
+            tech_stack = {}
+        combined = file_str + " " + str(tech_stack).lower()
+
+        if any(x in combined for x in [
+            "fastapi", "express", "nestjs", "django", "flask",
+            "fastify", "routes", "endpoints", "swagger",
+        ]):
+            docs.append("docs/API.md")
+        if any(x in combined for x in [
+            "llm", "openai", "anthropic", "prompt", "embedding",
+            "agent", "langchain",
+        ]):
+            docs.append("docs/AGENTS.md")
+        ui_files = [f for f in all_files if f.endswith((".tsx", ".jsx", ".vue", ".svelte"))]
+        if len(ui_files) > 3:
+            docs.append("docs/COMPONENTS.md")
+        if any(x in combined for x in [
+            "click", "argparse", "commander", "yargs", "cli.py", "bin/", "#!/usr/bin",
+        ]):
+            docs.append("docs/CLI.md")
+        if any(x in file_str for x in [
+            "dockerfile", "docker-compose", "kubernetes", ".yaml", "terraform", "heroku", "vercel",
+        ]):
+            docs.append("docs/OPERATIONS.md")
+            docs.append("docs/DEPLOYMENT.md")
+        db_files = [f for f in all_files if any(x in f.lower() for x in ["schema", "migration", "model", "entity", ".sql"])]
+        if len(db_files) > 3:
+            docs.append("docs/DATA_MODEL.md")
+        if len(all_files) > 50:
+            docs.append("docs/TROUBLESHOOTING.md")
+        try:
+            with em_db(project) as conn:
+                sprint_count = conn.execute("SELECT COUNT(*) as c FROM sprint_state").fetchone()["c"]
+                if sprint_count > 1:
+                    docs.append("CHANGELOG.md")
+        except Exception:
+            pass
+    except Exception:
+        pass
+    return list(dict.fromkeys(docs))
+
+
 def _propose_specialist_panel(project: str, impl_spec: dict) -> dict:
     """Analyse impl spec and propose a specialist panel with reasoning."""
     tasks = impl_spec.get("tasks", [])
@@ -4402,6 +5379,8 @@ def _phase_missing_preconditions(
         if not _all_wave_tasks_completed(project):
             return "all waves completed"
     elif target == "complete":
+        if current == "closing":
+            return None
         if not _has_hitl_approval(project, "test"):
             return "HITL approval record for stage 'test'"
         if not _has_validator_signoff(project, goal_id):
@@ -4415,6 +5394,7 @@ def _phase_required_next(phase: str) -> str:
         "approved": "Complete architecture and record HITL approval with enki_approve(stage='architect').",
         "implement": "Execute waves with enki_wave until all tasks complete.",
         "validating": "Spawn validator, record sign-off, then enki_approve(stage='test').",
+        "closing": "Run enki_project_close(), optionally enki_document(), then HITL accept and advance to complete.",
         "complete": "Pipeline complete.",
     }
     return hints.get(phase, "Continue pipeline.")

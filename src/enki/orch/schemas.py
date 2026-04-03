@@ -34,6 +34,33 @@ def migrate_add_model_used(conn) -> None:
         pass
 
 
+def migrate_add_revalidation_fields(conn) -> None:
+    try:
+        conn.execute(
+            "ALTER TABLE bugs ADD COLUMN "
+            "reporter_revalidation_required INTEGER DEFAULT 0"
+        )
+    except Exception:
+        pass
+    try:
+        conn.execute(
+            "ALTER TABLE bugs ADD COLUMN "
+            "revalidation_cycle INTEGER DEFAULT 0"
+        )
+    except Exception:
+        pass
+    conn.commit()
+
+
+def migrate_add_sprint_summary(conn) -> None:
+    for col in ["summary", "validate_state"]:
+        try:
+            conn.execute(f"ALTER TABLE sprint_state ADD COLUMN {col} TEXT")
+        except Exception:
+            pass
+    conn.commit()
+
+
 def create_tables(conn) -> None:
     """Create em.db tables."""
 
@@ -168,10 +195,13 @@ def create_tables(conn) -> None:
             dependencies TEXT,
             started_at TIMESTAMP,
             completed_at TIMESTAMP,
-            impl_council_state TEXT
+            impl_council_state TEXT,
+            summary TEXT,
+            validate_state TEXT
         )
     """)
     migrate_add_impl_council_state(conn)
+    migrate_add_sprint_summary(conn)
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS bugs (
@@ -187,6 +217,8 @@ def create_tables(conn) -> None:
             description TEXT NOT NULL,
             status TEXT DEFAULT 'open',
             mail_message_id TEXT,
+            reporter_revalidation_required INTEGER DEFAULT 0,
+            revalidation_cycle INTEGER DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             resolved_at TIMESTAMP,
             FOREIGN KEY (mail_message_id) REFERENCES mail_messages(id)
@@ -196,6 +228,7 @@ def create_tables(conn) -> None:
         conn.execute("ALTER TABLE bugs ADD COLUMN bug_number INTEGER")
     except Exception:
         pass
+    migrate_add_revalidation_fields(conn)
 
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_bugs_project "

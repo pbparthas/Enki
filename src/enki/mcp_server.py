@@ -146,7 +146,7 @@ async def list_tools() -> list[Tool]:
                     },
                     "to": {
                         "type": "string",
-                        "enum": ["planning", "spec", "approved", "implement", "validating", "complete"],
+                        "enum": ["planning", "spec", "approved", "implement", "validating", "closing", "complete"],
                         "description": "Target phase for advance",
                     },
                     "project": {"type": "string", "default": "default"},
@@ -410,7 +410,76 @@ async def list_tools() -> list[Tool]:
                 "type": "object",
                 "properties": {
                     "project": {"type": "string", "default": "default"},
+                    "is_final_sprint": {"type": "boolean"},
                 },
+            },
+        ),
+        Tool(
+            name="enki_validate",
+            description=(
+                "Run resumable validation state machine for sprint or project scope. "
+                "Handles auditing, bug prioritization, fix loops, and reporter revalidation."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "scope": {
+                        "type": "string",
+                        "enum": ["sprint", "project"],
+                        "default": "sprint",
+                    },
+                    "project": {"type": "string", "default": "default"},
+                },
+            },
+        ),
+        Tool(
+            name="enki_validate_update",
+            description="Record auditor/fixer outputs during enki_validate workflow.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "role": {"type": "string"},
+                    "output": {"type": "object"},
+                    "project": {"type": "string", "default": "default"},
+                },
+                "required": ["role", "output"],
+            },
+        ),
+        Tool(
+            name="enki_project_close",
+            description=(
+                "Close project after project-level validation: merge worktrees, merge sprint branch, "
+                "push main, run final wrap, and mark phase closing."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "project": {"type": "string", "default": "default"},
+                },
+            },
+        ),
+        Tool(
+            name="enki_document",
+            description="Start project documentation generation workflow.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "project": {"type": "string", "default": "default"},
+                    "docs": {"type": "array", "items": {"type": "string"}},
+                },
+            },
+        ),
+        Tool(
+            name="enki_document_update",
+            description="Record document generation agent outputs and trigger technical writer stage.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "role": {"type": "string"},
+                    "output": {"type": "object"},
+                    "project": {"type": "string", "default": "default"},
+                },
+                "required": ["role", "output"],
             },
         ),
         Tool(
@@ -822,6 +891,53 @@ def _handle_sprint_close(args: dict) -> str:
     from .mcp.orch_tools import enki_sprint_close
     result = enki_sprint_close(
         project=args.get("project", "default"),
+        is_final_sprint=args.get("is_final_sprint"),
+    )
+    return json.dumps(result, indent=2)
+
+
+def _handle_validate(args: dict) -> str:
+    from .mcp.orch_tools import enki_validate
+    result = enki_validate(
+        scope=args.get("scope", "sprint"),
+        project=args.get("project", "default"),
+    )
+    return json.dumps(result, indent=2)
+
+
+def _handle_validate_update(args: dict) -> str:
+    from .mcp.orch_tools import enki_validate_update
+    result = enki_validate_update(
+        role=args["role"],
+        output=args["output"],
+        project=args.get("project", "default"),
+    )
+    return json.dumps(result, indent=2)
+
+
+def _handle_project_close(args: dict) -> str:
+    from .mcp.orch_tools import enki_project_close
+    result = enki_project_close(
+        project=args.get("project", "default"),
+    )
+    return json.dumps(result, indent=2)
+
+
+def _handle_document(args: dict) -> str:
+    from .mcp.orch_tools import enki_document
+    result = enki_document(
+        project=args.get("project", "default"),
+        docs=args.get("docs"),
+    )
+    return json.dumps(result, indent=2)
+
+
+def _handle_document_update(args: dict) -> str:
+    from .mcp.orch_tools import enki_document_update
+    result = enki_document_update(
+        role=args["role"],
+        output=args["output"],
+        project=args.get("project", "default"),
     )
     return json.dumps(result, indent=2)
 
@@ -957,6 +1073,11 @@ TOOL_HANDLERS = {
     "enki_mark_blocked": _handle_mark_blocked,
     "enki_sprint_summary": _handle_sprint_summary,
     "enki_sprint_close": _handle_sprint_close,
+    "enki_validate": _handle_validate,
+    "enki_validate_update": _handle_validate_update,
+    "enki_project_close": _handle_project_close,
+    "enki_document": _handle_document,
+    "enki_document_update": _handle_document_update,
     "enki_wave_reconcile": _handle_wave_reconcile,
     "enki_diagram": _handle_diagram,
     "enki_status_update": _handle_status_update,
