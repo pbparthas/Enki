@@ -3680,9 +3680,80 @@ def enki_validate(
                 "completed": audits_complete,
                 "pending": pending,
             }
+
+        if state.get("scope") == "project" and "codex-reviewer" not in audits_complete:
+            project_path = _get_project_path(project) or ""
+            modified_files = _get_sprint_modified_files(project, sprint_id)
+            spec_path = _get_spec_final_path(project)
+            impl_spec_path = _get_impl_spec_path(project)
+            spec_content = _read_text_safe(spec_path)
+            impl_content = _read_text_safe(impl_spec_path)
+            codex_result = _spawn_codex_reviewer(
+                project=project,
+                spec_content=spec_content,
+                impl_spec_content=impl_content,
+                modified_files=modified_files,
+                project_path=project_path,
+            )
+            if codex_result:
+                state["codex_review"] = codex_result
+                audits_complete.append("codex-reviewer")
+                state["audits_complete"] = audits_complete
+                _save_validate_state(project, sprint_id, state)
+
+                reconcile_context = {
+                    "mode": "multi-model-reconcile",
+                    "review_a": state.get("reviewer_output", {}),
+                    "review_b": state.get("infosec_output", {}),
+                    "review_c": codex_result,
+                    "instruction": (
+                        "Three independent reviewers have reviewed the codebase. "
+                        "Their outputs are labeled Review A, B, C (not by reviewer identity). "
+                        "Identify: (1) agreements — issues all/most found (high confidence, file as bugs), "
+                        "(2) disagreements — only one reviewer found (present to HITL). "
+                        "Output JSON: {agreements: [...], disagreements: [...], "
+                        "bugs_to_file: [{title, description, severity, files}]}"
+                    ),
+                }
+                arch_spawn = enki_spawn(
+                    "architect",
+                    f"{sprint_id}-reconcile",
+                    reconcile_context,
+                    project,
+                )
+                state["status"] = "reconciling"
+                _save_validate_state(project, sprint_id, state)
+                return {
+                    "message": "Codex review complete. Architect reconciliation required.",
+                    "spawn_instructions": [{
+                        "role": "architect",
+                        "mode": "multi-model-reconcile",
+                        "task_id": f"{sprint_id}-reconcile",
+                        "prompt_path": arch_spawn.get("prompt_path"),
+                        "context_artifact": arch_spawn.get("context_artifact"),
+                    }],
+                    "next": (
+                        "Run Architect via Task tool. After completion: "
+                        "call enki_validate_update(role='architect-reconcile', output={...})."
+                    ),
+                }
+            state["codex_review"] = None
+            audits_complete.append("codex-reviewer")
+            state["audits_complete"] = audits_complete
+            _save_validate_state(project, sprint_id, state)
+
         state["status"] = "prioritizing"
         _save_validate_state(project, sprint_id, state)
         status = "prioritizing"
+
+    if status == "reconciling":
+        return {
+            "message": "Awaiting Architect reconciliation output.",
+            "next": (
+                "Run Architect with the provided reconcile context, then call "
+                "enki_validate_update(role='architect-reconcile', output={...})."
+            ),
+        }
 
     if status == "prioritizing":
         open_bugs = _get_draft_bugs(project)
@@ -3855,6 +3926,7 @@ def enki_validate_update(
         if role_key not in completed:
             completed.append(role_key)
         state["audits_complete"] = completed
+        state[f"{role_key}_output"] = output
 
         bugs_filed = []
         findings = []
@@ -3892,6 +3964,39 @@ def enki_validate_update(
             "message": f"{role_key} output recorded. {len(bugs_filed)} bugs filed.",
             "bugs_filed": bugs_filed,
             "audits_complete": completed,
+        }
+
+    if role_key == "architect-reconcile":
+        bugs_filed = []
+        for issue in output.get("bugs_to_file", []):
+            if not isinstance(issue, dict):
+                continue
+            severity_raw = str(issue.get("severity", "P2")).strip()
+            if severity_raw in ("error", "P0", "blocking"):
+                sev = "P0"
+            elif severity_raw in ("high", "P1"):
+                sev = "P1"
+            elif severity_raw in ("warning", "medium", "P2"):
+                sev = "P2"
+            else:
+                sev = "P3"
+            bug_id = _file_bug(
+                project=project,
+                title=issue.get("title", "Reconciled issue"),
+                description=issue.get("description", ""),
+                severity=sev,
+                filed_by="architect",
+                reporter="architect",
+                affected_files=issue.get("files", []),
+            )
+            if bug_id:
+                bugs_filed.append(bug_id)
+        state["architect_reconcile_output"] = output
+        state["status"] = "awaiting_priority"
+        _save_validate_state(project, sprint_id, state)
+        return {
+            "message": "Architect reconciliation recorded.",
+            "bugs_filed": bugs_filed,
         }
 
     if role_key == "architect":
@@ -5071,6 +5176,113 @@ def _detect_required_docs(project: str, project_path: str) -> list[str]:
     except Exception:
         pass
     return list(dict.fromkeys(docs))
+
+
+def _ensure_config_template() -> None:
+    """Create ~/.enki/config.json template if missing."""
+    config_path = ENKI_ROOT / "config.json"
+    if not config_path.exists():
+        template = {
+            "openrouter_api_key": "YOUR_OPENROUTER_API_KEY",
+            "codex_review_model": "openai/gpt-4o",
+            "telegram_bot_token": "",
+            "telegram_chat_id": "",
+        }
+        try:
+            config_path.write_text(json.dumps(template, indent=2))
+        except Exception:
+            pass
+
+
+def _openrouter_configured() -> bool:
+    """Check if OpenRouter API key is configured."""
+    _ensure_config_template()
+    config_path = ENKI_ROOT / "config.json"
+    if not config_path.exists():
+        return False
+    try:
+        config = json.loads(config_path.read_text())
+        key = config.get("openrouter_api_key", "")
+        return bool(key and key != "YOUR_OPENROUTER_API_KEY")
+    except Exception:
+        return False
+
+
+def _read_text_safe(path_obj: Path | None) -> str:
+    if not path_obj:
+        return ""
+    try:
+        return path_obj.read_text()
+    except Exception:
+        return ""
+
+
+def _spawn_codex_reviewer(
+    project: str,
+    spec_content: str,
+    impl_spec_content: str,
+    modified_files: list[str],
+    project_path: str,
+) -> dict | None:
+    """Run Codex (GPT-4o) code review via OpenRouter."""
+    try:
+        from enki.integrations.openrouter import call_openrouter, normalize_review_output
+    except Exception:
+        return None
+
+    if not _openrouter_configured():
+        return None
+
+    codex_prompt_path = ENKI_ROOT / "prompts" / "codex-reviewer.md"
+    if codex_prompt_path.exists():
+        try:
+            system_prompt = codex_prompt_path.read_text()
+        except Exception:
+            system_prompt = ""
+    else:
+        system_prompt = ""
+    if not system_prompt:
+        system_prompt = (
+            "You are an expert code reviewer. Review the provided codebase "
+            "against the spec. Output JSON matching the reviewer sprint-review schema."
+        )
+
+    file_contents = []
+    for fp in modified_files[:20]:
+        full_path = Path(project_path) / fp
+        try:
+            if full_path.exists() and full_path.stat().st_size < 50000:
+                content = full_path.read_text()[:3000]
+                file_contents.append(f"### {fp}\n```\n{content}\n```")
+        except Exception:
+            pass
+
+    user_message = (
+        f"## Product Spec\n{spec_content[:5000]}\n\n"
+        f"## Implementation Spec\n{impl_spec_content[:3000]}\n\n"
+        f"## Modified Files\n{'\n\n'.join(file_contents)}"
+    )
+
+    result = call_openrouter(
+        system_prompt=system_prompt,
+        user_message=user_message,
+        timeout=180,
+    )
+    if result.get("error"):
+        return {
+            "mode": "sprint-review",
+            "status": "failed",
+            "summary": f"Codex review failed: {result['error']}",
+            "spec_alignment_issues": [],
+            "architectural_issues": [],
+            "quality_violations": [],
+            "approved": True,
+            "notes": "OpenRouter call failed — Codex review skipped",
+        }
+
+    normalized = normalize_review_output(result.get("content", ""))
+    normalized["_model"] = result.get("model", "openai/gpt-4o")
+    return normalized
 
 
 def _propose_specialist_panel(project: str, impl_spec: dict) -> dict:

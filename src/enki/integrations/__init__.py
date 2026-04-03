@@ -1,1 +1,1 @@
-"""Enki integrations — optional connectors to external services."""
+"""Enki external integrations — OpenRouter, Telegram, etc."""
