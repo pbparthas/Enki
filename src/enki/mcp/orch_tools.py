@@ -3918,7 +3918,7 @@ def _phase_missing_preconditions(
             with em_db(project) as conn:
                 open_p0 = conn.execute(
                     "SELECT COUNT(*) as c FROM bugs "
-                    "WHERE project_id=? AND status='open' AND priority='P0'",
+                    "WHERE project_id=? AND status='open' AND (severity='P0' OR priority='P0')",
                     (project,),
                 ).fetchone()["c"]
             if open_p0 > 0:
