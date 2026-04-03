@@ -339,25 +339,65 @@ Sprint-level review and final validation before completion.
 
 ### Exact sequence
 ```
-1. InfoSec sprint-audit (spec-final.md + impl spec + all modified files)
-   enki_spawn('infosec', '{sprint_id}-infosec-audit') → Task tool FOREGROUND → wait
-   enki_report(role='infosec', task_id='{sprint_id}-infosec-audit', summary=..., status='completed')
-   Present InfoSec findings to human
+1. enki_validate(scope='sprint')
+   → Handles: DevOps sprint tests, InfoSec sprint-audit, Reviewer sprint-review
+   → Architect prioritizes all bugs found
+   → Fix loop: Dev → QA execute → Validator → reporter revalidation
+   → HITL validation: file bugs via enki_bug(), then call enki_validate() again
+   → Returns clear when all P0/P1 resolved
 
-2. Reviewer sprint-review (spec-final.md + impl spec + all modified files)
-   enki_spawn('reviewer', '{sprint_id}-sprint-review') → Task tool FOREGROUND → wait
-   enki_report(role='reviewer', task_id='{sprint_id}-sprint-review', summary=..., status='completed')
-   Present Reviewer findings to human
-
-3. Fix P0/P1 issues:
-   For each: enki_spawn('dev', task_id) → fix → QA execute → Validator compliance
-
-4. Wait for verbal approval
-5. enki_approve(stage='test')
-→ Phase advances to 'complete'
+2. enki_sprint_close()
+   → Auto-generates sprint summary (tasks, bugs, coverage)
+   → P2/P3 bugs seeded to next sprint
+   → Merges sprint branch
+   → HITL: "another sprint or close project?"
+     - Another sprint: call enki_goal() to start next sprint
+     - Final sprint: enki_validate(scope='project') → enki_project_close()
 ```
 
+### HITL bug filing during validation
+```
+If you find an issue during review:
+  enki_bug(action='file', title='...', description='...', severity='P1',
+           filed_by='hitl', affected_files=['...'])
+  Do NOT call enki_sprint_close yet
+  Call enki_validate() again — fix loop will pick up the new bug
+```
+
+### NEVER in this phase
+- NEVER spawn InfoSec or Reviewer directly — use enki_validate()
+- NEVER call enki_sprint_close before enki_validate returns clear
+- NEVER fix bugs directly — route through enki_validate fix loop
+
 ---
+
+---
+## PHASE: closing
+
+### What this phase is
+Project wrap-up after all sprints complete and project-level validation cleared.
+Merge, push, memory pipeline, optional documentation, HITL acceptance.
+
+### Exact sequence
+```
+1. enki_project_close()
+   → Merges all worktrees to main
+   → git push origin main
+   → enki_wrap() final memory pipeline
+   → Returns HITL question for project acceptance
+
+2. [Optional] enki_document()
+   → Auto-detects required docs (README, ARCHITECTURE, SECURITY, FEATURES, etc.)
+   → PM project summary → Architect architecture summary → Technical Writer writes all docs
+   → Call after enki_project_close() if documentation is needed
+
+3. HITL reviews final state, then:
+   enki_phase(action='advance', to='complete')
+```
+
+### NEVER in this phase
+- NEVER modify code — all changes must have gone through the pipeline
+- NEVER skip enki_wrap() — it runs inside enki_project_close() automatically
 
 ## PHASE: complete
 
