@@ -93,6 +93,31 @@ def em_db(project: str):
     return connect(path)
 
 
+@contextmanager
+def graph_db(project: str):
+    """Per-project codebase knowledge graph database."""
+    from enki.project_state import normalize_project_name
+
+    project = normalize_project_name(project)
+    db_path = ENKI_ROOT / "projects" / project / "graph.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
+def graph_db_path(project: str) -> Path:
+    from enki.project_state import normalize_project_name
+
+    project = normalize_project_name(project)
+    return ENKI_ROOT / "projects" / project / "graph.db"
+
+
 def get_wisdom_db() -> sqlite3.Connection:
     """Return a configured connection to wisdom.db.
 

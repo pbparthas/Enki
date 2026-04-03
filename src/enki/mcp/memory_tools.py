@@ -168,38 +168,142 @@ def _compute_and_store_embedding(note_id: str, content: str, db: str):
 
 def enki_recall(
     query: str,
-    scope: str = "project",
     project: str | None = None,
     limit: int = 5,
+    scope: str = "all",
 ) -> list[dict]:
-    """Search for relevant knowledge using hybrid search.
+    """Search Enki knowledge and/or structural codebase context.
 
-    Combines FTS5 bm25 + embedding cosine similarity.
-    Searches both wisdom.db (notes) and abzu.db (note_candidates).
-    Abzu results get 0.7 rank multiplier.
-    1-hop link expansion on results.
-    Project-aware ranking when project is specified.
+    scope='knowledge'  -> memory only
+    scope='codebase'   -> graph only
+    scope='all'        -> merged (default)
+
+    Backward compatibility:
+    scope='project'|'global' map to knowledge mode.
     """
     if not query or not query.strip():
         return []
 
-    proj = _resolve_project(project) if scope == "project" else None
+    scope_key = (scope or "all").strip().lower()
+    results: list[dict] = []
 
+    legacy_scope = scope_key in {"project", "global"}
+    if legacy_scope:
+        knowledge_scope = scope_key
+        scope_key = "knowledge"
+    else:
+        knowledge_scope = "project"
+
+    resolved_project = _resolve_project(project)
+
+    if scope_key in {"knowledge", "all"}:
+        try:
+            from enki.embeddings import hybrid_search
+
+            proj = resolved_project if knowledge_scope == "project" else None
+            knowledge_results = hybrid_search(query, project=proj, limit=limit)
+            _update_access_timestamps(
+                [r["note_id"] for r in knowledge_results if r.get("source_db") == "wisdom"]
+            )
+            for r in knowledge_results:
+                r["source"] = "knowledge"
+            results.extend(knowledge_results)
+        except Exception as e:
+            logger.warning("v4 hybrid search failed, falling back to v3: %s", e)
+            try:
+                from enki.memory.abzu import recall
+
+                fallback = recall(
+                    query=query,
+                    scope=knowledge_scope,
+                    project=resolved_project,
+                    limit=limit,
+                )
+                for r in fallback:
+                    r["source"] = "knowledge"
+                results.extend(fallback)
+            except Exception:
+                pass
+
+    if scope_key in {"codebase", "all"}:
+        try:
+            from enki.db import graph_db_path
+
+            if graph_db_path(resolved_project).exists():
+                graph_results = _search_graph(resolved_project, query, limit=limit)
+                for r in graph_results:
+                    r["source"] = "codebase"
+                results.extend(graph_results)
+        except Exception:
+            pass
+
+    return results[: limit * 2]
+
+
+def _search_graph(project: str, query: str, limit: int = 5) -> list[dict]:
+    """Search graph.db for files and symbols matching query."""
+    from enki.db import graph_db
+
+    results = []
+    query_lower = query.lower()
     try:
-        from enki.embeddings import hybrid_search
-        results = hybrid_search(query, project=proj, limit=limit)
+        with graph_db(project) as conn:
+            sym_rows = conn.execute(
+                "SELECT s.name, s.kind, s.file_path, s.complexity, "
+                "s.line_start, b.blast_score, b.risk_level "
+                "FROM symbols s "
+                "LEFT JOIN blast_radius b ON b.symbol_id = s.id "
+                "WHERE LOWER(s.name) LIKE ? "
+                "ORDER BY COALESCE(b.blast_score, -1) DESC "
+                "LIMIT ?",
+                (f"%{query_lower}%", limit),
+            ).fetchall()
 
-        # Update access timestamp for wisdom results
-        _update_access_timestamps(
-            [r["note_id"] for r in results if r.get("source_db") == "wisdom"]
-        )
+            for row in sym_rows:
+                content = (
+                    f"{row['kind']} `{row['name']}` "
+                    f"in {row['file_path']} (line {row['line_start']})"
+                )
+                if row["blast_score"] and row["blast_score"] > 0.2:
+                    content += (
+                        f"\nBlast radius: {row['risk_level'].upper()} "
+                        f"({row['blast_score']:.0%} of codebase imports this)"
+                    )
+                if row["complexity"] and row["complexity"] > 10:
+                    content += f"\nComplexity: {row['complexity']} (high)"
+                results.append({
+                    "content": content,
+                    "category": "codebase_symbol",
+                    "file": row["file_path"],
+                })
 
-        return results
-    except Exception as e:
-        logger.warning("v4 hybrid search failed, falling back to v3: %s", e)
-        # Fallback to v3 recall
-        from enki.memory.abzu import recall
-        return recall(query=query, scope=scope, project=project, limit=limit)
+            file_rows = conn.execute(
+                "SELECT f.path, f.language, f.symbol_count, "
+                "MAX(b.blast_score) as max_blast "
+                "FROM files f "
+                "LEFT JOIN blast_radius b ON b.file_path = f.path "
+                "WHERE LOWER(f.path) LIKE ? "
+                "GROUP BY f.path "
+                "ORDER BY COALESCE(max_blast, -1) DESC "
+                "LIMIT ?",
+                (f"%{query_lower}%", limit),
+            ).fetchall()
+
+            for row in file_rows:
+                content = (
+                    f"{row['path']} ({row['language']}, "
+                    f"{row['symbol_count']} symbols)"
+                )
+                if row["max_blast"] and row["max_blast"] > 0.3:
+                    content += "\nHigh blast radius — changes affect many files"
+                results.append({
+                    "content": content,
+                    "category": "codebase_file",
+                    "file": row["path"],
+                })
+    except Exception:
+        pass
+    return results
 
 
 def _update_access_timestamps(note_ids: list[str]):

@@ -41,6 +41,7 @@ LAYER0_PROTECTED = {
     "abzu.py",
     "sanitization.py",
     "sanitization_patterns.json",
+    "drift-patterns.json",
     "verification.py",
     "hook_versioning.py",
     "test_approval.py",
@@ -65,6 +66,8 @@ LAYER0_PROTECTED = {
     "devops.md",
     "performance.md",
     "researcher.md",
+    "codex-reviewer.md",
+    "security-architect.md",
     "em.md",
 }
 
@@ -72,6 +75,7 @@ LAYER0_PROTECTED = {
 LAYER0_PROTECTED_PATHS = [
     ENKI_ROOT / "hooks",
     ENKI_ROOT / "prompts",
+    ENKI_ROOT / "config.json",
     # Hook source files in scripts/hooks — CC must never edit these
     REPO_ROOT / "scripts" / "hooks",
 ]
