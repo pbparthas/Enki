@@ -3540,6 +3540,7 @@ def enki_graph_query(
 def enki_validate(
     scope: str = "sprint",
     project: str | None = None,
+    hitl_confirmed: bool = False,
 ) -> dict:
     """Validation state machine for sprint-end and project-end."""
     project = _resolve_project(project)
@@ -3800,6 +3801,31 @@ def enki_validate(
 
     if status == "awaiting_priority":
         blocking_bugs = _get_bugs_by_severity(project, ["P0", "P1"])
+        if not hitl_confirmed:
+            return {
+                "message": (
+                    f"Architect priority review complete. "
+                    f"{len(blocking_bugs)} P0/P1 bug(s) require fixing. "
+                    "Review the prioritized bug list and confirm to proceed."
+                ),
+                "blocking_bugs": len(blocking_bugs),
+                "p0p1_bugs": [
+                    {
+                        "id": b["id"],
+                        "title": b.get("title"),
+                        "priority": b.get("priority"),
+                    }
+                    for b in blocking_bugs
+                ],
+                "hitl_required": True,
+                "next": (
+                    "Review bugs above. "
+                    "Call enki_validate(hitl_confirmed=True) to start the fix loop."
+                    if blocking_bugs else
+                    "No P0/P1 bugs found. "
+                    "Call enki_validate(hitl_confirmed=True) to complete validation."
+                ),
+            }
         state["status"] = "fixing" if blocking_bugs else "clear"
         _save_validate_state(project, sprint_id, state)
         status = state["status"]
@@ -3851,6 +3877,27 @@ def enki_validate(
     if status == "revalidating":
         needs_revalidation = _get_bugs_needing_revalidation(project)
         if not needs_revalidation:
+            still_open = [
+                b for b in _get_bugs_by_severity(project, ["P0", "P1"])
+                if b.get("status") != "closed"
+            ]
+            if still_open:
+                state["status"] = "fixing"
+                _save_validate_state(project, sprint_id, state)
+                return {
+                    "error": (
+                        f"{len(still_open)} P0/P1 bug(s) still open in DB. "
+                        "Fix loop must continue."
+                    ),
+                    "still_open": [
+                        {
+                            "id": b["id"],
+                            "title": b.get("title"),
+                            "priority": b.get("priority"),
+                        }
+                        for b in still_open
+                    ],
+                }
             state["status"] = "clear"
             _save_validate_state(project, sprint_id, state)
             status = "clear"
@@ -3930,14 +3977,23 @@ def enki_validate_update(
 
         bugs_filed = []
         findings = []
-        for key in ("violations", "spec_gaps", "pattern_issues", "architectural_issues"):
+        for key in (
+            "violations",
+            "spec_gaps",
+            "pattern_issues",
+            "architectural_issues",
+            "cross_cutting_issues",
+            "quality_violations",
+        ):
             val = output.get(key, [])
             if isinstance(val, list):
                 findings.extend(val)
         for issue in findings:
             if not isinstance(issue, dict):
                 continue
-            severity_raw = str(issue.get("severity", "P2")).strip()
+            severity_raw = str(
+                issue.get("severity", issue.get("priority", "P2"))
+            ).strip()
             if severity_raw in ("error", "P0", "blocking"):
                 sev = "P0"
             elif severity_raw in ("high", "P1"):
@@ -3946,10 +4002,23 @@ def enki_validate_update(
                 sev = "P2"
             else:
                 sev = "P3"
+            title = (
+                issue.get("rule")
+                or issue.get("issue")
+                or issue.get("requirement")
+                or issue.get("pattern")
+                or "Untitled finding"
+            )
+            description = (
+                issue.get("description")
+                or issue.get("gap")
+                or issue.get("recommendation")
+                or str(issue)
+            )
             bug_id = _file_bug(
                 project=project,
-                title=issue.get("rule", issue.get("pattern", "Issue")),
-                description=issue.get("description", str(issue)),
+                title=title,
+                description=description,
                 severity=sev,
                 filed_by=role_key,
                 reporter=role_key,
@@ -4074,7 +4143,6 @@ def enki_sprint_summary(sprint_id: str, project: str = ".") -> dict:
 
 def enki_sprint_close(
     project: str | None = None,
-    is_final_sprint: bool | None = None,
 ) -> dict:
     """Close current sprint after validation completes."""
     project = _resolve_project(project)
@@ -4153,13 +4221,14 @@ def enki_sprint_close(
             "fix_p0_p1",
             "advance_validating",
         ],
-        "is_final_sprint": is_final_sprint,
         "next": (
-            "Call enki_validate(scope='project') to run full project validation."
-            if is_final_sprint
-            else "Call enki_goal(description='...') to start next sprint."
+            "HITL decision required: is this the final sprint?\n"
+            "  Yes (final) -> call enki_validate(scope='project') "
+            "then enki_project_close()\n"
+            "  No (more sprints) -> call enki_goal(description='...') "
+            "to start next sprint"
         ),
-        "next_sprint_seed_tasks": [] if is_final_sprint else carried_tasks,
+        "next_sprint_seed_tasks": carried_tasks,
     }
 
 

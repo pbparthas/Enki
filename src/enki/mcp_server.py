@@ -410,7 +410,6 @@ async def list_tools() -> list[Tool]:
                 "type": "object",
                 "properties": {
                     "project": {"type": "string", "default": "default"},
-                    "is_final_sprint": {"type": "boolean"},
                 },
             },
         ),
@@ -429,6 +428,14 @@ async def list_tools() -> list[Tool]:
                         "default": "sprint",
                     },
                     "project": {"type": "string", "default": "default"},
+                    "hitl_confirmed": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": (
+                            "Set True to confirm HITL review and advance "
+                            "from awaiting_priority state."
+                        ),
+                    },
                 },
             },
         ),
@@ -891,7 +898,6 @@ def _handle_sprint_close(args: dict) -> str:
     from .mcp.orch_tools import enki_sprint_close
     result = enki_sprint_close(
         project=args.get("project", "default"),
-        is_final_sprint=args.get("is_final_sprint"),
     )
     return json.dumps(result, indent=2)
 
@@ -901,6 +907,7 @@ def _handle_validate(args: dict) -> str:
     result = enki_validate(
         scope=args.get("scope", "sprint"),
         project=args.get("project", "default"),
+        hitl_confirmed=bool(args.get("hitl_confirmed", False)),
     )
     return json.dumps(result, indent=2)
 
