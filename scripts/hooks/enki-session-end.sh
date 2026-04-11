@@ -48,22 +48,6 @@ except Exception:
     pass
 " 2>>"$LOG" || true
 
-# enki_wrap: transcript -> Ollama extraction -> abzu.db staging -> Gemini review
-echo "$(date -Iseconds) [enki-session-end] running enki_wrap" >> "$LOG" 2>/dev/null || true
-/home/partha/.enki-venv/bin/python -c "
-import sys, os
-sys.path.insert(0, '/home/partha/Desktop/Enki/src')
-try:
-    from enki.mcp.orch_tools import enki_wrap
-    result = enki_wrap()
-    msg = result.get('message', 'wrap complete')
-    candidates = result.get('candidates_extracted', 0)
-    print(f'[enki_wrap] {msg}', file=sys.stderr)
-    print(f'[enki_wrap] candidates_extracted={candidates}', file=sys.stderr)
-except Exception as e:
-    print(f'[enki_wrap] failed: {e}', file=sys.stderr)
-" 2>>"$LOG" || true
-
 if [[ -n "$RESULT" ]]; then
     echo "$RESULT"
 else

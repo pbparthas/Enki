@@ -30,7 +30,14 @@ def test_session_start_context_order_strict(tmp_path):
 
     with patch("enki.session_context.ENKI_ROOT", enki_root), \
          patch("enki.gates.uru.inject_enforcement_context", return_value="uru text"), \
-         patch("enki.memory.abzu.inject_session_start", return_value="memory text"):
+         patch(
+             "enki.mcp.memory_tools.enki_recall",
+             return_value={
+                 "scope": "index",
+                 "total_notes": 12,
+                 "by_category": [{"category": "decision", "count": 5}],
+             },
+         ):
         from enki.session_context import build_session_start_context
         ctx = build_session_start_context("proj-x", "goal-x", "standard", "spec")
 
@@ -38,7 +45,7 @@ def test_session_start_context_order_strict(tmp_path):
     pipeline_idx = ctx.find("# Enki Pipeline — Operational Reference")
     persona_idx = ctx.find("persona text")
     uru_idx = ctx.find("uru text")
-    memory_idx = ctx.find("memory text")
+    memory_idx = ctx.find("Memory available: 12 notes.")
 
     assert -1 not in {orientation_idx, pipeline_idx, persona_idx, uru_idx, memory_idx}
     assert orientation_idx < pipeline_idx < persona_idx < uru_idx < memory_idx
@@ -51,14 +58,21 @@ def test_pipeline_missing_is_graceful(tmp_path):
 
     with patch("enki.session_context.ENKI_ROOT", enki_root), \
          patch("enki.gates.uru.inject_enforcement_context", return_value="uru text"), \
-         patch("enki.memory.abzu.inject_session_start", return_value="memory text"):
+         patch(
+             "enki.mcp.memory_tools.enki_recall",
+             return_value={
+                 "scope": "index",
+                 "total_notes": 7,
+                 "by_category": [{"category": "learning", "count": 3}],
+             },
+         ):
         from enki.session_context import build_session_start_context
         ctx = build_session_start_context("proj-x", "goal-x", "standard", "implement")
 
     assert "## 𒀭 Enki Session — proj-x" in ctx
     assert "persona text" in ctx
     assert "uru text" in ctx
-    assert "memory text" in ctx
+    assert "Memory available: 7 notes." in ctx
     assert "# Enki Pipeline — Operational Reference" not in ctx
 
 

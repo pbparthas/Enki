@@ -7,6 +7,7 @@ Only two paths write to wisdom.db:
 """
 
 import hashlib
+import json
 import re
 import uuid
 from datetime import datetime
@@ -164,6 +165,9 @@ def add_candidate(
     summary: str | None = None,
     source: str = "session",
     session_id: str | None = None,
+    rationale: str | None = None,
+    alternatives_rejected: list[str] | None = None,
+    source_chunk_index: int | None = None,
 ) -> str | None:
     """Add a bead candidate to staging in abzu.db.
 
@@ -198,13 +202,32 @@ def add_candidate(
 
     candidate_id = str(uuid.uuid4())
     with abzu_db() as conn:
-        conn.execute(
-            "INSERT INTO note_candidates "
-            "(id, content, summary, category, project, content_hash, source, session_id) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (candidate_id, content, summary, category, project,
-             content_hash, source, session_id),
-        )
+        try:
+            conn.execute(
+                "INSERT INTO note_candidates "
+                "(id, content, summary, category, project, content_hash, "
+                "source, session_id, rationale, alternatives_rejected, "
+                "source_session, source_chunk_index) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    candidate_id, content, summary, category, project,
+                    content_hash, source, session_id,
+                    rationale,
+                    json.dumps(alternatives_rejected or []),
+                    session_id,
+                    source_chunk_index,
+                ),
+            )
+        except Exception:
+            conn.execute(
+                "INSERT INTO note_candidates "
+                "(id, content, summary, category, project, content_hash, source, session_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    candidate_id, content, summary, category, project,
+                    content_hash, source, session_id,
+                ),
+            )
 
     return candidate_id
 
@@ -303,6 +326,12 @@ def promote(candidate_id: str) -> str | None:
         category=candidate["category"],
         project=candidate.get("project"),
         summary=candidate.get("summary"),
+        rationale=candidate.get("rationale"),
+        alternatives_rejected=_decode_alternatives(
+            candidate.get("alternatives_rejected")
+        ),
+        source_session=candidate.get("session_id") or candidate.get("source_session"),
+        source_chunk_index=candidate.get("source_chunk_index"),
     )
 
     # Update promoted_at
@@ -351,3 +380,17 @@ def promote_batch(candidate_ids: list[str]) -> dict:
         else:
             failed += 1
     return {"promoted": promoted, "failed": failed}
+
+
+def _decode_alternatives(value) -> list[str]:
+    if isinstance(value, list):
+        return value
+    if not value:
+        return []
+    if isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+            return decoded if isinstance(decoded, list) else []
+        except Exception:
+            return []
+    return []

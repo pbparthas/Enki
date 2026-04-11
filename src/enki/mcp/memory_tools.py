@@ -8,6 +8,7 @@ v3 paths retained as fallback until migration complete.
 """
 
 import hashlib
+import json
 import logging
 import os
 import uuid
@@ -167,11 +168,12 @@ def _compute_and_store_embedding(note_id: str, content: str, db: str):
 
 
 def enki_recall(
-    query: str,
+    query: str | None = None,
     project: str | None = None,
     limit: int = 5,
     scope: str = "all",
-) -> list[dict]:
+    files: list[str] | None = None,
+) -> list[dict] | dict:
     """Search Enki knowledge and/or structural codebase context.
 
     scope='knowledge'  -> memory only
@@ -181,20 +183,106 @@ def enki_recall(
     Backward compatibility:
     scope='project'|'global' map to knowledge mode.
     """
+    scope_key = (scope or "all").strip().lower()
+    resolved_project = _resolve_project(project)
+
+    if scope_key == "index":
+        from enki.db import wisdom_db
+
+        with wisdom_db() as conn:
+            rows = conn.execute(
+                "SELECT category, COUNT(*) as cnt "
+                "FROM notes GROUP BY category ORDER BY cnt DESC"
+            ).fetchall()
+            total = sum(r["cnt"] for r in rows)
+
+            recent = []
+            for row in rows:
+                latest = conn.execute(
+                    "SELECT summary, project, created_at FROM notes "
+                    "WHERE category = ? ORDER BY created_at DESC LIMIT 2",
+                    (row["category"],),
+                ).fetchall()
+                for n in latest:
+                    recent.append({
+                        "category": row["category"],
+                        "summary": n["summary"] or "",
+                        "project": n["project"],
+                    })
+
+        return {
+            "scope": "index",
+            "total_notes": total,
+            "by_category": [{"category": r["category"], "count": r["cnt"]} for r in rows],
+            "recent": recent[:8],
+            "hint": (
+                "Call enki_recall(scope='task', files=[...]) for task-specific "
+                "context. Call enki_recall(query='...') for full search."
+            ),
+        }
+
+    if scope_key == "task":
+        requested_files = files or []
+        if not requested_files:
+            return {"error": "scope='task' requires files=[...] parameter"}
+
+        from enki.db import graph_db, graph_db_path, wisdom_db
+
+        relevant_files = set(requested_files)
+        if graph_db_path(resolved_project).exists():
+            try:
+                with graph_db(resolved_project) as gconn:
+                    for f in requested_files[:5]:
+                        blast = gconn.execute(
+                            "SELECT affected_file FROM blast_radius "
+                            "WHERE file_path = ? AND blast_score > 0.2",
+                            (f,),
+                        ).fetchall()
+                        for b in blast:
+                            relevant_files.add(b["affected_file"])
+            except Exception:
+                pass
+
+        results_list = []
+        with wisdom_db() as conn:
+            for f in list(relevant_files)[:10]:
+                fname = Path(f).name
+                rows = conn.execute(
+                    "SELECT id, content, category, summary, rationale, "
+                    "alternatives_rejected, project, created_at "
+                    "FROM notes "
+                    "WHERE content LIKE ? OR summary LIKE ? "
+                    "ORDER BY created_at DESC LIMIT 3",
+                    (f"%{fname}%", f"%{fname}%"),
+                ).fetchall()
+                for r in rows:
+                    note = dict(r)
+                    alt = note.get("alternatives_rejected")
+                    if isinstance(alt, str):
+                        try:
+                            note["alternatives_rejected"] = json.loads(alt)
+                        except Exception:
+                            pass
+                    if note not in results_list:
+                        results_list.append(note)
+
+        return {
+            "scope": "task",
+            "files_searched": list(relevant_files)[:10],
+            "notes": results_list[:12],
+            "count": len(results_list),
+        }
+
     if not query or not query.strip():
         return []
 
-    scope_key = (scope or "all").strip().lower()
     results: list[dict] = []
-
     legacy_scope = scope_key in {"project", "global"}
     if legacy_scope:
         knowledge_scope = scope_key
         scope_key = "knowledge"
     else:
         knowledge_scope = "project"
-
-    resolved_project = _resolve_project(project)
 
     if scope_key in {"knowledge", "all"}:
         try:
@@ -448,6 +536,117 @@ def enki_status(project: str | None = None) -> dict:
         "staging": v4_staging,
         "v3_beads": v3_beads,
         "db_sizes": db_sizes,
+    }
+
+
+def enki_memory_lint(project: str | None = None) -> dict:
+    """Health check for wisdom.db memory. Report-only; never mutates notes."""
+    from datetime import datetime, timedelta
+    from enki.db import wisdom_db
+
+    _ = project
+    issues = {
+        "contradictions": [],
+        "stale": [],
+        "orphans": [],
+        "missing_rationale": [],
+    }
+
+    with wisdom_db() as conn:
+        rows = conn.execute(
+            "SELECT id, summary, created_at FROM notes "
+            "WHERE category = 'decision' "
+            "AND (rationale IS NULL OR rationale = '') "
+            "ORDER BY created_at DESC LIMIT 20"
+        ).fetchall()
+        for r in rows:
+            issues["missing_rationale"].append({
+                "id": r["id"][:8],
+                "summary": r["summary"] or "(no summary)",
+                "created_at": r["created_at"],
+            })
+
+        cutoff = (datetime.now() - timedelta(days=90)).isoformat()
+        rows = conn.execute(
+            "SELECT id, category, summary, created_at FROM notes "
+            "WHERE created_at < ? ORDER BY created_at ASC LIMIT 20",
+            (cutoff,),
+        ).fetchall()
+        for r in rows:
+            age_days = None
+            try:
+                age_days = (datetime.now() - datetime.fromisoformat(r["created_at"])).days
+            except Exception:
+                age_days = 0
+            issues["stale"].append({
+                "id": r["id"][:8],
+                "category": r["category"],
+                "summary": r["summary"] or "(no summary)",
+                "age_days": age_days,
+            })
+
+        rows = conn.execute(
+            "SELECT n.id, n.category, n.summary FROM notes n "
+            "LEFT JOIN note_links l ON n.id = l.source_id "
+            "WHERE l.source_id IS NULL "
+            "LIMIT 20"
+        ).fetchall()
+        for r in rows:
+            issues["orphans"].append({
+                "id": r["id"][:8],
+                "category": r["category"],
+                "summary": r["summary"] or "(no summary)",
+            })
+
+    report_path = (
+        Path.home() / ".enki"
+        / f"memory-lint-{datetime.now().strftime('%Y-%m-%d')}.md"
+    )
+    lines = [
+        f"# Memory lint — {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+        "",
+        "## Summary",
+        f"- Missing rationale (decisions): {len(issues['missing_rationale'])}",
+        f"- Stale notes (90+ days): {len(issues['stale'])}",
+        f"- Orphan notes (no links): {len(issues['orphans'])}",
+        "",
+    ]
+
+    if issues["missing_rationale"]:
+        lines += ["## Decisions missing rationale", ""]
+        for item in issues["missing_rationale"]:
+            lines.append(f"- [{item['id']}] {item['summary']}")
+        lines.append("")
+
+    if issues["stale"]:
+        lines += ["## Stale notes", ""]
+        for item in issues["stale"]:
+            lines.append(
+                f"- [{item['id']}] ({item['category']}, "
+                f"{item['age_days']}d old) {item['summary']}"
+            )
+        lines.append("")
+
+    if issues["orphans"]:
+        lines += ["## Orphan notes (no links)", ""]
+        for item in issues["orphans"]:
+            lines.append(f"- [{item['id']}] ({item['category']}) {item['summary']}")
+        lines.append("")
+
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text("\n".join(lines))
+
+    total_issues = sum(len(v) for v in issues.values())
+    return {
+        "message": f"Memory lint complete. {total_issues} issues found.",
+        "issues": {k: len(v) for k, v in issues.items()},
+        "report_path": str(report_path),
+        "next": (
+            "Review the lint report. "
+            "Missing rationale: add context to those decisions. "
+            "Stale notes: verify still accurate or discard. "
+            "Orphans: connect to related notes or discard."
+        ),
     }
 
 

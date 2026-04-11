@@ -199,7 +199,7 @@ def inject_post_compact(session_id: str, tier: str) -> str:
     return result
 
 
-def finalize_session(session_id: str, project: str) -> None:
+def finalize_session(session_id: str, project: str | None = None) -> dict:
     """Session end: reconcile summaries, extract candidates, run decay."""
     from enki.memory.extraction import extract_candidates
     from enki.memory.retention import run_decay
@@ -223,10 +223,22 @@ def finalize_session(session_id: str, project: str) -> None:
             candidates_extracted += 1
     cleanup_old_summaries(project)
     run_decay()
+    pipeline_result = None
+    try:
+        from enki.session_pipeline import handle_session_end
+
+        pipeline_result = handle_session_end(
+            session_id=session_id,
+            project=project,
+        )
+    except Exception:
+        pipeline_result = None
+
     summary_id = final.get("id") if isinstance(final, dict) else None
     return {
         "candidates_extracted": candidates_extracted,
         "summary_id": summary_id,
+        "pipeline": pipeline_result,
     }
 
 

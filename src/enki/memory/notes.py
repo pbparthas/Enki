@@ -1,6 +1,7 @@
 """notes.py — v4 Notes CRUD + FTS5 search + dedup + ranking."""
 
 import hashlib
+import json
 import uuid
 from datetime import datetime
 
@@ -25,6 +26,10 @@ def create(
     summary: str | None = None,
     tags: str | None = None,
     context: str | None = None,
+    rationale: str | None = None,
+    alternatives_rejected: list[str] | None = None,
+    source_session: str | None = None,
+    source_chunk_index: int | None = None,
 ) -> dict:
     """Create a new note in wisdom.db notes table."""
     if category not in VALID_CATEGORIES:
@@ -64,6 +69,20 @@ def create(
                 now,
             ),
         )
+        try:
+            conn.execute(
+                "UPDATE notes SET rationale=?, alternatives_rejected=?, "
+                "source_session=?, source_chunk_index=? WHERE id=?",
+                (
+                    rationale,
+                    json.dumps(alternatives_rejected or []),
+                    source_session,
+                    source_chunk_index,
+                    note_id,
+                ),
+            )
+        except Exception:
+            pass
 
     return get(note_id)
 

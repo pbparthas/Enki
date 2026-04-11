@@ -210,6 +210,35 @@ class TestEnkiRecall:
             )
             assert isinstance(results, list)
 
+    def test_index_scope_compact_result(self, tmp_enki):
+        with _patch_db(tmp_enki):
+            from enki.db import get_wisdom_db
+            from enki.mcp.memory_tools import enki_recall
+
+            conn = get_wisdom_db()
+            try:
+                conn.execute(
+                    "INSERT INTO notes (id, content, summary, category, content_hash) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (str(uuid.uuid4()), "Use WAL mode", "WAL mode", "decision", "h_dec"),
+                )
+                conn.execute(
+                    "INSERT INTO notes (id, content, summary, category, content_hash) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (str(uuid.uuid4()), "Retry transient failures", "Retry policy", "pattern", "h_pat"),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            result = enki_recall(scope="index")
+            assert isinstance(result, dict)
+            assert result["scope"] == "index"
+            assert "total_notes" in result
+            assert "by_category" in result
+            assert "recent" in result
+            assert len(json.dumps(result).split()) < 300
+
 
 # ---------------------------------------------------------------------------
 # enki_star

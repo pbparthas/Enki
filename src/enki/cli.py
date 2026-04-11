@@ -119,10 +119,12 @@ def cmd_session_end(args):
     print("Step 1: Memory finalization...")
     candidates = 0
     summary_id = None
+    pipeline_result = None
     try:
         mem_result = finalize_session(session_id, project)
         candidates = mem_result.get("candidates_extracted", 0) if isinstance(mem_result, dict) else 0
         summary_id = mem_result.get("summary_id") if isinstance(mem_result, dict) else None
+        pipeline_result = mem_result.get("pipeline") if isinstance(mem_result, dict) else None
         print(f"  Candidates extracted: {candidates}")
         if summary_id:
             print(f"  Final summary: {summary_id[:12]}...")
@@ -145,7 +147,8 @@ def cmd_session_end(args):
 
     # Step 3: Three-loop pipeline (reflector → feedback → regression)
     print("\nStep 3: Session pipeline...")
-    pipeline_result = handle_session_end(session_id, project)
+    if pipeline_result is None:
+        pipeline_result = handle_session_end(session_id, project)
 
     # Loop 1: Reflector
     reflector = pipeline_result.get("reflector") or {}

@@ -20,9 +20,11 @@ def create_tables(conn, db_type: str) -> None:
     if db_type == "wisdom":
         _create_wisdom_tables(conn)
         _create_wisdom_v4_tables(conn)
+        migrate_add_note_rationale_fields(conn)
     elif db_type == "abzu":
         _create_abzu_tables(conn)
         _create_abzu_v4_tables(conn)
+        migrate_add_candidate_rationale_fields(conn)
     else:
         raise ValueError(f"Unknown db_type: {db_type}")
 
@@ -407,6 +409,10 @@ def _create_abzu_v4_tables(conn) -> None:
                 'manual', 'session_end', 'code_scan', 'onboarding', 'rescan', 'em_distill', 'transcript-extraction'
             )),
             session_id TEXT,
+            rationale TEXT,
+            alternatives_rejected TEXT,
+            source_session TEXT,
+            source_chunk_index INTEGER,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
@@ -522,3 +528,39 @@ def _create_abzu_v4_tables(conn) -> None:
             last_rescan TIMESTAMP
         )
     """)
+
+
+def migrate_add_note_rationale_fields(conn) -> None:
+    """Add rationale and source tracking fields to notes table."""
+    for col_def in [
+        "rationale TEXT",
+        "alternatives_rejected TEXT",
+        "source_session TEXT",
+        "source_chunk_index INTEGER",
+    ]:
+        try:
+            conn.execute(f"ALTER TABLE notes ADD COLUMN {col_def}")
+        except Exception:
+            pass
+    try:
+        conn.commit()
+    except Exception:
+        pass
+
+
+def migrate_add_candidate_rationale_fields(conn) -> None:
+    """Add rationale fields to note_candidates staging table."""
+    for col_def in [
+        "rationale TEXT",
+        "alternatives_rejected TEXT",
+        "source_session TEXT",
+        "source_chunk_index INTEGER",
+    ]:
+        try:
+            conn.execute(f"ALTER TABLE note_candidates ADD COLUMN {col_def}")
+        except Exception:
+            pass
+    try:
+        conn.commit()
+    except Exception:
+        pass

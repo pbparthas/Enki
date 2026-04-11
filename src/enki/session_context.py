@@ -284,8 +284,19 @@ def get_abzu_memory_cached(project: str, goal: str, tier: str) -> str:
 
     # Re-run and cache
     try:
-        from enki.memory.abzu import inject_session_start
-        result = (inject_session_start(project, goal, tier) or "").strip()
+        from enki.mcp.memory_tools import enki_recall
+
+        index = enki_recall(scope="index", project=project)
+        if not isinstance(index, dict):
+            return ""
+        categories = ", ".join(
+            f"{c.get('category')}({c.get('count')})"
+            for c in index.get("by_category", [])
+        )
+        result = (
+            f"Memory available: {index.get('total_notes', 0)} notes. "
+            f"Categories: {categories}. Call enki_recall() for details."
+        )
         if result:
             try:
                 cache_path.write_text(result)

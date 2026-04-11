@@ -360,11 +360,12 @@ def run_regression_checks() -> dict:
 # ---------------------------------------------------------------------------
 
 def handle_session_end(session_id: str, project: str | None = None) -> dict:
-    """Execute the full session-end three-loop pipeline.
+    """Execute the full session-end four-loop pipeline.
 
     Loop 1: Reflector → note candidates
     Loop 2: Feedback cycle → max 1 proposal
     Loop 3: Regression checks → flag degradation
+    Loop 4: Transcript extraction + auto-promotion
 
     Graceful degradation: each loop runs independently.
     If one fails, the others still execute.
@@ -374,6 +375,7 @@ def handle_session_end(session_id: str, project: str | None = None) -> dict:
         "reflector": None,
         "feedback": None,
         "regression": None,
+        "promotion": None,
         "errors": [],
     }
 
@@ -400,5 +402,49 @@ def handle_session_end(session_id: str, project: str | None = None) -> dict:
         msg = f"Regression check failed: {e}"
         logger.error(msg)
         results["errors"].append(msg)
+
+    # Loop 4: Transcript extraction (Gemini) + auto-promotion
+    try:
+        from enki.memory.transcript_extractor import extract_from_session
+        from enki.memory.staging import add_candidate, list_candidates, promote_batch
+
+        extracted = extract_from_session(session_id, project)
+        extraction_count = 0
+        for item in extracted:
+            cid = add_candidate(
+                content=item["content"],
+                category=item["category"],
+                project=project,
+                summary=item.get("summary"),
+                source="session_end",
+                session_id=session_id,
+                rationale=item.get("rationale"),
+                alternatives_rejected=item.get("alternatives_rejected", []),
+                source_chunk_index=item.get("source_chunk_index"),
+            )
+            if cid:
+                extraction_count += 1
+
+        all_staged = list_candidates(limit=500)
+        if all_staged:
+            ids = [c["id"] for c in all_staged]
+            promotion_result = promote_batch(ids)
+            results["promotion"] = {
+                "extracted": extraction_count,
+                "promoted": promotion_result["promoted"],
+                "failed": promotion_result["failed"],
+            }
+        else:
+            results["promotion"] = {
+                "extracted": extraction_count,
+                "promoted": 0,
+                "failed": 0,
+            }
+
+    except Exception as e:
+        msg = f"Transcript extraction/promotion failed: {e}"
+        logger.error(msg)
+        results["errors"].append(msg)
+        results["promotion"] = None
 
     return results

@@ -64,14 +64,18 @@ async def list_tools() -> list[Tool]:
                     "query": {"type": "string", "description": "Search query"},
                     "scope": {
                         "type": "string",
-                        "enum": ["knowledge", "codebase", "all", "project", "global"],
+                        "enum": ["knowledge", "codebase", "all", "project", "global", "index", "task"],
                         "description": "Search scope (default: all). project/global kept for backward compatibility.",
                         "default": "all",
                     },
                     "project": {"type": "string", "description": "Optional project filter"},
                     "limit": {"type": "integer", "description": "Max results", "default": 5},
+                    "files": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "File paths for scope='task' targeted recall",
+                    },
                 },
-                "required": ["query"],
             },
         ),
         Tool(
@@ -102,6 +106,16 @@ async def list_tools() -> list[Tool]:
                 "type": "object",
                 "properties": {
                     "project": {"type": "string", "description": "Optional project ID"},
+                },
+            },
+        ),
+        Tool(
+            name="enki_memory_lint",
+            description="Run wisdom.db memory health checks and write a report under ~/.enki/.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "project": {"type": "string", "description": "Optional project scope hint"},
                 },
             },
         ),
@@ -681,11 +695,14 @@ def _handle_remember(args: dict) -> str:
 def _handle_recall(args: dict) -> str:
     from .mcp.memory_tools import enki_recall
     results = enki_recall(
-        query=args["query"],
+        query=args.get("query"),
         project=args.get("project"),
         limit=args.get("limit", 5),
         scope=args.get("scope", "all"),
+        files=args.get("files"),
     )
+    if isinstance(results, dict):
+        return json.dumps(results, indent=2)
     if not results:
         return "No relevant knowledge found."
     lines = [f"Found {len(results)} results:\n"]
@@ -711,6 +728,13 @@ def _handle_status(args: dict) -> str:
 def _handle_restore(args: dict) -> str:
     from .mcp.memory_tools import enki_restore
     result = enki_restore(project=args.get("project"))
+    return json.dumps(result, indent=2)
+
+
+def _handle_memory_lint(args: dict) -> str:
+    from .mcp.memory_tools import enki_memory_lint
+
+    result = enki_memory_lint(project=args.get("project"))
     return json.dumps(result, indent=2)
 
 
@@ -1062,6 +1086,7 @@ TOOL_HANDLERS = {
     "enki_star": _handle_star,
     "enki_status": _handle_status,
     "enki_restore": _handle_restore,
+    "enki_memory_lint": _handle_memory_lint,
     "enki_goal": _handle_goal,
     "enki_phase": _handle_phase,
     "enki_approve": _handle_approve,

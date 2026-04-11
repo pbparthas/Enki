@@ -39,7 +39,12 @@ def tmp_dbs(tmp_path, monkeypatch):
         create_uru_tables(conn)
 
     # Create abzu.db tables (note_candidates)
-    from enki.db import get_abzu_db
+    from enki.db import get_abzu_db, wisdom_db
+    from enki.memory.schemas import create_tables as create_memory_tables
+
+    with wisdom_db() as conn:
+        create_memory_tables(conn, "wisdom")
+
     conn = get_abzu_db()
     try:
         conn.execute("""
@@ -500,6 +505,27 @@ class TestHandleSessionEnd:
         assert result["reflector"]["candidates_created"] >= 2
         assert result["feedback"]["proposal_id"] is not None
         assert result["errors"] == []
+
+    def test_auto_promotion_runs_even_with_zero_extraction(self, tmp_dbs, monkeypatch):
+        monkeypatch.setattr(
+            "enki.memory.transcript_extractor.extract_from_session",
+            MagicMock(return_value=[]),
+        )
+        monkeypatch.setattr(
+            "enki.memory.staging.list_candidates",
+            MagicMock(return_value=[{"id": "c1"}, {"id": "c2"}]),
+        )
+        monkeypatch.setattr(
+            "enki.memory.staging.promote_batch",
+            MagicMock(return_value={"promoted": 2, "failed": 0}),
+        )
+
+        result = handle_session_end("test-sid", project="test")
+        assert result["promotion"] == {
+            "extracted": 0,
+            "promoted": 2,
+            "failed": 0,
+        }
 
 
 # ---------------------------------------------------------------------------
